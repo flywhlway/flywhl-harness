@@ -139,7 +139,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const s = V.detail?.session;
     const title = s?.title || "新任务";
     $("#s-title", header).textContent = title;
-    document.title = `${title} · flywhl`;
+    document.title = `${title} · flywhl harness`;
     $("#s-status", header).innerHTML = V.run ? statusBadge(V.run.status) : "";
     $("#s-meta", header).innerHTML = V.run ? `<span class="mono">${esc(fmt.shortId(V.run.id))}</span>${V.run.attempt > 1 ? `<span>· 第 ${V.run.attempt} 次尝试</span>` : ""}` : "";
     const mode = modeOf(s?.meta?.mode || app.info.mode);

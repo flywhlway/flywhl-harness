@@ -15,7 +15,7 @@ function pageShell(root, { title, iconName }) {
   const inner = h("div", { class: "page-inner" });
   page.append(inner);
   root.append(header, page);
-  document.title = `${title} · flywhl`;
+  document.title = `${title} · flywhl harness`;
   return { header, inner, actions: $("#pg-actions", header) };
 }
 

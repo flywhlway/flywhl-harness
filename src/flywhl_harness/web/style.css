@@ -18,6 +18,7 @@
   --text-inverse: #ffffff;
 
   /* ---- 品牌与语义色 ---- */
+  --logo: #2563eb;             /* 标识色：与交互蓝同色相，保证标识与界面是一套配色 */
   --brand: #2563eb;
   --brand-solid: #2563eb;      /* 实心按钮底色：白字 5.2:1 */
   --brand-hover: #1d4ed8;
@@ -86,6 +87,7 @@
   --text-2: #a9b3c4;
   --text-3: #8793a7;
   --text-inverse: #0b0f16;
+  --logo: #4c8dff;
   --brand: #4c8dff;
   --brand-solid: #2b6cdf;      /* 深色下实心按钮改用更深的蓝：白字 4.9:1 */
   --brand-hover: #6aa0ff;
@@ -113,7 +115,7 @@
   :root[data-theme="system"] {
     --bg: #0b0f16; --surface: #111722; --surface-2: #161d2a; --surface-3: #1d2534; --border: #222b3a; --border-strong: #334155;
     --text: #e7ebf2; --text-2: #a9b3c4; --text-3: #8793a7; --text-inverse: #0b0f16;
-    --brand: #4c8dff; --brand-solid: #2b6cdf; --brand-hover: #6aa0ff; --brand-soft: rgba(76, 141, 255, .14); --brand-text: #7aa9ff;
+    --logo: #4c8dff; --brand: #4c8dff; --brand-solid: #2b6cdf; --brand-hover: #6aa0ff; --brand-soft: rgba(76, 141, 255, .14); --brand-text: #7aa9ff;
     --success: #3fb950; --success-soft: rgba(63, 185, 80, .13); --warning: #d6a23a; --warning-soft: rgba(214, 162, 58, .14);
     --danger: #f2655e; --danger-solid: #c93a33; --danger-hover: #ff7d77; --danger-soft: rgba(242, 101, 94, .14); --info: #58a6ff; --info-soft: rgba(88, 166, 255, .13);
     --diff-add: rgba(63, 185, 80, .14); --diff-del: rgba(242, 101, 94, .14);
@@ -260,13 +262,14 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
   background: var(--surface); border-right: 1px solid var(--border);
 }
 .sidebar-head { height: var(--header-h); display: flex; align-items: center; padding: 0 var(--sp-4); flex: none; }
-.brand { display: flex; align-items: center; gap: 10px; color: var(--text); }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--text); min-width: 0; }
 .brand:hover { text-decoration: none; }
-.brand-mark { width: 26px; height: 26px; border-radius: 7px; background: var(--brand-solid); position: relative; flex: none; }
-.brand-mark::before { content: ""; position: absolute; left: 8px; top: 6px; width: 11px; height: 14px; border-left: 3px solid #fff; border-top: 3px solid #fff; border-radius: 1px; }
-.brand-mark::after { content: ""; position: absolute; left: 8px; top: 12px; width: 8px; height: 3px; background: #fff; border-radius: 1px; }
-.brand-name { font-weight: 700; font-size: var(--fs-lg); letter-spacing: -.02em; }
-.brand-sub { font-size: var(--fs-xs); color: var(--text-3); padding-left: 10px; border-left: 1px solid var(--border); }
+.brand-mark { width: 30px; height: 30px; flex: none; color: var(--logo); }
+.brand-mark .spokes { opacity: .45; }
+.brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; line-height: 1.2; }
+.brand-name { font-weight: 700; font-size: 16px; letter-spacing: -.02em; white-space: nowrap; }
+.brand-product { font-weight: 500; color: var(--text-2); letter-spacing: -.01em; }
+.brand-sub { font-size: var(--fs-xs); color: var(--text-3); letter-spacing: .04em; white-space: nowrap; }
 
 .sidebar-actions { display: grid; gap: var(--sp-2); padding: var(--sp-1) var(--sp-3) var(--sp-3); }
 .search-trigger {

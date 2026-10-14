@@ -493,3 +493,27 @@ async def test_console_runs_and_approval_preview_endpoints(ws):
                                                summary="编辑 app.py", risk="medium", reason="写操作需要确认", status="pending"))
         ap = next(a for a in (await c.get("/api/approvals")).json() if a["id"] == "ap_t")
         assert "-x = 1" in ap["preview"] and "+x = 2" in ap["preview"] and ap["session_title"] == "控制台测试"
+
+
+async def test_web_logo_matches_docs_site(ws):
+    """品牌一致性：控制台的 favicon、侧边栏标识与文档站 logo 是同一个图形（配色各自适配所在界面），favicon 能被静态服务取到。"""
+    import re
+    from pathlib import Path
+
+    from flywhl_harness.server.app import create_app
+
+    root = Path(__file__).resolve().parents[1]
+    web = root / "src" / "flywhl_harness" / "web"
+    docs_logo = (root / "docs" / "public" / "favicon.svg").read_text()
+    index = (web / "index.html").read_text()
+
+    def geometry(svg: str) -> tuple[list[str], list[str]]:
+        return sorted(re.findall(r' d="([^"]+)"', svg)), sorted(re.findall(r'<circle cx="16" cy="16" r="([\d.]+)"', svg))
+
+    # 颜色可以不同（文档站朱红、控制台品牌蓝），几何形状必须与文档站 logo 完全一致
+    assert geometry(index) == geometry(docs_logo) == geometry((web / "logo.svg").read_text())
+    assert 'href="/static/logo.svg"' in index
+    app = create_app(make_harness(ws, ["好"]), auto_recover=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as c:
+        r = await c.get("/static/logo.svg")
+    assert r.status_code == 200 and "image/svg" in r.headers["content-type"]
