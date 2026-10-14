@@ -31,6 +31,9 @@ packages = ["src/flywhl_harness"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# 真实模型测试默认不跑（要花钱、要密钥、结果有随机性）：pytest -m live tests/live 显式运行
+addopts = "-m 'not live'"
+markers = ["live: 调用真实模型的端到端测试（需要密钥，见 tests/live/README.md）"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
