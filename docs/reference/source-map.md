@@ -56,12 +56,14 @@
 |---|---|
 | `base.py` | `ModelRequest`、`StreamEvent`、`ErrorKind`、`ProviderError`、`classify_http_error()`、`MessageBuilder`、`Provider`、`prepare_history()` |
 | `models.py` | `ModelInfo` 能力矩阵、`MODELS` 价格表、`compute_cost()` |
-| `openai_compat.py` | 用 httpx 直读 Chat Completions SSE（DeepSeek / 通义 / Ollama / vLLM…） |
+| `profiles.py` | `ProviderProfile` 供应商档案（地址、密钥变量、思考内容的来源与回传方式、思考开关）、`<供应商>:<模型>` 解析 `resolve()` |
+| `openai_compat.py` | 用 httpx 直读 Chat Completions SSE（DeepSeek / 百炼 / Kimi / 智谱 / MiniMax / OpenRouter / Ollama…）；思考回传、`<think>` 拆分、流完整性 |
+| `doctor.py` | `flywhl doctor` 接入自检：流式文本 + 工具往返 |
 | `anthropic.py` | 基于官方 SDK 的原始流事件；tool_result 合并、thinking 回传、缓存、refusal、server-side fallback |
 | `mock.py` | `ScriptedProvider`（测试与示例）、`DemoProvider`（无 Key 演示）、`deterministic_summary()` |
 | `replay.py` | `ReplayProvider`、`context_fingerprint()` |
 | `resilient.py` | `ResilientProvider`：重试 + 熔断 + 降级链 |
-| `__init__.py` | `create_provider()`、`detect_provider()` |
+| `__init__.py` | `create_provider()`（可跨供应商的降级链）、`detect_provider()` |
 
 ### tools/ —— 双手
 
@@ -125,6 +127,8 @@
 | `tests/test_context.py` | 切点规则、自动压缩、保留段去 thinking、只追加模型不清理、先清理后压缩、usage 估算 |
 | `tests/test_policy.py` | 命令分析、规则优先级、复合命令、四种模式、污点、会话授权、hooks、命令 hook 协议、状态机 CAS、审批改参 |
 | `tests/test_runtime.py` | 退避与熔断（含探测名额归还）、降级、上下文超长、DAG（租户公平、失败信息下传、即时取消）、端云指令（含在途去重）、幂等键冲突、子代理契约、SSE 续传、MCP、回放与指纹、统计、schema |
+| `tests/test_providers.py` | 用录制的真实 SSE 与错误响应离线验证各家差异：并行工具调用拼接、三种思考来源、思考回传方式、思考开关翻译、流不完整与流中错误、错误分类、模型写法解析、跨供应商降级链、`.env` 加载 |
+| `tests/live/` | 真实模型端到端（`pytest -m live`，默认不跑）：接入层、Agent 机制、运行时与 Web API，见 `tests/live/README.md` |
 | `tests/test_security.py` | hook 决策归一化、命令 hook 超时被杀、命令分析的绕过写法、灾难性命令全模式拒绝、工作区外读取、命令替换不被 allow 规则放行、网络输出污点、伪造提醒标签、改参重跑守卫、审批预览、MCP 注解默认值、影子仓库隔离、Web 服务访问控制 |
 
 示例 `examples/01`–`10` 的说明见 [02 快速上手](/guide/quickstart) 与仓库 README。

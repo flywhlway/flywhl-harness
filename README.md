@@ -16,7 +16,7 @@
 | 维度 | 机制 | 代码 |
 |---|---|---|
 | **Loop** | async generator 主循环；阶段化（整形→模型→落盘→工具→守卫→续跑）；插话 / 排队 | `agent/loop.py` |
-| **模型接入** | 统一消息与流事件；OpenAI 兼容（DeepSeek/通义/Ollama…）、Anthropic（官方 SDK）、内置演示模型；错误分类、重试 + 全抖动、熔断、降级链 | `llm/` |
+| **模型接入** | 统一消息与流事件；`<供应商>:<模型>` 写法与供应商档案（DeepSeek 默认、百炼、Kimi、智谱、MiniMax、OpenRouter、Ollama、Anthropic 官方 SDK）；思考内容按各家规则回传；错误分类（含余额不足、模型不存在）、重试 + 全抖动、熔断、跨供应商降级链；`flywhl doctor` 接入自检 | `llm/` |
 | **工具** | 副作用三级（read/write/external）；schema 校验与可操作错误；只读并发、写操作串行、原序回填；大结果外置句柄；MCP 接入 | `tools/`、`agent/executor.py` |
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
 | **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
@@ -42,13 +42,14 @@ uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv &
 检查器（运行概览与状态流转、上下文水位、事件流与断线续传演示、会话分支与快照回滚）、跨会话的运行记录、审批收件箱、工具目录，
 以及命令面板（`⌘K` / `Ctrl+K`）。不依赖任何外部字体或 CDN，离线可用；明暗主题、键盘操作与屏幕阅读器均已适配。
 
-接入真实模型：
+接入真实模型（默认 `deepseek:deepseek-flash`）：
 
 ```bash
-export ANTHROPIC_API_KEY=...                                   # Anthropic（默认 claude-opus-5-5）
-export DEEPSEEK_API_KEY=...                                    # DeepSeek（OpenAI 兼容）
-export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1   # 本地 Ollama
-flywhl chat --provider openai --model qwen3.5:9b-mlx
+cp .env.example .env                 # 填入密钥；flywhl 启动时读取当前目录的 .env，不覆盖已有环境变量
+.venv/bin/flywhl doctor              # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
+.venv/bin/flywhl serve -w playground # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
+.venv/bin/flywhl chat --model kimi:kimi-k2.6                 # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、
+                                                             # anthropic:claude-opus-5-5、ollama:qwen3.5:9b-mlx
 ```
 
 ## 命令行
@@ -64,6 +65,7 @@ flywhl recover                   # 接管崩溃的运行
 flywhl replay <run_id> [--fork-at N]   # 确定性回放 / 反事实分叉
 flywhl trace <run_id> -o t.json  # 导出轨迹与 span
 flywhl tools                     # 工具与副作用等级
+flywhl doctor [供应商:模型 ...]   # 模型接入自检
 ```
 
 ## 作为库使用
@@ -110,8 +112,22 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/02_crash_resume.py
-.venv/bin/python -m pytest -q          # 156 个测试，包含真实 kill -9 恢复测试
+.venv/bin/python -m pytest -q          # 184 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
+
+## 真实模型测试
+
+离线测试用脚本化模型验证 harness 的逻辑；协议细节与模型行为只有真实模型能回答。`tests/live/` 覆盖 32 个真实场景：
+接入层（思考开关、前缀缓存、截断、错误分类、降级链、多供应商、Anthropic 协议）、Agent 机制（多步工具、并行调用、审批与拒绝理由、
+Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算收尾、提示注入、大结果句柄、跨供应商续聊）、运行时（流式中途取消、插话、
+暂停恢复、kill -9 接管、真实轨迹回放、Web API 端到端）。默认不运行：
+
+```bash
+.venv/bin/python -m pytest -m live tests/live                       # 读取 .env，没有密钥的用例自动跳过
+FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
+```
+
+详见 [tests/live/README.md](tests/live/README.md)。
 
 ## 教程
 
@@ -127,7 +143,7 @@ npm run build                            # 输出到 docs/.vitepress/dist，可�
 ```
 src/flywhl_harness/
   agent/      loop · executor · context · compaction · budget · inbox · subagent
-  llm/        base · models · openai_compat · anthropic · mock · replay · resilient
+  llm/        base · profiles · models · openai_compat · anthropic · mock · replay · resilient · doctor
   tools/      base · schema · registry · fs · shell · extra · demo · mcp
   policy/     permissions · bash_analyzer · hooks · approvals
   runtime/    manager · store · session · state · workspace · retry · scheduler · dispatch
@@ -145,6 +161,7 @@ src/flywhl_harness/
 - **默认需要审批**：与 pi 的 “YOLO + 容器” 不同，这里把权限与人审作为可学习的机制实现出来；`bypass` 模式只应在隔离环境中使用。
 - **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定）+ 跨站写请求检查；`--host 0.0.0.0` 时自动启用访问令牌。
 - **Anthropic 模型默认开启 server-side fallback**（`fallbacks: "default"`），被安全策略拒答时服务端改用推荐的备用模型；
-  可通过 `AnthropicProvider(server_fallback=False)` 关闭。
+  只在官方端点上发送（经 OpenRouter 等网关调用时自动关闭），可通过 `AnthropicProvider(server_fallback=False)` 关闭。
+- **`.env` 只从启动目录加载**：不读工作区里的 `.env`，避免不可信仓库把 `*_BASE_URL` 指向第三方、骗走真实密钥。
 
 MIT License

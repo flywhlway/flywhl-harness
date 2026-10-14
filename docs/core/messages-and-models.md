@@ -91,6 +91,7 @@ flowchart LR
     L["AgentLoop._call_model()"] --> R["ResilientProvider<br/>重试 · 熔断 · 降级链"]
     R --> A["AnthropicProvider<br/>官方 SDK 原始流事件"]
     R --> O["OpenAICompatProvider<br/>httpx 直读 SSE"]
+    P["ProviderProfile<br/>各家差异（数据）"] -.-> O
     A & O --> PH["prepare_history()<br/>通用修补"]
     A & O --> MB["MessageBuilder<br/>增量 → 完整 Message"]
     A & O --> CE["classify_http_error()<br/>错误分类"]
@@ -101,6 +102,7 @@ flowchart LR
 |---|---|---|
 | 统一流事件与消息结构 | 防腐 | `StreamEvent`、`MessageBuilder` |
 | 消息格式转换 | 防腐 | `to_openai_messages()`、`to_anthropic_messages()` |
+| 各家兼容接口的差异 | 防腐 | `ProviderProfile`（`llm/profiles.py`）：地址、密钥变量、思考内容的来源与回传方式、思考开关字段 |
 | 历史合法性修补 | 防腐 | `prepare_history()` |
 | 错误分类 | 治理 | `ErrorKind`、`classify_http_error()`、`AnthropicProvider._map_error()` |
 | 重试只在一层 | 治理 | provider 不重试；`ResilientProvider` 统一重试 |
@@ -161,10 +163,15 @@ def build(self, stop_reason, usage=None, *, error=None, partial=False) -> Messag
 | 连接断开 | `network` | 重试 |
 | 400 / 413 / 422 且正文含超长提示词 | `context_overflow` | **不能原样重试**：Loop 强制压缩后再试 |
 | 其它 4xx | `bad_request` | 不重试 |
-| 401 / 403 | `auth` | 不重试，告警 |
-| 404 | `not_found` | 可沿降级链换模型 |
+| 401 / 403 | `auth` | 不重试；降级链的下一项是 **另一家** 时才切换 |
+| 402，或 4xx 正文含余额不足（`余额不足`、`insufficient_quota`……） | `billing` | 不重试，沿降级链换模型或换供应商 |
+| 404，或 400 / 422 正文说模型不存在 | `not_found` | 可沿降级链换模型 |
 
-上下文超长没有统一的状态码，只能靠正文里的 `context_length`、`prompt is too long` 等关键词识别（`_OVERFLOW_HINTS`）。
+上下文超长没有统一的状态码，只能靠正文里的 `context_length`、`prompt is too long`、`exceeded model token limit`（Kimi）等关键词识别（`_OVERFLOW_HINTS`）。
+余额与模型不存在也一样：实测智谱把“余额不足”包装成 **429**（`{"code":"1113","message":"余额不足或无可用资源包,请充值。"}`），
+按限流处理会白白退避重试 4 次；DeepSeek 用 **400** 表示模型名不存在（`The supported API model names are …`），不识别出来降级链就不会生效。
+所以 `_BILLING_HINTS` 先于状态码判断，`_MODEL_NOT_FOUND_HINTS` 把这类 400 归为 `not_found`。这些响应都录在 `tests/fixtures/sse/errors.json`，
+由 `tests/test_providers.py::test_recorded_errors_are_classified` 逐条断言。
 `RETRYABLE_KINDS` 与 `ResilientProvider` 的 `_FALLBACK_KINDS` 是两张不同的表：上下文超长换模型也没用，交给 Loop 去压缩。重试与降级的细节见 [13 重试、熔断与降级](/reliability/retry-fallback)。
 
 ### prepare_history：每次都完全一致的修补
@@ -224,7 +231,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
 | 工具调用 | assistant 的 `tool_calls[].function.arguments`（JSON **字符串**） | assistant content 里的 `tool_use` 块，`input` 是对象 |
 | 工具结果 | 每个结果一条独立的 `role: tool` 消息 | 同一轮的所有 `tool_result` 合并进 **同一条** user 消息，且排在文本之前 |
 | 出错的结果 | 本项目在正文前加 `[工具执行出错]` | `is_error: true` |
-| 推理过程 | `delta.reasoning_content`（DeepSeek 等），本项目不回传 | 带 `signature` 的 `thinking` 块（或 `redacted_thinking`），必须原样回传 |
+| 推理过程 | `delta.reasoning_content` / `delta.reasoning` / 正文内联 `<think>`，是否回传由供应商决定（见下一节） | 带 `signature` 的 `thinking` 块（或 `redacted_thinking`），必须原样回传 |
 | 结束原因 | `finish_reason`：`stop` / `tool_calls` / `length` / `content_filter` | `stop_reason`：`end_turn` / `tool_use` / `max_tokens` / `refusal` / `pause_turn` 等 |
 | 用量 | `prompt_tokens` **包含** 缓存命中部分；命中数在 `prompt_tokens_details.cached_tokens`（DeepSeek 为 `prompt_cache_hit_tokens`） | `input_tokens` **不含** 缓存；另有 `cache_read_input_tokens`、`cache_creation_input_tokens` |
 | 流式格式 | `data:` 行，`choices[].delta` 增量，`[DONE]` 结束 | 类型化事件：`message_start` → `content_block_start/delta/stop` → `message_delta` → `message_stop` |
@@ -250,6 +257,45 @@ def prepare_history(messages: list[Message]) -> list[Message]:
   否则按缓存价与原价各算一次，成本会被重复计算。Anthropic 的输入用量在 `message_start` 里，输出用量在 `message_delta` 里。
 - **结束原因映射。** OpenAI 侧见 `_FINISH`（`content_filter → refusal`，`length → max_tokens`）；Anthropic 侧见 `_STOP`，其中 `pause_turn` 被映射为 `end_turn`。
   `pause_turn` 主要出现在服务端工具的长回合中，本项目没有使用服务端工具；如果你加入它们，这个映射需要改成“继续请求”。
+
+## 供应商档案：把各家差异收敛成数据
+
+“OpenAI 兼容”只约定了骨架，思考内容怎么给、要不要回传、开关叫什么，各家都不一样。`llm/profiles.py` 把这些差异写成一份
+`ProviderProfile` 数据，`OpenAICompatProvider` 只按档案行事，不出现 `if vendor == ...`。模型统一写成 `<供应商>:<模型>`：
+
+```python
+ProviderProfile("deepseek", "DeepSeek", base_url="https://api.deepseek.com", key_env=("DEEPSEEK_API_KEY",),
+                default_model="deepseek-flash", reasoning_echo="field", thinking_param="type",
+                effort_param="reasoning_effort"),
+ProviderProfile("minimax", "MiniMax", base_url="https://api.minimaxi.com/v1", key_env=("MINIMAX_API_KEY",),
+                default_model="MiniMax-M2.7", reasoning_echo="inline", think_tags=True),
+```
+
+下表是用真实接口实测的结果（2026-10，流式 + 两个并行工具调用 + 回填结果，原始 SSE 录在 `tests/fixtures/sse/`）：
+
+| 供应商 | 思考内容从哪来 | 多轮如何回传 | 思考开关 | 缓存命中字段 |
+|---|---|---|---|---|
+| deepseek | `delta.reasoning_content` | 带 tools 时必须回传 `reasoning_content` | `thinking.type` | `prompt_cache_hit_tokens` |
+| kimi | `delta.reasoning_content` | 回传 `reasoning_content` | `thinking.type` | 顶层 `cached_tokens` |
+| dashscope | `delta.reasoning_content` | 不需要 | `enable_thinking` | `prompt_tokens_details.cached_tokens` |
+| minimax | 正文开头内联 `<think>…</think>` | 整段正文（含 think）原样回传 | — | — |
+| openrouter | `delta.reasoning` | 不回传（只展示） | `reasoning.enabled` | 另外直接返回实际费用 `usage.cost` |
+
+几条规则的来由：
+
+- **DeepSeek 的回传是协议要求，不是优化。** 官方文档写明：带 `tools` 的请求必须把之前每一轮的 `reasoning_content` 完整回传，
+  否则可能返回 400，模型也会丢掉上一步的推理。实测不回传暂时不报错，但回传后第二步几乎不再重新推理，输出 token 明显减少。
+  所以 `to_openai_messages(echo="field")` 给每条 assistant 消息带上 `reasoning_content`；只回传 **本供应商** 产生的思考，
+  降级到别家之后的消息回传空串——别家的推理对它没有意义。
+- **`<think>` 只拆消息开头的那一段。** `ThinkTagSplitter` 是一个三状态的小状态机（start → think → text），标签可能被切在两个分片之间，
+  所以疑似标签前缀的尾巴先留在缓冲区里。正文中间讨论 `<think>` 标签的内容不受影响。
+- **流的完整性。** 没有收到 `finish_reason` 就结束的流按 `network` 错误抛出（交给重试层），绝不当作正常结束——否则一次被代理截断的回复
+  会被当成完整答案；流中途下发的 `{"error": …}` 与 DeepSeek 的 `finish_reason: insufficient_system_resource` 同样转成可分类的错误。
+- **记录实际服务的模型。** `chunk.model` 写进消息的 `model` 字段：请求 `deepseek-chat`（旧名）实际由 `deepseek-flash` 服务，
+  OpenRouter 也会改写成路由到的模型，归因与回放都以它为准。
+
+`flywhl doctor` 用两步最小的真实调用验证一家供应商“按 harness 的方式接得通”：流式文本，以及一次完整的工具往返（覆盖 tool_calls 分片拼接、
+tool 消息格式和思考回传）。新增一家兼容服务，通常只需要加一行档案，再用 doctor 和 `tests/live` 验证。
 
 ## 为什么 Anthropic provider 用官方 SDK，且 `max_retries=0`
 
@@ -299,7 +345,7 @@ if isinstance(c, ThinkingBlock):
 |---|---|---|
 | 同一 provider、带签名 | 原样回传 | 签名用于校验思考内容未被篡改 |
 | `redacted_thinking` | 以 `redacted:` 前缀存在 `signature` 字段里，回传时还原 | 不为罕见块型扩展统一消息模型，三种块型保持不变 |
-| 来自 OpenAI 兼容服务的推理 | `OpenAICompatProvider` 生成消息时就清掉签名；转换时不回传 | 兼容服务大多不接受回传（具体以各服务文档为准） |
+| 来自 OpenAI 兼容服务的推理 | 生成消息时清掉签名；回传方式由供应商档案决定（DeepSeek / Kimi 用 `reasoning_content`，MiniMax 内联） | 各家要求不同，见上一节 |
 | 跨 provider（历史里有别家的思考） | 丢弃 | 没有签名就无法校验 |
 | 被中断的半截 thinking | `build(partial=True)` 与 Loop 的取消分支都不保留 | 没有完整签名，回传会被拒 |
 
@@ -364,13 +410,17 @@ def compute_cost(info: ModelInfo, usage: Usage) -> float:
     )
 ```
 
-表中价格是示例，**以各家官方价格页为准**。两个要点：
+价格以各家官方价格页为准：Claude 与 DeepSeek 的价格核对于 2026-10。DeepSeek 分高峰与非高峰两档（非高峰为一半），表中取高峰价作为预算上限。
+OpenRouter 在 usage 里直接返回实际费用，`reports_cost=True` 的供应商以返回值为准。三个要点：
 
 - **计量以真实 usage 为准。** `Usage` 的 docstring 写明“以 provider 返回值为准，本地 tokenizer 只做预估”。
   `ContextManager.estimate()` 也是这样做的：以最后一条带真实 usage 的 assistant 消息为基数，只对其后新增的消息做本地估算（中日韩字符按 1 token，其它按约 4 字符 1 token）。
   压缩之前产生的 usage 反映的是更大的旧上下文，会被忽略。
 - **未知模型的默认值是保守窗口 + 零成本。** `get_model_info()` 对不在表里的模型返回 128K 窗口、价格 0。这意味着换用一个新模型而不补价格，
-  费用预算 `max_cost_usd` 永远不会触发——只剩 token 预算在起作用。
+  费用预算 `max_cost_usd` 永远不会触发——只剩 token 预算在起作用。这种“悄悄失效”最危险，所以配置了费用预算而模型没有价格时，
+  Run 一开始就发出 `unpriced_model` 警告。
+- **估算误差有多大。** 用 deepseek-flash 实测：估算只覆盖“上一次真实 usage 之后新增的消息”，误差不会累积；中文按 1 token/字估算，
+  比 DeepSeek 的分词偏高（压缩提前触发，安全方向），代码偏低约 20%，由 `reserve_tokens` 吸收。
 
 ## Function Calling 与结构化输出
 
@@ -425,6 +475,9 @@ if self.server_fallback and info.server_fallback:
     kw["fallbacks"] = "default"
 ```
 
+这是官方 API 的 beta：经 OpenRouter 调用 Claude Sonnet 5.5 时，网关的校验器只认识数组形式，对 `"default"` 直接返回 400。
+所以 `AnthropicProvider` 只在官方端点（未设置 base_url，或指向 `api.anthropic.com`）上开启它，兼容网关上自动关闭。
+
 拒答发生时，服务端在同一次调用里改用推荐的备用模型继续，流中会出现一个 `fallback` 内容块。`stream()` 的处理：
 
 ```python
@@ -445,31 +498,30 @@ elif cb.type == "fallback":
 模型支持情况记录在 `ModelInfo.server_fallback`：表中 Opus、Sonnet、Fable 为 `True`，Haiku 5.5 为 `False`。不支持或关闭时，拒答照常以 `refusal` 返回，Loop 以 `failed` 结束 Run。
 这是一个 beta 能力，参数名与行为以 Anthropic 官方文档为准。
 
-## create_provider：auto 选择与弹性包装
+## create_provider：解析模型写法与弹性包装
 
 ```python
-DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "openai": "deepseek-chat", "mock": "flywhl-demo"}
-
-def detect_provider() -> str:
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"):
-        return "openai"
-    return "mock"
-
 def create_provider(cfg: HarnessConfig) -> tuple[Provider, str]:
-    kind = detect_provider() if cfg.provider == "auto" else cfg.provider
-    model = cfg.model or DEFAULT_MODELS.get(kind, "flywhl-demo")
-    base = _make(kind, cfg)
-    if kind == "mock":
-        return base, model
-    chain = [(base, model)] + [(base, m) for m in cfg.fallback_models]
+    profile, model = resolve(cfg.model, cfg.provider)        # "deepseek:deepseek-flash" → (DeepSeek 档案, "deepseek-flash")
+    primary = _make(profile, cfg, own_endpoint=True)
+    if profile.kind == "mock":
+        return primary, model
+    made: dict[str, Provider] = {profile.name: primary}
+    chain: list[tuple[Provider, str]] = [(primary, model)]
+    for spec in cfg.fallback_models:                          # 每一项也可以是别家的模型
+        fp, fm = resolve(spec, profile.name)
+        if fp.kind == "mock":
+            continue
+        if fp.name not in made:
+            made[fp.name] = _make(fp, cfg, own_endpoint=False)
+        chain.append((made[fp.name], fm))
     return ResilientProvider(chain, RetryPolicy(max_attempts=cfg.max_retries)), model
 ```
 
-- 没有任何 Key 时落到内置 `DemoProvider`，保证开箱即用；只设置了 `DEEPSEEK_API_KEY` 时，`_make()` 自动把 base URL 指向 DeepSeek。
-- mock 不包装（演示模型不需要重试）；真实 provider 一律包上 `ResilientProvider`。
-- 降级链里所有条目共用同一个底层 provider，只换模型名——不做跨 provider 降级，因此也不会碰到跨 provider 的 thinking 回传问题。
+- `resolve()` 的优先级：写法里的前缀 > 显式 `provider` > 模型表登记的供应商 > `auto` 探测。`auto` 按 DeepSeek → Anthropic → OpenAI → 百炼 →
+  Kimi → 智谱 → MiniMax → OpenRouter 的顺序选第一个配置了密钥的供应商，都没有时落到内置 `DemoProvider`，保证开箱即用。
+- `base_url` / `api_key` / `api_key_env` 只属于主模型的供应商（`own_endpoint`）：降级到别家时使用各自档案里的地址与密钥变量。
+- 同一家只创建一个客户端，降级链里同一家的不同模型共用连接池；mock 不包装，真实 provider 一律包上 `ResilientProvider`。
 
 ## 设计取舍与常见坑
 
@@ -478,14 +530,16 @@ def create_provider(cfg: HarnessConfig) -> tuple[Provider, str]:
 | 统一消息模型的块型数量 | 只有 text / thinking / tool_call 三种 | `redacted_thinking` 需要借 `signature` 字段编码 |
 | 修补放在哪一层 | provider 内 `prepare_history()`，每次请求执行 | 每次请求多一次线性扫描；Loop 与修补规则必须对齐 |
 | 参数校验放在哪 | 执行层，不依赖服务端 | 自己维护一个迷你 JSON Schema 校验器 |
-| 推理内容是否回传 | 只回传同 provider 且带签名的 | 换 provider 后丢失推理上下文 |
+| 推理内容是否回传 | Anthropic 只回传同 provider 且带签名的；兼容服务按供应商档案 | 换供应商后丢失推理上下文 |
 
 常见坑：
 
 1. **把 `details` 塞进 `content`。** 上下文膨胀，且每次 UI 需求变化都会改变模型输入。
 2. **在两层同时重试。** SDK 默认重试 + 自己的重试，故障时请求量成倍放大，且部分重试对上层不可见。
 3. **测试只用脚本化模型。** `ScriptedProvider` 不经过 `prepare_history()` 与协议转换，所以“消息顺序合法吗”“修补会不会吞掉真实结果”这类问题在单元测试里看不出来，
-   需要单独针对转换函数写测试（见下面的实验）。
+   需要单独针对转换函数写测试（见下面的实验）。协议细节更是只有真实接口才能回答：本项目把真实 SSE 录成夹具做离线解析测试
+   （`tests/test_providers.py`），再用 `tests/live/` 在真实模型上回归——上面 DeepSeek 的回传、智谱的 429 余额不足、OpenRouter 拒绝
+   `fallbacks: "default"`，都是这样发现的。
 4. **在 tool_call 与 tool_result 之间插入 user 消息。** `prepare_history()` 会认为这些调用的结果“丢失了”，立即补合成错误结果，之后到达的真实结果因为找不到 pending 调用被当成孤立结果丢弃。
 
 ::: details 案例：恢复说明的插入位置（已修复）
@@ -501,6 +555,12 @@ def create_provider(cfg: HarnessConfig) -> tuple[Provider, str]:
 ## 动手验证
 
 ::: code-group
+
+```bash [接入自检]
+flywhl doctor                                   # 每个配置了密钥的供应商：流式文本 + 工具往返
+flywhl doctor deepseek:deepseek-flash kimi:kimi-k2.6
+.venv/bin/python -m pytest -q tests/test_providers.py   # 用录制的真实 SSE 离线验证各家差异
+```
 
 ```bash [单元测试]
 .venv/bin/python -m pytest -q \

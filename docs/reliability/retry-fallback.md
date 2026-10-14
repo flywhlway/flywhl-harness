@@ -24,8 +24,9 @@
 | 超时 / 断连 | SDK 的超时、连接异常 | `timeout` / `network` | 同上；流式中断需整体重发 | 同上 |
 | 上下文超长 | 400/413/422 且错误信息含 “too long” 等 | `context_overflow` | **不原样重试**：先压缩，再试一次 | `AgentLoop` 强制压缩 |
 | 请求非法 | 其它 4xx（消息结构、参数错误） | `bad_request` | 不重试；修复输入或直接失败 | 直接抛出，Run 以 `failed` 结束 |
-| 鉴权 | 401 / 403 | `auth` | 不重试，告警 | 直接抛出 |
-| 模型不存在 | 404 | `not_found` | 不重试，但 **可以换模型** | 跳过重试，直接沿降级链切换 |
+| 鉴权 | 401 / 403 | `auth` | 不重试，告警；换到 **另一家** 才有意义 | 降级链下一项是另一家时切换，否则直接抛出 |
+| 余额 / 配额 | 402，或 4xx 正文含“余额不足”“insufficient_quota”等（智谱把它包装成 429） | `billing` | 不重试，换模型或换供应商 | 跳过重试，直接沿降级链切换 |
+| 模型不存在 | 404，或 400 / 422 正文说模型不存在（DeepSeek） | `not_found` | 不重试，但 **可以换模型** | 跳过重试，直接沿降级链切换 |
 | 原因不明的客户端错误 | SDK 抛出的其它异常（响应解析失败、流被截断等） | `unknown` | 不重试、不降级 | 直接抛出 |
 | 工具瞬时错误 | 工具抛 `TransientToolError` | — | 只对只读 / 幂等工具有限重试，且受截止时间约束 | `ToolExecutor._invoke()` |
 | 工具永久错误 | 工具抛其它异常、超时 | — | 不重试，作为 `is_error` 结果回给模型；外部且非幂等的工具超时记为 `unknown`，要求先核实 | `ToolExecutor._invoke()` / `_race()` |
@@ -319,7 +320,15 @@ except BaseException as e:
 `src/flywhl_harness/llm/resilient.py` 把上面所有零件组装成一个 `Provider`。它本身也是 `Provider` 的子类，所以 Loop 对“背后有没有重试、有几个备用模型”一无所知。
 
 ```python
-_FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK, ErrorKind.NOT_FOUND}
+_FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK,
+                   ErrorKind.NOT_FOUND, ErrorKind.BILLING}
+# 鉴权失败是“这一家”的问题：同一家换模型没用，换到另一家（另一把密钥）才有意义
+_CROSS_PROVIDER_KINDS = {ErrorKind.AUTH}
+
+def _can_fallback(err: ProviderError, cur: Provider, nxt: Provider | None) -> bool:
+    if nxt is None:
+        return False
+    return err.kind in _FALLBACK_KINDS or (err.kind in _CROSS_PROVIDER_KINDS and nxt is not cur)
 
 class ResilientProvider(Provider):
     async def stream(self, req: ModelRequest, cancel: CancelToken) -> AsyncIterator[StreamEvent]:
@@ -363,7 +372,8 @@ class ResilientProvider(Provider):
                 except BaseException:
                     breaker.release()  # 取消、生成器被关闭等：结果不说明服务健康与否，归还探测名额
                     raise
-            if last is not None and last.kind not in _FALLBACK_KINDS:
+            nxt = self.chain[i + 1][0] if i + 1 < len(self.chain) else None
+            if last is not None and not _can_fallback(last, provider, nxt):
                 raise last
         assert last is not None
         raise last
@@ -388,13 +398,26 @@ flowchart TB
 1. **两层循环，外层降级、内层重试。** 先在当前模型上用尽重试次数，再切换到下一个。顺序反过来（一失败就降级）会让一次短暂抖动就把流量推到能力更弱的备用模型上。
 2. **熔断中的模型直接跳过，但记一个 `last`。** 如果整条链都在熔断中，最终抛出的是一个 `overloaded` 错误，上层能看懂原因。
 3. **`not breaker.allow()` 也是停止重试的条件。** 本次失败恰好把熔断器打开时，继续在这个模型上重试已经没有意义，立刻跳去降级。
-4. **`not_found` 不可重试但可降级。** 模型名写错或已下线时，原样重试毫无用处，换一个模型却可能成功。
-5. **不可降级的错误直接抛出。** 鉴权失败换模型（同一个 key）依然失败；请求非法换模型依然非法；上下文超长要交给 Loop 去改变输入。
+4. **`not_found` 与 `billing` 不可重试但可降级。** 模型名写错或已下线、账户余额用完时，原样重试毫无用处，换一个模型或换一家却可能成功。
+5. **`auth` 只跨供应商降级。** 同一家换模型用的还是同一把密钥，依然失败；下一项是另一家（另一把密钥）时才切换。
+   请求非法换模型依然非法；上下文超长要交给 Loop 去改变输入——这两类直接抛出。
 6. **切换时发 `notice`。** 降级必须是可观测的事件，而不是静默行为（UI 与轨迹中都能看到 `fallback`）。
 7. **`except BaseException` 只为归还名额。** 用户取消时，`CancelToken.guard` 取消挂起的 `__anext__`，生成器内部收到 `CancelledError`；
    消费方提前停止迭代、关闭生成器时，`yield ev` 处抛出 `GeneratorExit`。两者都不说明 provider 的健康状况，所以只 `release()`，然后原样抛出。
 
-降级链来自配置：`create_provider()` 把 `[(base, model)] + [(base, m) for m in cfg.fallback_models]` 交给 `ResilientProvider`。也就是说，配置文件里的降级链是 **同一 provider、不同模型**；要跨厂商降级，需要自己构造 `ResilientProvider([(anthropic, "..."), (openai_compat, "...")])`。熔断器按链上的位置建立，`Harness` 只创建一次 provider，所以熔断状态在所有 Run 之间共享——这正是熔断器该有的作用域。
+降级链来自配置，每一项都写成 `<供应商>:<模型>`，可以跨供应商：
+
+```toml
+model = "deepseek:deepseek-flash"
+fallback_models = ["deepseek:deepseek-v4-pro", "dashscope:qwen3.8-flash"]
+```
+
+`create_provider()` 为每家供应商只创建一个客户端（同一家的不同模型共用连接池），再把 `[(deepseek, "deepseek-flash"), (deepseek, "deepseek-v4-pro"), (dashscope, "qwen3.8-flash")]`
+交给 `ResilientProvider`。主模型的 `base_url` / `api_key` 不会带到别家去。熔断器按链上的位置建立，`Harness` 只创建一次 provider，
+所以熔断状态在所有 Run 之间共享——这正是熔断器该有的作用域。
+
+真实接口上的两个验证（`tests/live/test_live_provider.py`）：主模型名不存在时（DeepSeek 返回 400 + `supported API model names`）沿链切到可用模型；
+主供应商密钥失效时（401）跨供应商切到百炼，最后一条 assistant 消息的 `provider` 是 `dashscope`。
 
 ### 流式重试：整体重发，丢弃半截
 
@@ -524,7 +547,7 @@ flywhl-harness 只做了“被限流之后怎么办”，没有做“如何不�
 | 提示词效果不同 | 同一份系统提示在另一个模型上遵循度下降 | 降级链只放评测过的模型，而不是“能调通就行” |
 | 上下文窗口不同 | 备用模型窗口更小，切过去立刻超长 | `ResilientProvider.model_info()` 返回的是链首模型的信息，水位按主模型估算；选择窗口不小于主模型的备用模型，或在切换后按新窗口重新估算 |
 | 前缀缓存失效 | 缓存按模型维度存在，切换后整段上下文按全价重新处理 | 成本监控里把降级视为一次成本尖峰；频繁降级比偶尔失败更贵 |
-| 历史中的 thinking 块 | 由主模型生成的 thinking 签名对另一模型可能无效 | 具体限制以各厂商官方文档为准；Anthropic 服务端降级时 `MessageBuilder.drop_non_text()` 会丢弃边界之前的 thinking / tool_use |
+| 历史中的 thinking 块 | 由主模型生成的 thinking 签名对另一模型可能无效 | 兼容服务只回传本供应商产生的思考（别家的回传空串）；Anthropic 只回传同 provider 且带签名的；服务端降级时 `MessageBuilder.drop_non_text()` 会丢弃边界之前的 thinking / tool_use。同一会话依次换用 DeepSeek → Kimi → MiniMax → DeepSeek 继续，在真实接口上验证通过（`test_session_continues_across_providers`） |
 
 归因依赖每条 assistant 消息都记录 **实际** 服务的模型。`AnthropicProvider.stream()` 在收到 `message_start` 时用服务端返回的模型名覆盖 `MessageBuilder.model`，降级后落盘的消息就带着备用模型的名字；评测与回放据此区分“主模型的表现”和“备用模型的表现”（见 [22 轨迹、回放与评测](/multi-agent/trajectory-eval)、[23 可观测性与成本](/multi-agent/observability-cost)）。一个尚不精确的地方：Loop 为失败或被取消的消息构造 `Message` 时填写的是 `rc.model` 与 `rc.provider.name`（链首的模型与 provider 名），所以这两类消息的归因总是指向主模型。
 
@@ -549,6 +572,8 @@ flywhl-harness 只做了“被限流之后怎么办”，没有做“如何不�
 | `test_retry_async_respects_classification` | 429 重试到成功；401 立即抛出 |
 | `test_resilient_provider_retry_then_fallback` | 主模型持续 529 → 出现 `retry` 与 `notice`，最终由备用模型回答 |
 | `test_resilient_provider_does_not_retry_auth` | 401 只调用 1 次 |
+| `test_providers.py::test_fallback_on_billing_and_cross_provider_auth` | 余额不足不重试直接换；鉴权失败同一家不降级、换一家才降级 |
+| `test_providers.py::test_recorded_errors_are_classified` | 各家真实错误响应（录制）的分类：DeepSeek 400 模型名、智谱 429 余额不足、Kimi 超长 |
 | `test_loop_retries_model_and_reports` | Loop 能感知重试并产出 `model_retry` 事件 |
 | `test_context_overflow_forces_compaction` | 超长错误触发强制压缩，Run 最终 `completed` |
 

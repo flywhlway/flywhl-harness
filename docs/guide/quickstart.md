@@ -79,39 +79,77 @@ python -m venv .venv
 
 ## 接入真实模型
 
-provider 由 `--provider`（或配置 `provider`）决定，`auto` 模式按环境变量自动选择：
+模型统一写成 `<供应商>:<模型>`。密钥放在环境变量里，或写进启动目录的 `.env`（`flywhl` 启动时读取，不覆盖已有的环境变量）：
+
+```bash
+cp .env.example .env        # 填入需要的密钥；.env 已在 .gitignore 中
+flywhl doctor               # 接入自检：对每个配置了密钥的供应商跑一次流式文本 + 工具往返
+flywhl serve -w playground  # 有 DEEPSEEK_API_KEY 时，auto 模式默认使用 deepseek:deepseek-flash
+```
+
+`auto` 模式按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter 的顺序，选第一个配置了密钥的供应商；
+一个都没有时使用内置演示模型。也可以显式指定：
 
 ::: code-group
 
+```bash [DeepSeek（默认）]
+export DEEPSEEK_API_KEY=sk-...
+flywhl serve -w playground                                   # = --model deepseek:deepseek-flash
+flywhl serve -w playground --model deepseek:deepseek-v4-pro
+```
+
+```bash [国内其它供应商]
+export DASHSCOPE_API_KEY=sk-...   # 阿里云百炼
+flywhl serve -w playground --model dashscope:qwen3.8-flash
+export KIMI_API_KEY=sk-...        # Moonshot
+flywhl serve -w playground --model kimi:kimi-k2.6
+export MINIMAX_API_KEY=...        # MiniMax（思考内容内联在正文的 <think> 里，harness 会拆出来）
+flywhl serve -w playground --model minimax:MiniMax-M2.7
+```
+
 ```bash [Anthropic]
 export ANTHROPIC_API_KEY=sk-ant-...
-flywhl serve -w playground                       # 默认模型 claude-opus-5-5
-flywhl serve -w playground --model claude-sonnet-5-5
-```
-
-```bash [DeepSeek]
-export DEEPSEEK_API_KEY=sk-...
-flywhl serve -w playground --provider openai --model deepseek-chat
-```
-
-```bash [OpenAI 兼容服务]
-export OPENAI_API_KEY=sk-...
-export FLYWHL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1   # 例：通义千问
-flywhl serve -w playground --provider openai --model qwen-plus
+flywhl serve -w playground --model anthropic:claude-opus-5-5
 ```
 
 ```bash [本地 Ollama]
-export OPENAI_API_KEY=ollama
-export OPENAI_BASE_URL=http://localhost:11434/v1
-flywhl chat -w playground --provider openai --model qwen3.5:9b-mlx
+flywhl chat -w playground --model ollama:qwen3.5:9b-mlx      # 默认 http://localhost:11434/v1，可用 OLLAMA_BASE_URL 改
 ```
 
+```bash [其它兼容服务]
+export OPENAI_API_KEY=sk-...
+export OPENAI_BASE_URL=https://your-gateway.example.com/v1
+flywhl serve -w playground --model openai:your-model
+```
+
+:::
+
+`flywhl doctor` 的输出能直接看出问题出在哪一层：
+
+```text
+✓ deepseek:deepseek-flash  DeepSeek
+    ✓ 流式文本     0.8s  首个分片 0.8s
+    ✓ 工具往返     1.8s  参数 {'name': 'alpha'}
+    思考 166 字 · 输入 560 / 输出 92 tokens · 缓存命中 256 · $0.000280
+✗ dashscope:qwen3.8  阿里云百炼（通义千问）
+    [not_found HTTP 404] The model `qwen3.8` does not exist ...
+✗ zhipu:glm-5.3-flash  智谱（GLM）
+    [billing HTTP 429] 余额不足或无可用资源包,请充值。
+```
+
+方括号里是错误分类，它决定了 harness 的处理方式：`not_found` 与 `billing` 会沿降级链换模型或换供应商，不会原地重试；
+`rate_limit` 才会退避重试。
+
+::: tip 思考模型的两个开关
+`thinking = "enabled" | "disabled"` 与 `reasoning_effort` 由 harness 翻译成各家自己的字段（DeepSeek 的 `thinking.type`、
+百炼的 `enable_thinking`、OpenRouter 的 `reasoning`……），不支持的供应商直接忽略。DeepSeek V4 默认开启思考模式。
 :::
 
 ::: tip 对 Anthropic 模型默认开启的两项设置
 - **前缀缓存**：请求带顶层 `cache_control`，并且系统提示与工具集在会话内冻结，重复的前缀按缓存价计费；
 - **server-side fallback**：对支持的模型发送 `fallbacks: "default"`（beta `server-side-fallback-2026-07-01`），
-  请求被安全策略拒答时由服务端改用推荐的备用模型。不需要时构造 `AnthropicProvider(server_fallback=False)`。
+  请求被安全策略拒答时由服务端改用推荐的备用模型。这个参数只发给官方端点——经 OpenRouter 等兼容网关调用 Claude 时
+  自动关闭（实测网关会对它返回 400）。
 详见 [05 消息模型与模型接入层](/core/messages-and-models)。
 :::
 
@@ -129,6 +167,7 @@ flywhl replay <run_id>                  # 确定性回放：不调用模型、�
 flywhl replay <run_id> --fork-at 2      # 前 2 次模型调用用录制结果，之后换成当前模型
 flywhl trace <run_id> -o trace.json     # 导出轨迹（含 OTel GenAI 风格 span）
 flywhl tools                            # 工具列表与副作用等级
+flywhl doctor                           # 模型接入自检（每个配置了密钥的供应商）
 ```
 
 `--json` 模式下 harness 处于“无人值守”状态：需要审批的操作默认 **拒绝**（加 `--yes` 改为放行）。
@@ -139,9 +178,8 @@ flywhl tools                            # 工具列表与副作用等级
 在工作区（或启动目录）放一个 `flywhl.toml`，所有字段都有默认值，未知字段会直接报错（防止拼写错误被静默忽略）：
 
 ```toml
-provider = "openai"
-model = "deepseek-chat"
-base_url = "https://api.deepseek.com"
+model = "deepseek:deepseek-flash"
+fallback_models = ["dashscope:qwen3.8-flash"]   # 降级链，可以跨供应商
 max_tokens = 8192
 verify_command = "python3 -m pytest -q"      # Stop 验收：测试不过不让结束
 
@@ -222,7 +260,7 @@ playground/.flywhl/
 
 **Web UI 需要联网吗？** 不需要。页面只使用系统字体与内置图标，不请求任何外部资源，离线与内网环境下显示一致。
 
-**真实模型不调用工具？** 先确认模型本身支持 function calling；本地小模型可以先用 `flywhl run "用 ls 看看当前目录" --provider openai --model ...`
-验证工具调用是否正常。
+**真实模型接不通或不调用工具？** 先跑 `flywhl doctor <供应商>:<模型>`：它会分别报告鉴权、流式输出、工具调用往返三步的结果，
+以及错误分类（`auth`、`billing`、`not_found`……）。本地小模型工具调用能力较弱，结论只代表下限。
 
 **审批卡片不出现，命令直接执行了？** 检查会话页头的权限模式是否是“完全放行”（`bypass`），以及 `flywhl.toml` 里是否有匹配的 `allow:` 规则。

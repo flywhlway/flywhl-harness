@@ -165,13 +165,25 @@ def compute_cost(info: ModelInfo, usage: Usage) -> float:
 | provider | 原始字段 | 换算 |
 |---|---|---|
 | Anthropic（`llm/anthropic.py`） | `input_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 本就分开计数 | 直接映射 |
-| OpenAI 兼容（`llm/openai_compat.py`） | `prompt_tokens` **包含**缓存命中部分；命中数在 `prompt_tokens_details.cached_tokens` 或 `prompt_cache_hit_tokens` | `input_tokens = prompt_tokens - cached`，`cache_read_tokens = cached` |
+| OpenAI 兼容（`llm/openai_compat.py`） | `prompt_tokens` **包含**缓存命中部分；命中数在 `prompt_tokens_details.cached_tokens`（OpenAI、百炼）、`prompt_cache_hit_tokens`（DeepSeek）或顶层 `cached_tokens`（Kimi） | `input_tokens = prompt_tokens - cached`，`cache_read_tokens = cached` |
 
 如果漏掉这个减法，缓存命中的 token 会被按输入价和缓存读价各算一次，缓存越有效，账算得越离谱。
 
 价格来自 `MODELS` 表中每个 `ModelInfo` 的四个单价字段。这是本地维护的价格表，价格调整、新增计费维度时会与账单产生偏差，所以需要**定期与 provider 的账单对账**；具体单价以各家官方价格页为准。
+两种情况不依赖这张表：
 
-Web UI 中每条 assistant 消息下显示 `↑输入 ↓输出 · 缓存命中 N`，其中 `↑` 是未命中部分加缓存命中部分（即本次请求实际的输入规模），缓存命中单独列出，一眼就能看出这一轮有多少输入是按缓存价计费的。
+- **服务直接返回费用。** OpenRouter 在 usage 里带 `cost`（实际扣费），`reports_cost=True` 的供应商以它为准；
+- **分时段计价。** DeepSeek 非高峰时段是高峰价的一半，表里取高峰价，所以算出来的是 **上限**——用来卡预算是安全的，对账时会偏高。
+
+表里没有的模型成本记为 0，这会让 `max_cost_usd` 悄悄失效。配置了费用预算而模型没有价格时，Run 开始就发出 `notice`（`code=unpriced_model`），
+提示改用 `max_total_tokens` 限额。
+
+用 deepseek-flash 跑完 `tests/live` 的 32 个真实场景（2026-10），计入台账的 32 次 Run 合计约 34 万 token、0.042 美元
+（Kimi、MiniMax、百炼的场景未登记价格，按 0 计），其中输入侧 67% 命中了前缀缓存——多步 Agent 任务每一轮都带着完整历史，
+缓存命中率几乎决定了成本。
+
+Web UI 与 CLI 用同一个口径显示 token：`↑` 是输入侧的全部 token（未命中 + 缓存命中 + 缓存写入，与 `Usage.context_tokens` 一致），
+缓存命中单独列出；Run 级的合计、运行记录列表、检查器里的预算条也都用这个口径，与预算 `max_total_tokens` 的计数方式相同。
 
 ### 按 Run、Step、租户归因
 

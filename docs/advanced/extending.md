@@ -101,7 +101,19 @@ class CreateTicketTool(Tool):
 
 ## ② 新增模型 provider
 
-实现 `Provider.stream(req, cancel)`：产出 `StreamEvent`，最后一个必须是携带完整消息的 `done`。用 `MessageBuilder` 拼装增量，错误映射为带分类的 `ProviderError`。
+**先看是不是 Chat Completions 兼容服务。** 大多数国内与开源推理服务都是：这时不用写代码，在 `llm/profiles.py` 加一行档案即可——
+
+```python
+ProviderProfile("myllm", "我的推理服务", base_url="https://llm.example.com/v1", key_env=("MYLLM_API_KEY",),
+                default_model="my-model-1",
+                reasoning_echo="field",       # 思考模型要求回传 reasoning_content 时；内联 <think> 的用 "inline"
+                thinking_param="type"),       # 思考开关字段的写法；没有就省略
+```
+
+然后 `flywhl doctor myllm:my-model-1` 验证流式文本与工具往返，再用 `FLYWHL_LIVE_MODEL=myllm:my-model-1 pytest -m live tests/live` 跑完整回归。
+档案里每个字段的含义与各家实测差异见 [05 消息模型与模型接入层](/core/messages-and-models)。
+
+协议完全不同时，才需要实现 `Provider.stream(req, cancel)`：产出 `StreamEvent`，最后一个必须是携带完整消息的 `done`。用 `MessageBuilder` 拼装增量，错误映射为带分类的 `ProviderError`。
 
 ```python
 from flywhl_harness.llm.base import (ErrorKind, MessageBuilder, ModelRequest, Provider, ProviderError,
@@ -372,9 +384,12 @@ asyncio.create_task(watch(h, run.id))
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `provider` / `model` / `base_url` | `"auto"` / `None` / `None` | auto 按环境变量选择 anthropic / openai / mock |
-| `fallback_models` | `[]` | 降级链中的备用模型 |
+| `provider` / `model` / `base_url` | `"auto"` / `None` / `None` | `model` 写成 `<供应商>:<模型>`；auto 按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter 选第一个有密钥的，都没有时用 mock |
+| `api_key` / `api_key_env` | `None` / `None` | 密钥（不建议写进文件）/ 从指定环境变量读密钥 |
+| `fallback_models` | `[]` | 降级链，每项可写 `<供应商>:<模型>`（跨供应商） |
 | `max_tokens` / `temperature` | `8192` / `None` | 单次输出上限 |
+| `thinking` / `reasoning_effort` | `None` / `None` | 思考开关（`enabled` / `disabled`）与强度，按供应商翻译成各自的字段 |
+| `extra_body` | `{}` | 原样并入 OpenAI 兼容请求体的厂商私有参数 |
 | `request_timeout` / `max_retries` | `300.0` / `4` | 模型请求超时；`RetryPolicy.max_attempts`（含首次） |
 | `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示 |
 | `load_agents_md` / `load_skills` | `True` / `True` | 加载 AGENTS.md（或 CLAUDE.md）/ 技能清单 |
@@ -399,7 +414,10 @@ asyncio.create_task(watch(h, run.id))
 | `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed` |
 | `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
 
-可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_BASE_URL`、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。
+可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
+`FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`；
+也接受 `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL`（同样是 `<供应商>:<模型>` 写法），`FLYWHL_*` 优先。
+`flywhl` 命令启动时读取当前目录的 `.env`（或 `--env-file` 指定的文件），不覆盖已存在的环境变量；库代码不会隐式读取 `.env`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。
 
 ## ⑩ 测试你的扩展
 
@@ -438,6 +456,8 @@ async def test_guard_hook_fail_closed(ws):
 
 - `make_harness` 默认 `on_ask="allow"`（审批自动放行）且关闭快照，测试关注的是你的扩展而不是审批流程；测试审批时传 `on_ask="wait"` 并用 `h.resolve_approval(...)` 驱动。
 - 测试项目已启用 `asyncio_mode = "auto"`，`async def test_...` 不需要额外装饰器。
+- 脚本化模型验证的是 harness 的逻辑；协议与模型行为要用真实模型验证。`tests/live/` 的用例用 `pytestmark = pytest.mark.live` 标记，
+  默认的 `pytest` 不会运行它们，`tests/live/conftest.py` 的 `live_harness()` 与 `make_harness` 用法相同。
 - 断言**事件**而不是打印输出：`tool_ends(res.events)`、`types_of(res.events)` 能精确描述“发生了什么、以什么顺序”。
 - 崩溃恢复类扩展（`reconcile`）参考 `tests/test_recovery.py` 与 `examples/02_crash_resume.py` 的做法：用同一个文件型 `Store` 构造两个 `Harness`，第一个在执行中途被取消任务模拟崩溃，第二个调用 `recover()`。优雅关闭、重试、接管 fencing 的写法见 `tests/test_lifecycle.py`（例如 `test_shutdown_pauses_then_restart_resumes`：第一个 `Harness` 在工具执行中 `aclose()`，断言 Run 为 `paused` 且 `paused_by == "shutdown"`，第二个 `recover()` 后副作用只发生一次）。
 - 权限、命令分析、hook 协议类扩展参考 `tests/test_security.py`：命令分析用 `pytest.mark.parametrize` 列出“命令 → 等级 → 是否灾难性”的表；进程外 hook 的超时清理用 pid 文件确认子进程已被杀掉（`test_command_hook_is_killed_on_timeout`）。

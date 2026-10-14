@@ -20,14 +20,17 @@
 | 知识点 | 章节 | 源码 | 验证 |
 |---|---|---|---|
 | 统一消息模型、内容块、content 与 details 分离 | [05](/core/messages-and-models) | `types.py` | — |
-| 流事件归一化、partial JSON 拼装 | [05](/core/messages-and-models) | `llm/base.py` · `MessageBuilder` | 本地 Ollama 实测（见 [02](/guide/quickstart)） |
-| OpenAI 兼容与 Anthropic 的协议差异 | [05](/core/messages-and-models) | `llm/openai_compat.py`、`llm/anthropic.py` | — |
+| 流事件归一化、partial JSON 拼装 | [05](/core/messages-and-models) | `llm/base.py` · `MessageBuilder` | `test_recorded_tool_call_streams`（真实 SSE 夹具） |
+| OpenAI 兼容与 Anthropic 的协议差异 | [05](/core/messages-and-models) | `llm/openai_compat.py`、`llm/anthropic.py` | `test_anthropic_protocol_agent_task`（live） |
+| 供应商档案：思考内容的来源与回传、思考开关 | [05](/core/messages-and-models) | `llm/profiles.py` · `ProviderProfile` | `test_reasoning_echo_styles`、`flywhl doctor` |
+| 错误分类：余额不足、模型不存在、上下文超长 | [05](/core/messages-and-models)、[13](/reliability/retry-fallback) | `classify_http_error()` | `test_recorded_errors_are_classified` |
+| 跨供应商降级链 | [13](/reliability/retry-fallback) | `create_provider()`、`ResilientProvider` | `test_cross_provider_fallback_on_bad_key`（live） |
 | Function Calling、结构化输出、校验与修复 | [05](/core/messages-and-models)、[06](/core/tools) | `tools/schema.py` · `validate()` | `test_schema_validation_and_coercion` |
 | temperature 与确定性 | [05](/core/messages-and-models) | — | `examples/08`（回放） |
 | 前缀缓存与“只追加” | [05](/core/messages-and-models)、[23](/multi-agent/observability-cost) | `prompts.py`（冻结）、`_inject_reminders()` | `test_prefix_stability_append_only` |
 | thinking 签名与历史编辑 | [05](/core/messages-and-models)、[07](/core/context-engineering) | `llm/anthropic.py`、`SessionLog.context()` | `test_thinking_stripped_from_retained_segment` |
-| refusal 与 server-side fallback | [05](/core/messages-and-models) | `llm/anthropic.py` | — |
-| 模型能力矩阵、usage 计量与成本 | [05](/core/messages-and-models)、[23](/multi-agent/observability-cost) | `llm/models.py` | — |
+| refusal 与 server-side fallback | [05](/core/messages-and-models) | `llm/anthropic.py` | `test_anthropic_server_fallback_only_on_first_party` |
+| 模型能力矩阵、usage 计量与成本 | [05](/core/messages-and-models)、[23](/multi-agent/observability-cost) | `llm/models.py` | `test_recorded_final_answers_and_usage`、`test_unpriced_model_warns_that_cost_budget_is_ineffective` |
 | 多模型路由、降级链 | [13](/reliability/retry-fallback) | `llm/resilient.py` | `test_resilient_provider_retry_then_fallback` |
 
 ## 工具
