@@ -224,3 +224,23 @@ def test_child_budget_does_not_consume_parent_soft_warning():
         parent.next_turn()
     v = child.check()
     assert v.state == "hard" and v.reasons[0].startswith("上层预算")
+
+
+async def test_tool_result_records_dynamic_effect(ws):
+    """bash 的副作用等级按命令判定（ls 是只读）：结果消息里落盘实际等级，界面重绘时不会显示成“写入”。"""
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "ls"}}]}, "完成"])
+    res = await h.run("列目录")
+    tool_msgs = [m for m in h.log(res.session_id).context().messages if m.role == "tool"]
+    assert res.status == "completed" and tool_msgs[0].details["effect"] == "read"
+
+
+async def test_unpriced_model_warns_that_cost_budget_is_ineffective(ws):
+    from flywhl_harness.llm.models import ModelInfo
+
+    h = make_harness(ws, ["好"], budget__max_cost_usd=0.5)
+    h.model_info = ModelInfo("some-unpriced-model", "openai")   # 价格表里没有的模型
+    res = await h.run("hi")
+    assert any(e.type == E.NOTICE and e.data.get("code") == "unpriced_model" for e in res.events)
+    h2 = make_harness(ws, ["好"])                                  # 没有配置费用预算：不打扰
+    res2 = await h2.run("hi")
+    assert not any(e.type == E.NOTICE and e.data.get("code") == "unpriced_model" for e in res2.events)

@@ -63,6 +63,10 @@ export const fmt = {
     return `${Math.floor(m / 60)}h ${m % 60}m`;
   },
   shortId: (id) => (id ? String(id).slice(0, 12) : "—"),
+  /** 输入侧 token：未命中缓存 + 缓存命中 + 缓存写入（与后端 Usage.context_tokens 同一口径） */
+  tokIn: (u) => (u?.input_tokens || 0) + (u?.cache_read_tokens || 0) + (u?.cache_write_tokens || 0),
+  /** 总 token：输入侧 + 输出（与预算 max_total_tokens 同一口径） */
+  tokTotal: (u) => fmt.tokIn(u) + (u?.output_tokens || 0),
 };
 
 export function debounce(fn, ms = 200) {

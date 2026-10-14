@@ -105,8 +105,10 @@ class TerminalRenderer:
             self._nl()
             u = d.get("usage") or {}
             color = "green" if d["status"] == "completed" else "yellow"
+            tin = u.get("input_tokens", 0) + u.get("cache_read_tokens", 0) + u.get("cache_write_tokens", 0)
+            cache = f"（缓存命中 {_fmt_tokens(u['cache_read_tokens'])}）" if u.get("cache_read_tokens") else ""
             print(_c(color, f"■ {d['status']}") + _c("dim", f"  {d.get('reason', '')} · {d.get('turns', 0)} 轮 · "
-                  f"输入 {_fmt_tokens(u.get('input_tokens', 0))} / 输出 {_fmt_tokens(u.get('output_tokens', 0))} tokens"
+                  f"输入 {_fmt_tokens(tin)}{cache} / 输出 {_fmt_tokens(u.get('output_tokens', 0))} tokens"
                   f" · ${u.get('cost_usd', 0):.4f}"))
 
 

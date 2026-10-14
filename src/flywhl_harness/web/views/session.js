@@ -127,7 +127,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     let html = "";
     if (st === "waiting_human") html = `<span class="badge warning">${icon("shieldAlert")}等待审批</span><span>请在上方确认或拒绝待执行的操作</span>`;
     else if (st === "cancelling") html = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span><span>正在停止：进行中的不可中断操作会先完成</span>`;
-    else if (V.running) html = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px;color:var(--brand)"></span><span>运行中${u.turns ? ` · 第 ${u.turns} 轮` : ""}${u.usage ? ` · ${fmt.k((u.usage.input_tokens || 0) + (u.usage.output_tokens || 0))} tokens` : ""}</span>`;
+    else if (V.running) html = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px;color:var(--brand)"></span><span>运行中${u.turns ? ` · 第 ${u.turns} 轮` : ""}${u.usage ? ` · ${fmt.k(fmt.tokTotal(u.usage))} tokens` : ""}</span>`;
     else if (st === "paused") html = `<span class="badge">${icon("pauseCircle")}已暂停</span><span>可以继续运行，期间工作区的变化会告知模型</span>`;
     else if (st === "interrupted") html = `<span class="badge warning">${icon("alert")}已中断</span><span>进程曾意外退出，可以从中断处继续</span>`;
     else if (st === "failed") html = `<span class="badge danger">${icon("xCircle")}运行失败</span><span>可以重试：从已保存的历史继续，不会重复已成功的步骤</span>`;

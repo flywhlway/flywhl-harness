@@ -124,7 +124,7 @@ function renderOverview(p, V, app) {
   const visited = new Set(V.trail.flatMap((x) => [x.from, x.to]));
   const last = V.trail[V.trail.length - 1];
   const runs = V.detail?.runs || [];
-  const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+  const tokens = fmt.tokTotal(usage);
   const maxTok = u.max_total_tokens || budget.max_total_tokens || 0;
   const maxCost = u.max_cost_usd || budget.max_cost_usd || 0;
 
@@ -143,7 +143,7 @@ function renderOverview(p, V, app) {
       <div class="panel-title">预算</div>
       ${meter("轮次", u.turns ?? r?.result?.turns ?? 0, u.max_turns ?? budget.max_turns)}
       ${meter("工具调用", u.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
-      ${meter("Token", tokens, maxTok, { text: `${fmt.k(usage.input_tokens)} 入 · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
+      ${meter("Token", tokens, maxTok, { text: `${fmt.k(fmt.tokIn(usage))} 入${usage.cache_read_tokens ? `（缓存 ${fmt.k(usage.cache_read_tokens)}）` : ""} · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
       ${meter("费用", usage.cost_usd || 0, maxCost, { text: `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}` })}
     </div>
     <div class="panel-section">

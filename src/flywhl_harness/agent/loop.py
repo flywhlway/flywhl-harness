@@ -75,6 +75,12 @@ class AgentLoop:
     async def run(self, prompt: str | None = None) -> AsyncIterator[Event]:
         rc = self.rc
         yield self._ev(E.RUN_START, prompt=prompt, resume=rc.resume, model=rc.model, role=rc.role, depth=rc.depth)
+        mi = rc.model_info
+        if rc.role == "main" and rc.config.budget.max_cost_usd and not (mi.input_price or mi.output_price) \
+                and not rc.provider.reports_cost:
+            # 未登记价格的模型费用记为 0：费用预算形同虚设，必须明确告诉用户，而不是悄悄失效
+            yield self._ev(E.NOTICE, level="warn", code="unpriced_model",
+                           text=f"模型 {rc.model} 未登记价格，费用预算 max_cost_usd 不会生效；请改用 max_total_tokens 限额")
         try:
             async for ev in self._body(prompt):
                 yield ev

@@ -63,7 +63,7 @@ export function assistantItem(m, results, ctx) {
   if (u || m.model) {
     const bits = [];
     if (m.model) bits.push(`<span>${icon("cpu", "sm")}${esc(m.model)}</span>`);
-    if (u) bits.push(`<span class="tnum" title="输入 / 输出 token">${icon("arrowUp", "sm")}${fmt.k((u.input_tokens || 0) + (u.cache_read_tokens || 0))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>`);
+    if (u) bits.push(`<span class="tnum" title="输入（含缓存命中）/ 输出 token">${icon("arrowUp", "sm")}${fmt.k(fmt.tokIn(u))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>`);
     if (u?.cache_read_tokens) bits.push(`<span class="tnum">缓存命中 ${fmt.k(u.cache_read_tokens)}</span>`);
     if (m.stop_reason === "max_tokens") bits.push(`<span>${icon("alert", "sm")}达到输出长度上限</span>`);
     w.append(h("div", { class: "msg-meta", html: bits.join("") }));
@@ -73,7 +73,8 @@ export function assistantItem(m, results, ctx) {
 
 // ====================================================================== 工具调用
 export function toolCard(call, result, ctx, { streaming = false } = {}) {
-  const fx = ctx.toolFx[call.name] || "read";
+  // 优先用这次调用实际判定的副作用等级（bash 按命令判定），没有时才退回工具的静态等级
+  const fx = result?.details?.effect || ctx.toolFx[call.name] || "read";
   const card = h("div", { class: "tool", id: "tc-" + call.id, "data-open": "false" });
   const bodyId = "tb-" + call.id;
   const head = h("button", { class: "tool-head", type: "button", "aria-expanded": "false", "aria-controls": bodyId });
@@ -123,6 +124,8 @@ export function appendLiveOutput(card, text) {
 export function setToolResult(card, msg, ctx) {
   card.classList.remove("running");
   const d = msg.details || {};
+  const fxBadge = card.querySelector(".badge.fx");
+  if (fxBadge && d.effect) fxBadge.outerHTML = effectBadge(d.effect);
   const text = (msg.content || []).map((b) => b.text || "").join("");
   const st = d.status || (msg.is_error ? "error" : "ok");
   const meta = TOOL_STATUS[st] || { label: st, cls: msg.is_error ? "err" : "ok", icon: msg.is_error ? "x" : "check" };
@@ -300,7 +303,8 @@ export function runSummary(r) {
   const reason = r.result?.reason || r.status_reason || "";
   return h("div", { class: "run-summary", html: `${statusBadge(r.status)}<span class="reason">${esc(reason)}</span>
     <span class="stats tnum"><span title="轮次">${icon("repeat", "sm")}${esc(r.result?.turns ?? "—")} 轮</span>
-    <span title="输入 / 输出 token">${icon("arrowUp", "sm")}${fmt.k(u.input_tokens)} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>
+    <span title="输入（含缓存命中）/ 输出 token，各轮累计">${icon("arrowUp", "sm")}${fmt.k(fmt.tokIn(u))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>
+    ${u.cache_read_tokens ? `<span title="缓存命中的输入 token（按缓存价计费）">缓存命中 ${fmt.k(u.cache_read_tokens)}</span>` : ""}
     <span title="费用">${icon("coins", "sm")}${fmt.money(u.cost_usd)}</span><span title="耗时">${icon("clock", "sm")}${fmt.dur(secs)}</span></span>` });
 }
 

@@ -157,7 +157,7 @@ class ToolExecutor:
 
         def done(result: ToolResult, status: str, snapshot: str | None = None) -> Message:
             # tool_end 由 run_batch 在结果落盘后统一发布
-            return self._result_msg(call, result, status, int((time.monotonic() - t0) * 1000), snapshot)
+            return self._result_msg(call, result, status, int((time.monotonic() - t0) * 1000), snapshot, effect)
 
         if p.error or tool is None:
             return done(ToolResult.error(p.error or "工具不可用"), "invalid")
@@ -280,7 +280,7 @@ class ToolExecutor:
             self._persist_session_meta(tainted=True)  # 污点属于会话：暂停恢复、崩溃接管之后依然有效
             publish(E.NOTICE, {"level": "info", "code": "tainted",
                                "text": f"{call.name} 的输出来自不可信来源：之后的副作用操作将需要人工确认"})
-        msg = self._result_msg(call, result, status, exec_ms, snapshot)
+        msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
         if decision == Decision.ASK:
             msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]
         return msg
@@ -396,9 +396,13 @@ class ToolExecutor:
             rc.store.update_session(rc.session_id, meta={**s.meta, **kv})
 
     @staticmethod
-    def _result_msg(call: ToolCall, result: ToolResult, status: str, duration_ms: int, snapshot: str | None) -> Message:
+    def _result_msg(call: ToolCall, result: ToolResult, status: str, duration_ms: int, snapshot: str | None,
+                    effect: Effect | None = None) -> Message:
         details = dict(result.details or {})
         details.update(status=status, duration_ms=duration_ms)
+        if effect is not None:
+            # 按参数判定的实际副作用等级（bash 的 ls 是只读）：落盘后界面重绘时仍能显示正确的等级
+            details["effect"] = str(effect)
         if snapshot:
             details["snapshot"] = snapshot
         msg = tool_result_message(call, result.content, is_error=result.is_error, details=details)

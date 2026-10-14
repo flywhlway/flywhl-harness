@@ -37,7 +37,7 @@ const GROUPS = [
 ];
 const SORTS = {
   updated_at: (r) => r.updated_at, cost: (r) => r.usage?.cost_usd || 0,
-  tokens: (r) => (r.usage?.input_tokens || 0) + (r.usage?.output_tokens || 0), dur: (r) => (r.updated_at || 0) - (r.created_at || 0),
+  tokens: (r) => fmt.tokTotal(r.usage), dur: (r) => (r.updated_at || 0) - (r.created_at || 0),
 };
 
 export function mountRuns(root, app) {
@@ -74,7 +74,7 @@ export function mountRuns(root, app) {
   function renderStats() {
     const r = S.runs;
     const cost = r.reduce((s, x) => s + (x.usage?.cost_usd || 0), 0);
-    const tok = r.reduce((s, x) => s + (x.usage?.input_tokens || 0) + (x.usage?.output_tokens || 0), 0);
+    const tok = r.reduce((s, x) => s + fmt.tokTotal(x.usage), 0);
     const stat = (k, v, ic) => `<div class="stat"><span class="k">${icon(ic, "sm")}${k}</span><span class="v">${v}</span></div>`;
     $("#rn-stats", inner).innerHTML = stat("运行总数", fmt.int(r.length), "activity")
       + stat("进行中", fmt.int(r.filter((x) => ACTIVE.has(x.status)).length), "clock")
@@ -105,7 +105,7 @@ export function mountRuns(root, app) {
         <td><div class="cell-main" title="${esc(r.prompt || "")}">${r.parent_run_id ? `<span class="badge square" style="margin-right:6px">${icon("bot")}子代理</span>` : ""}${esc(r.prompt || "（恢复执行）")}</div>
           <div class="cell-sub">${esc(r.session_title || "")} · <span class="mono">${esc(fmt.shortId(r.id))}</span></div></td>
         <td class="num" data-hide-sm>${r.attempt}</td><td class="num" data-hide-sm>${esc(r.result?.turns ?? "—")}</td>
-        <td class="num">${fmt.k((r.usage?.input_tokens || 0) + (r.usage?.output_tokens || 0))}</td>
+        <td class="num">${fmt.k(fmt.tokTotal(r.usage))}</td>
         <td class="num" data-hide-sm>${fmt.money(r.usage?.cost_usd)}</td>
         <td class="num" data-hide-sm>${fmt.dur((r.updated_at || 0) - (r.created_at || 0))}</td>
         <td class="num" title="${esc(fmt.time(r.updated_at))}">${esc(fmt.ago(r.updated_at))}</td></tr>`).join("")}</tbody></table>`;
