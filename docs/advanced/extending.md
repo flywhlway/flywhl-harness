@@ -161,7 +161,7 @@ from flywhl_harness.llm.resilient import ResilientProvider
 from flywhl_harness.runtime.retry import RetryPolicy
 
 MODELS["my-model-1"] = ModelInfo("my-model-1", "myllm", context_window=128_000, max_output=8_192,
-                                 input_price=1.0, output_price=2.0)
+                                 input_price=1.0, output_price=2.0)   # 官方按人民币计价时加 currency="CNY"
 p = MyProvider()
 rp = ResilientProvider([(p, "my-model-1"), (p, "my-model-mini")], RetryPolicy(max_attempts=4))
 h = Harness(HarnessConfig.load(), provider=rp, model="my-model-1")
@@ -246,7 +246,7 @@ rules = [
 |---|---|
 | 语法 | `决策:工具(模式)`，工具名与模式都是 glob（`fnmatch`，`*` 可以跨越 `/`） |
 | 评估顺序 | deny → ask → allow，先命中者生效；任何来源的 deny 都不能被 allow 推翻 |
-| 托管基线 | `MANAGED_BASELINE` 总是排在最前：密钥文件禁读，`.env` 需确认，最危险的几条命令直接拒绝 |
+| 托管基线 | `MANAGED_BASELINE` 总是排在最前：密钥文件禁读，`.env` 需确认，harness 数据目录禁写、项目配置需确认，最危险的几条命令直接拒绝 |
 | 灾难性命令 | 命令分析标记 `catastrophic`（删根目录 / 家目录、格式化磁盘、写块设备、fork 炸弹）时，在任何规则与模式之前直接 deny，`bypass` 也不例外 |
 | bash 命令分析 | 先剥掉 `env` / `timeout` / `nice` / `xargs` / `sudo` 等包装命令，按真正执行的命令分级；`sh -c '...'` 与 `eval` 的字符串递归分析；命令替换、解释器内联代码等无法静态分析的结构按 `external` 处理 |
 | 工作区外路径 | bash 参数或重定向指向工作区之外（含 `~`、`$HOME`）→ 至少 `external`，需确认；文件工具读工作区外路径同样转为 ask |
@@ -415,7 +415,7 @@ asyncio.create_task(watch(h, run.id))
 | `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
 
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
-`FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`；
+`FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_CNY_PER_USD`（人民币计价模型的折算汇率）、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`；
 也接受 `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL`（同样是 `<供应商>:<模型>` 写法），`FLYWHL_*` 优先。
 `flywhl` 命令启动时从当前目录的 `.env` 读取密钥与模型选择类变量（其余变量忽略并提示），`--env-file` 指定的文件则完整加载；
 两者都不覆盖已存在的环境变量，库代码也不会隐式读取 `.env`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。

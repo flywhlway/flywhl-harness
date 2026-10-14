@@ -397,21 +397,36 @@ flywhl-harness 的对应措施：
 | `supports_thinking` | `AnthropicProvider._kwargs()` | 开启 adaptive thinking；此时不传 `temperature` |
 | `append_only` | `ContextManager` | 关闭改写历史的清理 |
 | `server_fallback` | `AnthropicProvider._kwargs()` | 是否附加服务端降级参数 |
+| `currency` / `tiers` | `compute_cost()` | 价格的币种（`USD` / `CNY`）；按单次请求输入规模分档的长上下文价格 |
 
 ```python
 def compute_cost(info: ModelInfo, usage: Usage) -> float:
+    price: ModelInfo | PriceTier = info
+    for tier in info.tiers:                      # 例：MiniMax-M3 输入超过 512K 时整次请求按高一档
+        if usage.context_tokens > tier.above:
+            price = tier
     m = 1_000_000
-    return round(
-        usage.input_tokens * info.input_price / m
-        + usage.output_tokens * info.output_price / m
-        + usage.cache_read_tokens * info.cache_read_price / m
-        + usage.cache_write_tokens * info.cache_write_price / m,
-        8,
+    native = (
+        usage.input_tokens * price.input_price / m
+        + usage.output_tokens * price.output_price / m
+        + usage.cache_read_tokens * price.cache_read_price / m
+        + usage.cache_write_tokens * price.cache_write_price / m
     )
+    return round(native * usd_per_unit(info.currency), 8)   # 统一折算成美元
 ```
 
-价格以各家官方价格页为准：Claude 与 DeepSeek 的价格核对于 2026-10。DeepSeek 分高峰与非高峰两档（非高峰为一半），表中取高峰价作为预算上限。
-OpenRouter 在 usage 里直接返回实际费用，`reports_cost=True` 的供应商以返回值为准。三个要点：
+价格以各家官方价格页为准，全部核对于 2026-10-14，按官方页面的币种登记：
+
+| 供应商 | 已登记的模型 | 币种 | 计价要点 |
+|---|---|---|---|
+| Anthropic | Opus / Sonnet / Haiku 5.5、Fable 5.1 | USD | 缓存读写分别计价 |
+| DeepSeek | `deepseek-flash`、`deepseek-v4-pro`（及旧名） | USD | 分高峰与非高峰（非高峰为一半），表中取高峰价作为预算上限 |
+| 阿里云百炼 | `qwen3.8-flash`、`qwen3.8-max` | CNY | 北京地域；隐式缓存命中按输入单价的 20% |
+| Moonshot | `kimi-k2.6`、`kimi-k2.7-code(-highspeed)`、`kimi-k3` | CNY | K3 另收缓存写入费（5 分钟档） |
+| MiniMax | `MiniMax-M2.7(-highspeed)`、`MiniMax-M3` | CNY | M3 输入超过 512K 整次请求按高一档（`PriceTier`） |
+
+人民币价格按 `CNY_PER_USD`（默认 6.70，2026-10-14 的汇率）折算成美元——预算 `max_cost_usd` 与界面都用美元，
+汇率变化时用环境变量 `FLYWHL_CNY_PER_USD` 覆盖。OpenRouter 在 usage 里直接返回实际费用，`reports_cost=True` 的供应商以返回值为准。三个要点：
 
 - **计量以真实 usage 为准。** `Usage` 的 docstring 写明“以 provider 返回值为准，本地 tokenizer 只做预估”。
   `ContextManager.estimate()` 也是这样做的：以最后一条带真实 usage 的 assistant 消息为基数，只对其后新增的消息做本地估算（中日韩字符按 1 token，其它按约 4 字符 1 token）。

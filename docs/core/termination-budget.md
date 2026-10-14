@@ -296,11 +296,12 @@ def observe(self, name: str, args: dict, result_text: str, is_error: bool) -> Lo
 async def _stop_gaps(self, msg: Message) -> list[str]:
     rc = self.rc
     gaps: list[str] = []
-    if rc.config.verify_todos:
+    planning = rc.permissions.mode == Mode.PLAN       # plan 模式的产物就是计划本身，见下方案例
+    if rc.config.verify_todos and not planning:
         todos = latest_todos(rc.log.context().messages)
         if todos and any(t.get("status") in ("pending", "in_progress") for t in todos):
             gaps.append("计划中仍有未完成项：\n" + render_todos([...]))
-    if rc.config.verify_command and rc.role == "main":
+    if rc.config.verify_command and rc.role == "main" and not planning:
         ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root))
         if not ok:
             gaps.append(f"验收命令 `{rc.config.verify_command}` 未通过：\n{out}")
@@ -320,9 +321,20 @@ async def _stop_gaps(self, msg: Message) -> list[str]:
 
 | 验收项 | 配置 | 判定 | 适用 |
 |---|---|---|---|
-| 计划 | `verify_todos=True` | 最近一次 `todo_write` 中仍有 `pending` / `in_progress` | 模型用过 todo 时 |
-| 验证命令 | `verify_command`，如 `"pytest -q"` | 退出码非 0；超时 300 秒；取输出最后 30 行作为缺口说明 | 仅主 Run（`_no_verify()` 也为子代理清空了它） |
+| 计划 | `verify_todos=True` | 最近一次 `todo_write` 中仍有 `pending` / `in_progress` | 模型用过 todo 时；plan 模式除外 |
+| 验证命令 | `verify_command`，如 `"pytest -q"` | 退出码非 0；超时 300 秒；取输出最后 30 行作为缺口说明 | 仅主 Run（`_no_verify()` 也为子代理清空了它）；plan 模式除外 |
 | Stop hook | `HookEvent.STOP` / `SUBAGENT_STOP` | hook 返回 `decision="block"`（`additional_context` 并入缺口）；不阻止时给的 `additional_context` 在完成时作为一条 reminder 落盘 | 任意自定义条件 |
+
+::: details 案例：plan 模式下验收与权限互相矛盾（真实模型回归中发现，已修复）
+plan 模式只允许只读操作，它的产物就是计划本身——计划项尚未执行是预期状态。早期版本仍然按 `verify_todos` 验收：
+deepseek-flash 在 plan 模式下写出“将 v1 改成 v2（需切到执行模式）”这样的 `pending` 项后准备结束，被连续阻止 3 次，
+每次都被要求“继续完成”，于是反复尝试被禁止的 `edit` / `write` / `bash`，触发循环守卫，最后以 `incomplete` 结束，多花了约 4 万 token。
+这个问题只在模型恰好用 `todo_write` 写计划时出现（修复前的 7 次真实运行中出现 1 次），脚本化测试没有覆盖到这种组合。
+
+现在 `_stop_gaps()` 在 plan 模式下跳过计划与验证命令两项产物验收，用户自定义的 Stop hook 照常执行；
+回归测试 `tests/test_loop.py::test_plan_mode_does_not_block_stop_on_pending_plan` 复现了当时的序列。
+教训：两套机制各自正确，组合起来却可能互相矛盾——验收条件必须与当前模式“允许做什么”一致。
+:::
 
 有缺口时，`_body()` 的处理是“有限次阻止，然后如实上报”：
 

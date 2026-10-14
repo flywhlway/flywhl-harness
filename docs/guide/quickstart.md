@@ -128,18 +128,20 @@ flywhl serve -w playground --model openai:your-model
 `flywhl doctor` 的输出能直接看出问题出在哪一层：
 
 ```text
-✓ deepseek:deepseek-flash  DeepSeek
-    ✓ 流式文本     0.8s  首个分片 0.8s
-    ✓ 工具往返     1.8s  参数 {'name': 'alpha'}
-    思考 166 字 · 输入 560 / 输出 92 tokens · 缓存命中 256 · $0.000280
-✗ dashscope:qwen3.8  阿里云百炼（通义千问）
-    [not_found HTTP 404] The model `qwen3.8` does not exist ...
+✓ ［主模型］deepseek:deepseek-flash  DeepSeek
+    ✓ 流式文本     0.9s  首个分片 0.5s
+    ✓ 工具往返     2.1s  参数 {'name': 'alpha'}
+    思考 417 字 · 输入 420 / 输出 155 tokens · 缓存命中 384 · $0.000314
+✓ ［降级 1］dashscope:qwen3.8-flash  阿里云百炼（通义千问）
+    ✓ 流式文本     1.1s  首个分片 0.5s
+    ✓ 工具往返     5.0s  参数 {'name': 'alpha'}
 ✗ zhipu:glm-5.3-flash  智谱（GLM）
-    [billing HTTP 429] 余额不足或无可用资源包,请充值。
+    [billing HTTP 429] {"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}
 ```
 
-方括号里是错误分类，它决定了 harness 的处理方式：`not_found` 与 `billing` 会沿降级链换模型或换供应商，不会原地重试；
-`rate_limit` 才会退避重试。
+不带参数时，doctor 检查当前配置的主模型与降级链（标出位置），以及每个配置了密钥的供应商的默认模型；
+降级链上有接不通的项会单独提示——降级到它时才发现就晚了。方括号里是错误分类，它决定了 harness 的处理方式：
+`not_found` 与 `billing` 会沿降级链换模型或换供应商，不会原地重试；`rate_limit` 才会退避重试。
 
 ::: tip 思考模型的两个开关
 `thinking = "enabled" | "disabled"` 与 `reasoning_effort` 由 harness 翻译成各家自己的字段（DeepSeek 的 `thinking.type`、
