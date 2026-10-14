@@ -227,6 +227,9 @@ if "git push" in (inp.get("tool_input") or {}).get("command", ""):
 
 两个运行细节：hook 进程以新会话启动，超时（`timeout`）时整个进程组被 `SIGKILL`，脚本派生的子进程不会残留在后台；hook 进程继承 harness 的**完整**环境变量，不像 bash 工具那样剥离密钥类变量，脚本来源要与代码一样审查。
 
+写在启动目录 `flywhl.toml` 里的 hook 要先信任这份配置才会注册：`flywhl` 在终端里逐项列出并询问，也可以加 `--trust`；
+非交互运行时忽略并提示。只给自己用的 hook 放进用户配置 `~/.flywhl/config.toml`，或用 `-c` 指定配置文件，就不需要确认（见配方 ⑨）。
+
 ## ④ 权限规则与模式
 
 ```toml
@@ -380,7 +383,24 @@ asyncio.create_task(watch(h, run.id))
 
 ## ⑨ 配置参考速查
 
-以 `config.py` 为准；加载顺序为 默认值 → `flywhl.toml`（或 `.flywhl/config.toml`）→ 环境变量 → 显式参数，**未知键直接报错**。
+以 `config.py` 为准；加载顺序为 默认值 → 用户配置 `~/.flywhl/config.toml` → 项目配置 → 环境变量 → 显式参数，**未知键直接报错**。
+项目配置是 `-c` 指定的文件；没有指定时，是启动目录的 `flywhl.toml`（或 `.flywhl/config.toml`）。两层文件里的 `hooks` 与
+`permissions.rules` 追加合并，其余字段后者覆盖前者。
+
+启动目录的配置文件可能来自刚克隆的仓库，其中下列设置要先信任这份文件的当前内容才生效：`hooks`、`mcp_servers`、`verify_command`、
+`base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`，以及 `permissions` 中放宽审批的取值
+（`allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`）。其余字段直接生效（白名单见 `config.py::_SAFE_KEYS`）。
+信任按“绝对路径 + 内容 SHA-256”记在 `~/.flywhl/trusted.json`，内容变化后重新确认；用户配置与 `-c` 指定的文件视为可信。
+库代码默认忽略未信任的设置并发出 `UntrustedConfigWarning`，要自己做确认时传回调：
+
+```python
+from flywhl_harness.config import HarnessConfig, TrustRequest
+
+def ask(req: TrustRequest) -> bool:          # req.path / req.digest / req.risky（每项一行，供人审阅）
+    return my_ui.confirm(f"信任 {req.path}？", req.risky)   # 返回 True 即记入 trusted.json
+
+cfg = HarnessConfig.load(trust=ask)
+```
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
@@ -415,7 +435,8 @@ asyncio.create_task(watch(h, run.id))
 | `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
 
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
-`FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_CNY_PER_USD`（人民币计价模型的折算汇率）、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`；
+`FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_CNY_PER_USD`（人民币计价模型的折算汇率）、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`，
+以及 `FLYWHL_HOME`（用户配置与信任记录所在目录，默认 `~/.flywhl`）；
 也接受 `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL`（同样是 `<供应商>:<模型>` 写法），`FLYWHL_*` 优先。
 `flywhl` 命令启动时从当前目录的 `.env` 读取密钥与模型选择类变量（其余变量忽略并提示），`--env-file` 指定的文件则完整加载；
 两者都不覆盖已存在的环境变量，库代码也不会隐式读取 `.env`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。

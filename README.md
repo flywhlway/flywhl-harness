@@ -164,5 +164,9 @@ src/flywhl_harness/
   只在官方端点上发送（经 OpenRouter 等网关调用时自动关闭），可通过 `AnthropicProvider(server_fallback=False)` 关闭。
 - **启动目录的 `.env` 只接受密钥与模型选择**：工作区默认就是启动目录，可能是不可信的仓库；它的 `.env` 若能设置 `*_BASE_URL`、
   `HTTPS_PROXY` 或权限模式，就能骗走真实密钥或绕过审批。这类变量只从环境变量或 `--env-file` 显式指定的文件读取。
+- **启动目录的 `flywhl.toml` 先信任再生效**：其中执行命令（`hooks`、`mcp_servers`、`verify_command`）、改变请求去向（`base_url`、
+  `api_key_env`）、放宽审批（`bypass`、allow 规则）的设置，确认后才生效，信任按“路径 + 内容哈希”记在 `~/.flywhl/trusted.json`；
+  模型选择、限额、deny 规则这类设置直接生效。代价是在新仓库里第一次运行要多回答一个问题（或加 `--trust`）；
+  用户配置 `~/.flywhl/config.toml` 与 `-c` 指定的文件视为可信。
 
 MIT License

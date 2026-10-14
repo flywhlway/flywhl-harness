@@ -14,6 +14,8 @@
 
 启动时读取当前目录的 ``.env``，但只接受各家密钥与模型选择类变量（见 ``IMPLICIT_ENV_KEYS``）；
 地址、代理、权限模式等变量要么写进环境，要么用 ``--env-file`` 显式指定（表示你信任这个文件）。
+当前目录的 ``flywhl.toml`` 同理：其中执行命令、改变请求去向、放宽审批的设置要先信任——终端里逐项确认，
+或加 ``--trust``；非交互运行时忽略并提示。``-c`` 显式指定的文件视为可信。
 """
 
 from __future__ import annotations
@@ -27,10 +29,10 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
-from .config import HarnessConfig, load_dotenv, read_dotenv
+from .config import HarnessConfig, TrustRequest, flywhl_home, load_dotenv, read_dotenv
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
@@ -142,8 +144,33 @@ def load_env(env_file: str | None) -> tuple[list[str], list[str]]:
     return load_dotenv(".env", allow=IMPLICIT_ENV_KEYS.__contains__), ignored
 
 
+def confirm_trust(args: argparse.Namespace) -> Callable[[TrustRequest], bool]:
+    """项目配置的信任确认：``--trust`` 直接信任；终端交互时逐项展示后询问；非交互（``--json``、管道）一律不信任。"""
+
+    def decide(req: TrustRequest) -> bool:
+        if getattr(args, "trust", False):
+            return True
+        print(_c("yellow", f"! {req.path} 中有需要信任才能生效的设置（会执行命令、改变请求去向或放宽审批）："),
+              file=sys.stderr)
+        for item in req.risky:
+            print(f"    {item}", file=sys.stderr)
+        if sys.stdin.isatty() and not getattr(args, "json", False):
+            print(f"  信任这份配置吗？确认后记入 {flywhl_home() / 'trusted.json'}，文件内容变化后会再次询问 [y/N] > ",
+                  end="", file=sys.stderr, flush=True)
+            try:
+                if input().strip().lower() in ("y", "yes", "是"):
+                    return True
+            except EOFError:
+                pass
+        print(_c("yellow", "  已忽略以上设置；确认可信后加 --trust 重新运行，或用 -c 显式指定该文件"), file=sys.stderr)
+        return False
+
+    return decide
+
+
 def _config(args: argparse.Namespace) -> HarnessConfig:
-    cfg = HarnessConfig.load(getattr(args, "config", None), workspace=getattr(args, "workspace", None),
+    cfg = HarnessConfig.load(getattr(args, "config", None), trust=confirm_trust(args),
+                             workspace=getattr(args, "workspace", None),
                              provider=getattr(args, "provider", None), model=getattr(args, "model", None))
     if getattr(args, "mode", None):
         cfg.permissions.mode = args.mode
@@ -356,7 +383,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--version", action="version", version=__version__)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-w", "--workspace", help="工作区目录（默认当前目录）")
-    common.add_argument("-c", "--config", help="配置文件（默认 ./flywhl.toml）")
+    common.add_argument("-c", "--config", help="配置文件，视为可信（默认 ./flywhl.toml，其中的高危设置需要信任）")
+    common.add_argument("--trust", action="store_true",
+                        help="信任当前目录 flywhl.toml 的这一版内容（含 hook、MCP、放宽审批等设置）并记录下来")
     common.add_argument("--provider", choices=["auto", *PROFILES])
     common.add_argument("--model", help="模型，写成 <供应商>:<模型>（如 deepseek:deepseek-flash）或只写模型名")
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")

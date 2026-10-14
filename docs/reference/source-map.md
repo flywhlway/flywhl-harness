@@ -32,10 +32,10 @@
 | `types.py` | 230 | `Message`、`TextBlock`、`ThinkingBlock`、`ToolCall`、`Usage`、`StopReason`、`MsgKind`、`unpaired_tool_calls()` |
 | `events.py` | 80 | 事件类型常量 `E`、`Event`、`EPHEMERAL_EVENTS` |
 | `cancel.py` | 130 | `CancelToken`（`cancel` / `child` / `guard` / `iterate` / `sleep`）、`RunCancelled`、`RunPaused` |
-| `config.py` | 180 | `HarnessConfig` 及子配置；`load()`：默认值 → `flywhl.toml` → 环境变量 → 参数，未知键报错 |
+| `config.py` | 380 | `HarnessConfig` 及子配置；`load()`：默认值 → 用户配置 → 项目配置 → 环境变量 → 参数，未知键报错；项目配置信任（`split_untrusted`、`trusted.json`） |
 | `prompts.py` | 150 | 系统提示、`find_project_context()`（AGENTS.md）、`find_skills()`（渐进披露）、压缩模板、`reminder()` |
 | `_utils.py` | 170 | `new_id`、`canonical_json`、`estimate_tokens`、截断函数、`extract_json_block` |
-| `cli.py` | 360 | `flywhl` 命令、`TerminalRenderer`、终端审批 |
+| `cli.py` | 450 | `flywhl` 命令、`TerminalRenderer`、终端审批、`.env` 白名单与项目配置信任确认 |
 
 ### agent/ —— 大脑
 

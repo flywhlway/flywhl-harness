@@ -213,10 +213,11 @@ rules = ["allow:mcp__demo__echo", "ask:mcp__demo__*"]
 
 `load_mcp_tools` 识别的键只有 `command`、`args`、`env`、`cwd`。服务器子进程的工作目录默认是工作区根，所以 `add_note` 写的 `notes.txt` 出现在工作区里。`env` 叠加在去掉密钥类变量后的环境之上，是给服务器传凭证的唯一途径。
 
-**第 2 步：确认工具已注册。**
+**第 2 步：确认工具已注册。** `mcp_servers` 会启动子进程，allow 规则会放宽审批，这两项都要先信任这份配置：
+第一次运行时 `flywhl` 逐项列出并询问，也可以加 `--trust`（原因见 [19 安全](/governance/security)）。
 
 ```text
-$ flywhl tools
+$ flywhl tools --trust
 ...
 mcp__demo__add_note          external  不可中断   把一条笔记追加到 notes.txt（来自 MCP 服务器 demo）
 mcp__demo__echo              read      可中断    原样返回输入的文本（来自 MCP 服务器 demo）

@@ -20,12 +20,20 @@
     event = "pre_tool_use"
     matcher = "bash"
     command = "python scripts/guard.py"
+
+启动目录的配置文件可能来自刚克隆的仓库：上例中的 allow 规则与 ``[[hooks]]`` 这类能执行命令、改变请求去向、
+放宽审批的设置，要先信任这份文件的当前内容才会生效，见 ``split_untrusted``。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
+import time
 import tomllib
+import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -135,15 +143,27 @@ class HarnessConfig:
 
     # ------------------------------------------------------------------ 加载
     @classmethod
-    def load(cls, path: str | Path | None = None, **overrides: Any) -> "HarnessConfig":
-        """加载顺序（后者覆盖前者）：默认值 → flywhl.toml → 环境变量 → 显式参数。"""
+    def load(cls, path: str | Path | None = None, *, trust: Callable[[TrustRequest], bool] | None = None,
+             **overrides: Any) -> "HarnessConfig":
+        """加载顺序（后者覆盖前者）：默认值 → 用户配置 → 项目配置 → 环境变量 → 显式参数。
+
+        - 用户配置 ``~/.flywhl/config.toml``（目录见 ``flywhl_home()``）与 ``path`` 显式指定的文件视为可信；
+        - 不给 ``path`` 时从启动目录找 ``flywhl.toml`` / ``.flywhl/config.toml``。其中的高危设置只在这份文件的
+          当前内容被信任过之后生效；未信任时交给 ``trust`` 回调决定（返回 True 即记入 ``trusted.json``），
+          没有回调则忽略这些设置并发出 ``UntrustedConfigWarning``；
+        - 两层文件里的 ``hooks`` 与 ``permissions.rules`` 是追加而不是替换：项目配置删不掉用户配置里的守卫 hook 与 deny 规则。
+        """
         cfg = cls()
-        candidates = [Path(path)] if path else [Path("flywhl.toml"), Path(".flywhl/config.toml")]
-        for p in candidates:
-            if p.is_file():
-                with p.open("rb") as f:
-                    _merge(cfg, tomllib.load(f))
-                break
+        user_file = (flywhl_home() / "config.toml").resolve()
+        if user_file.is_file():
+            _merge(cfg, tomllib.loads(user_file.read_text(encoding="utf-8")), layer=True)
+        project = Path(path) if path else next((p for p in map(Path, PROJECT_CONFIG_FILES) if p.is_file()), None)
+        if project is not None and project.is_file() and project.resolve() != user_file:
+            raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
+            data = tomllib.loads(raw.decode("utf-8"))
+            if not path:
+                data = _trusted_part(project.resolve(), raw, data, trust)
+            _merge(cfg, data, layer=True)
         env_map = {
             "FLYWHL_PROVIDER": "provider",
             "FLYWHL_MODEL": "model",
@@ -214,16 +234,145 @@ def load_dotenv(path: str | Path = ".env", *, override: bool = False,
     return loaded
 
 
-def _merge(dc: Any, data: dict[str, Any]) -> None:
-    """把字典递归合并进 dataclass；未知键直接报错，避免配置拼写错误被静默忽略。"""
+# ---------------------------------------------------------------------- 项目配置信任
+PROJECT_CONFIG_FILES = ("flywhl.toml", ".flywhl/config.toml")
+
+# 和启动目录的 .env 一样用白名单：只影响“用哪家模型、花多少钱、何时收尾”的设置直接生效，最坏是效果差一点、多花一点钱。
+# 其余字段都要信任——hooks / mcp_servers / verify_command 会执行命令；base_url / api_key / api_key_env / extra_body
+# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写。新增字段默认落在需要信任的一侧。
+_SAFE_KEYS = frozenset({
+    "provider", "model", "fallback_models", "max_tokens", "temperature", "thinking", "reasoning_effort",
+    "request_timeout", "max_retries", "system_prompt", "append_system_prompt", "load_agents_md", "load_skills",
+    "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
+    "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
+    "context", "budget", "loop_guard",
+})
+# permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
+_SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
+    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,),
+}
+_TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
+
+
+class UntrustedConfigWarning(UserWarning):
+    """项目配置里的高危设置因为没有被信任而被忽略。"""
+
+
+@dataclass
+class TrustRequest:
+    """一份等待信任的项目配置，交给 ``HarnessConfig.load(trust=...)`` 的回调判断。"""
+
+    path: Path          # 绝对路径。信任绑定位置：同样一行 python scripts/guard.py，换个仓库执行的就是另一份脚本
+    digest: str         # 文件内容的 SHA-256，内容一变就要重新确认
+    risky: list[str]    # 需要信任才能生效的设置，每项一行，供人审阅
+
+
+def flywhl_home() -> Path:
+    """用户级目录：用户配置 config.toml 与信任记录 trusted.json 所在处。``FLYWHL_HOME`` 可改（测试、容器）。"""
+    return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
+
+
+def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。
+
+    未知键留在前一部分，交给 ``_merge`` 照常报错——拼写错误不该变成一次信任确认。
+    """
+    known = {f.name for f in fields(HarnessConfig)}
+    safe: dict[str, Any] = {}
+    risky: list[str] = []
+    for key, value in data.items():
+        if key == "permissions" and isinstance(value, dict):
+            perms: dict[str, Any] = {}
+            for k, v in value.items():
+                if k == "rules" and isinstance(v, list):
+                    perms[k] = [r for r in v if isinstance(r, str) and _TIGHTENING_RULE.match(r)]
+                    risky += [f"permissions.rules: {r!r}" for r in v if r not in perms[k]]
+                elif k in _SAFE_PERMISSIONS and v not in _SAFE_PERMISSIONS[k]:
+                    risky.append(f"permissions.{k} = {v!r}")
+                else:
+                    perms[k] = v
+            safe[key] = perms
+        elif key in _SAFE_KEYS or key not in known:
+            safe[key] = value
+        else:
+            risky += _describe(key, value)
+    # 转义控制字符：防止配置里的终端转义序列把确认提示改写成别的样子
+    return safe, ["".join(c if c.isprintable() else repr(c)[1:-1] for c in s) for s in risky]
+
+
+def _describe(key: str, value: Any) -> list[str]:
+    """高危设置写成一行：会执行的命令完整展示（不截断，截断处正好可以藏东西），其余展示取值。"""
+    if key == "hooks" and isinstance(value, list) and value:
+        return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}"
+                if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
+    if key == "mcp_servers" and isinstance(value, dict) and value:
+        return [f"mcp_servers.{name}: 启动 {' '.join(map(str, [s.get('command'), *s.get('args', [])]))!r}"
+                if isinstance(s, dict) else f"mcp_servers.{name} = {s!r}" for name, s in value.items()]
+    return [f"{key} = {value!r}"]
+
+
+def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
+                  trust: Callable[[TrustRequest], bool] | None) -> dict[str, Any]:
+    """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。"""
+    safe, risky = split_untrusted(data)
+    if not risky:
+        return data
+    req = TrustRequest(path, hashlib.sha256(raw).hexdigest(), risky)
+    if is_trusted(req):
+        return data
+    if trust is None:
+        warnings.warn(f"{path} 中的以下设置需要信任才能生效，已忽略：{'；'.join(risky)}。"
+                      "确认可信后用 HarnessConfig.load(path=...) 显式加载该文件", UntrustedConfigWarning, stacklevel=3)
+    elif trust(req):
+        record_trust(req)
+        return data
+    return safe
+
+
+def _trust_file() -> Path:
+    return flywhl_home() / "trusted.json"
+
+
+def _trust_records() -> dict[str, Any]:
+    try:
+        data = json.loads(_trust_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}           # 记录缺失或损坏，按“都没信任过”处理：多问一次，而不是放行
+    return data if isinstance(data, dict) else {}
+
+
+def is_trusted(req: TrustRequest) -> bool:
+    rec = _trust_records().get(str(req.path))
+    return isinstance(rec, dict) and rec.get("sha256") == req.digest
+
+
+def record_trust(req: TrustRequest) -> None:
+    """记下“这个位置的这份内容可信”。同一路径只保留最近一次确认的内容。"""
+    records = _trust_records()
+    records[str(req.path)] = {"sha256": req.digest, "trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    f = _trust_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, f)      # 原子替换：并发写入最坏丢一条记录，不会留下半个文件
+
+
+def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
+    """把字典递归合并进 dataclass；未知键直接报错，避免配置拼写错误被静默忽略。
+
+    ``layer=True`` 用于叠加配置文件：``hooks`` 与 ``rules`` 追加到已有列表之后，其余字段照常覆盖。
+    """
     names = {f.name: f for f in fields(dc)}
     for key, value in data.items():
         if key not in names:
             raise ValueError(f"未知配置项：{key}（可选：{', '.join(sorted(names))}）")
         current = getattr(dc, key)
         if is_dataclass(current) and isinstance(value, dict):
-            _merge(current, value)
+            _merge(current, value, layer=layer)
         elif key == "hooks" and isinstance(value, list):
-            setattr(dc, key, [h if isinstance(h, HookConfig) else HookConfig(**h) for h in value])
+            hooks = [h if isinstance(h, HookConfig) else HookConfig(**h) for h in value]
+            setattr(dc, key, current + hooks if layer else hooks)
+        elif key == "rules" and layer and isinstance(value, list):
+            setattr(dc, key, current + value)
         else:
             setattr(dc, key, value)

@@ -1,5 +1,7 @@
-# flywhl-harness 配置示例：复制为工作区（或启动目录）下的 flywhl.toml 后按需修改。
-# 加载顺序：默认值 → flywhl.toml → 环境变量（FLYWHL_*）→ 命令行参数。未知字段会直接报错。
+# flywhl-harness 配置示例：复制为启动目录下的 flywhl.toml 后按需修改。
+# 加载顺序：默认值 → ~/.flywhl/config.toml → flywhl.toml → 环境变量（FLYWHL_*）→ 命令行参数。未知字段会直接报错。
+# 启动目录的配置可能来自不可信仓库：base_url、verify_command、allow 规则、hooks、mcp_servers 等设置要先信任才生效
+# （终端里逐项确认，或 flywhl --trust）；-c 指定的文件与 ~/.flywhl/config.toml 视为可信。
 
 # 模型写成 "<供应商>:<模型>"。供应商：deepseek | dashscope | kimi | zhipu | minimax | openrouter | openai | ollama | anthropic | mock
 # 不填 model 时按 provider 选择；provider = "auto" 按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter

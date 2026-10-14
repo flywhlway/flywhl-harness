@@ -37,6 +37,12 @@ def tool_ends(events) -> list[dict]:
     return [e.data for e in events if e.type == E.TOOL_END]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_flywhl_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户配置与信任记录指向临时目录：本机的 ~/.flywhl 不影响测试，测试也不会写它。"""
+    monkeypatch.setenv("FLYWHL_HOME", str(tmp_path / "flywhl-home"))
+
+
 @pytest.fixture
 def ws(tmp_path: Path) -> Path:
     d = tmp_path / "ws"

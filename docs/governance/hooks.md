@@ -524,11 +524,12 @@ Claude Code 的 Stop hook 输入中有类似作用的 `stop_hook_active` 字段�
 hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略，`CommandHook` 还继承了完整的环境变量。
 这意味着：
 
-- **克隆一个仓库就可能执行它的代码。** `flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。
+- **克隆一个仓库就可能执行它的代码。** 如果无条件加载项目配置，`flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。
   恶意仓库可以在 `session_start` hook 里读取 `~/.aws/credentials` 并外发——托管基线拦截的是 **模型** 读密钥，拦不住 hook。
 - **hook 脚本被篡改等于策略被篡改。** 模型在 bypass 模式下改写了 `scripts/guard.py`，下一次调用时拦截逻辑就变了。
 
-对应的治理措施：项目级 hook 首次加载或内容变化时要求人工确认（Claude Code 在启动时快照 hook 配置、变更需在 `/hooks` 中审阅，以官方文档为准）；
+对应的治理措施：项目级 hook 首次加载或内容变化时要求人工确认——本项目对启动目录的 `flywhl.toml` 按“路径 + 内容哈希”记录信任，
+未信任时不注册其中的 hook（Claude Code 在启动时快照 hook 配置、变更需在 `/hooks` 中审阅，以官方文档为准）；
 用哈希锁定 hook 脚本内容；把 hook 脚本所在目录加入 `deny:write(...)` 规则，防止 Agent 改写自己的护栏；
 给命令 hook 一个最小化的环境，而不是 `os.environ`。更完整的供应链讨论见 [19 安全](/governance/security)。
 

@@ -178,7 +178,7 @@ flywhl doctor                           # 模型接入自检（每个配置了�
 
 ## 配置文件
 
-在工作区（或启动目录）放一个 `flywhl.toml`，所有字段都有默认值，未知字段会直接报错（防止拼写错误被静默忽略）：
+在启动目录（默认也是工作区）放一个 `flywhl.toml`，所有字段都有默认值，未知字段会直接报错（防止拼写错误被静默忽略）：
 
 ```toml
 model = "deepseek:deepseek-flash"
@@ -211,7 +211,10 @@ command = "python3"
 args = ["examples/mcp_echo_server.py"]
 ```
 
-加载顺序：默认值 → `flywhl.toml` → 环境变量（`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_BASE_URL`、
+上面的 `verify_command`、allow 规则、`[[hooks]]` 与 `[mcp_servers]` 会执行命令或放宽审批：写在启动目录的 `flywhl.toml` 里时，
+要先信任这份配置才生效（终端里会逐项询问，或加 `--trust`），原因见 [19 安全](/governance/security)。
+
+加载顺序：默认值 → 用户配置 `~/.flywhl/config.toml` → `flywhl.toml` → 环境变量（`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_BASE_URL`、
 `FLYWHL_PERMISSION_MODE`……）→ 命令行参数。完整字段见 `src/flywhl_harness/config.py`。
 
 ## 作为库使用

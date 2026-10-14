@@ -88,9 +88,10 @@ async def test_kill_9_then_recover_completes(ws, tmp_path):
     (ws / "flywhl.toml").write_text(f'model = "{live_model()}"\nheartbeat_seconds = 0.5\nstale_after_seconds = 3\n'
                                     'snapshots = false\n[permissions]\non_ask = "allow"\n', encoding="utf-8")
     exe = [sys.executable, "-m", "flywhl_harness.cli"]
+    cfg = ["-c", str(ws / "flywhl.toml")]   # on_ask = "allow" 需要信任：显式指定，不走信任确认
     env = {**os.environ, "FLYWHL_FALLBACK_MODELS": ""}
     env.pop("LLM_FALLBACK_MODEL", None)
-    proc = subprocess.Popen(exe + ["run", "--json", "-w", str(ws),
+    proc = subprocess.Popen(exe + ["run", "--json", "-w", str(ws), *cfg,
                                    "先用 sleep 工具等待 20 秒，然后读取 a.txt，只回复里面的数字。"],
                             cwd=ws, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     deadline = time.monotonic() + 120
@@ -104,7 +105,7 @@ async def test_kill_9_then_recover_completes(ws, tmp_path):
     proc.send_signal(signal.SIGKILL)
     proc.wait()
     await asyncio.sleep(4)              # 心跳过期，才算“Worker 已死”
-    out = subprocess.run(exe + ["recover", "-w", str(ws)], cwd=ws, capture_output=True, text=True, env=env, timeout=240)
+    out = subprocess.run(exe + ["recover", "-w", str(ws), *cfg], cwd=ws, capture_output=True, text=True, env=env, timeout=240)
     store = Store(ws / ".flywhl" / "harness.db")
     rec = store.get_run(run_id)
     assert rec.status == "completed", (rec.status, out.stdout[-2000:], out.stderr[-2000:])
