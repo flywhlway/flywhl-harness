@@ -40,6 +40,7 @@ from ..events import E, Event
 from ..llm.base import ErrorKind, ModelRequest, ProviderError
 from ..llm.replay import context_fingerprint
 from ..policy.hooks import HookEvent, HookInput
+from ..policy.permissions import Mode
 from ..prompts import WRAP_UP_PROMPT, reminder
 from ..tools.extra import latest_todos, render_todos
 from ..types import Message, MsgKind, StopReason, TextBlock, tool_result_message, unpaired_tool_calls, user_message
@@ -393,13 +394,16 @@ class AgentLoop:
         """Stop 验收：完成是产物的属性，不是对话的属性。返回未满足的验收项。"""
         rc = self.rc
         gaps: list[str] = []
-        if rc.config.verify_todos:
+        # 规划模式的产物就是计划本身：计划项尚未执行、验收命令跑不过都是预期状态。此时再拿它们阻止结束，
+        # 只会逼模型反复尝试被禁止的写操作（真实模型上实测：3 次阻止、触发循环守卫、以 incomplete 结束）
+        planning = rc.permissions.mode == Mode.PLAN
+        if rc.config.verify_todos and not planning:
             # 只验收本次 Run 写下的计划：同一会话里上一个任务遗留的计划不应阻止新任务结束
             mine = [Message.from_dict(e.payload) for e in rc.log.path() if e.kind == "message" and e.run_id == rc.run_id]
             todos = latest_todos(mine)
             if todos and any(t.get("status") in ("pending", "in_progress") for t in todos):
                 gaps.append("计划中仍有未完成项：\n" + render_todos([t for t in todos if t.get("status") in ("pending", "in_progress")]))
-        if rc.config.verify_command and rc.role == "main":
+        if rc.config.verify_command and rc.role == "main" and not planning:
             ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root))
             if not ok:
                 gaps.append(f"验收命令 `{rc.config.verify_command}` 未通过：\n{out}")

@@ -86,10 +86,15 @@ class Rule:
         return f"{self.decision}:{self.tool}" + (f"({self.pattern})" if self.pattern else "")
 
 
-# 托管基线：密钥与凭证默认不可读写，最危险的命令直接拒绝
+# 托管基线（排在所有规则与模式之前，bypass 也不例外）：密钥与凭证默认不可读写，最危险的命令直接拒绝；
+# harness 自己的数据目录与项目配置不能被 Agent 改写——.flywhl/ 里是会话库、审批记录、快照与 .flywhl/config.toml，
+# flywhl.toml 会在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权
 MANAGED_BASELINE = [
     "deny:read(*/.ssh/*)", "deny:read(*id_rsa*)", "deny:read(*id_ed25519*)", "deny:read(*/.aws/credentials)",
     "ask:read(*.env)", "ask:write(*.env)", "ask:edit(*.env)",
+    "deny:write(.flywhl/*)", "deny:edit(.flywhl/*)", "deny:write(*/.flywhl/*)", "deny:edit(*/.flywhl/*)",
+    "ask:write(flywhl.toml)", "ask:edit(flywhl.toml)", "ask:write(*/flywhl.toml)", "ask:edit(*/flywhl.toml)",
+    "ask:bash(*.flywhl*)",
     "deny:bash(rm -rf /)", "deny:bash(rm -rf /*)", "deny:bash(rm -rf ~*)", "deny:bash(mkfs*)", "deny:bash(:(){*)",
 ]
 

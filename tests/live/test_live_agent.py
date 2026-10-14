@@ -112,8 +112,9 @@ async def test_plan_mode_is_read_only(ws):
     async with h:
         res = await run(h, "把 app.py 里的 v1 改成 v2。", label="规划模式只读")
     assert (ws / "app.py").read_text() == "print('v1')\n"            # 规划模式下文件不能被改
-    writes = [e.data for e in res.events if e.type == E.TOOL_END and e.data["name"] in ("edit", "write", "bash")]
-    assert all(w["status"] in ("denied", "rejected") for w in writes)
+    # 按实际判定的副作用等级断言：只读的 bash（ls、find）在规划模式下本来就允许，写操作一律被拒
+    writes = [e.data for e in res.events if e.type == E.TOOL_END and (e.data.get("details") or {}).get("effect") != "read"]
+    assert all(w["status"] in ("denied", "rejected") for w in writes), writes
     assert res.status == "completed" and res.text, transcript(h, res.session_id)
 
 

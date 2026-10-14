@@ -244,3 +244,19 @@ async def test_unpriced_model_warns_that_cost_budget_is_ineffective(ws):
     h2 = make_harness(ws, ["好"])                                  # 没有配置费用预算：不打扰
     res2 = await h2.run("hi")
     assert not any(e.type == E.NOTICE and e.data.get("code") == "unpriced_model" for e in res2.events)
+
+
+async def test_plan_mode_does_not_block_stop_on_pending_plan(ws):
+    """规划模式下写出的计划本来就未执行：不能用“计划未完成 / 验收命令未通过”阻止结束（真实模型回归中发现）。"""
+    plan = {"tool_calls": [{"name": "todo_write", "args": {"todos": [
+        {"content": "读取 app.py", "status": "completed"},
+        {"content": "把 v1 改成 v2（需切到执行模式）", "status": "pending"}]}}]}
+    h = make_harness(ws, [plan, "计划如上，切换到执行模式后即可修改。"], permissions__mode="plan",
+                     verify_command="exit 1")
+    res = await h.run("把 app.py 里的 v1 改成 v2")
+    assert res.status == "completed"
+    assert not any(e.type == E.NOTICE and e.data.get("code") == "stop_blocked" for e in res.events)
+    # 同样的计划在默认模式下仍会被验收拦住
+    h2 = make_harness(ws, [plan, "做完了", "做完了", "做完了", "做完了"])
+    res2 = await h2.run("把 app.py 里的 v1 改成 v2")
+    assert any(e.type == E.NOTICE and e.data.get("code") == "stop_blocked" for e in res2.events)

@@ -319,3 +319,24 @@ async def test_server_token_flow(ws):
         assert (await c.get("/api/sessions")).status_code == 200
         cross = await c.post("/api/sessions", json={"title": "x"}, headers={"Origin": "https://evil.example"})
         assert cross.status_code == 403, "带着 cookie 的跨站写请求同样拒绝"
+
+
+
+def test_agent_cannot_rewrite_harness_state_or_project_config(tmp_path):
+    """.flywhl/ 下的会话库与配置不许 Agent 写；flywhl.toml 下次启动会被加载，写它必须人工确认——任何模式都一样。"""
+    from flywhl_harness.policy.permissions import Decision, PermissionPolicy
+    from flywhl_harness.runtime.workspace import Workspace
+    from flywhl_harness.tools import default_tools
+    from flywhl_harness import HarnessConfig
+
+    ws = Workspace(tmp_path, snapshots=False)
+    tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
+    for mode in ("default", "accept_edits", "bypass"):
+        pol = PermissionPolicy(mode, workspace=ws)
+        for path in (".flywhl/config.toml", ".flywhl/harness.db", str(tmp_path / ".flywhl" / "x")):
+            assert pol.evaluate(tools["write"], {"path": path, "content": "x"}).decision == Decision.DENY, (mode, path)
+        assert pol.evaluate(tools["edit"], {"path": "flywhl.toml", "old_string": "a", "new_string": "b"}).decision == Decision.ASK
+        assert pol.evaluate(tools["write"], {"path": "flywhl.toml", "content": "[[hooks]]"}).decision == Decision.ASK, mode
+        assert pol.evaluate(tools["bash"], {"command": "echo x > .flywhl/config.toml"}).decision == Decision.ASK, mode
+    # 普通文件不受影响
+    assert PermissionPolicy("accept_edits", workspace=ws).evaluate(tools["write"], {"path": "app.py", "content": "x"}).decision == Decision.ALLOW
