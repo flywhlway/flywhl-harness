@@ -13,6 +13,7 @@
 6. **refusal 与 server-side fallback**：先检查 ``stop_reason == "refusal"`` 再读内容；对支持的模型默认
    开启 ``fallbacks: "default"``（beta ``server-side-fallback-2026-07-01``），被安全策略拒答时由服务端
    在同一次调用里改用推荐的备用模型。流中出现 ``fallback`` 块时，之前的 thinking/tool_use 不再回传。
+   该参数只在官方端点上发送：经 OpenRouter 等兼容网关调用 Claude 时自动关闭（网关会 400）。
 """
 
 from __future__ import annotations
@@ -98,16 +99,20 @@ class AnthropicProvider(Provider):
         except ImportError as e:  # pragma: no cover
             raise RuntimeError("使用 Anthropic provider 需要安装官方 SDK：pip install 'anthropic>=1.0'") from e
         self._sdk = anthropic
+        base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL")
         self.client = anthropic.AsyncAnthropic(
             api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"),
-            base_url=base_url or os.environ.get("ANTHROPIC_BASE_URL"),
+            base_url=base_url,
             timeout=timeout,
             max_retries=0,  # 关键：重试只在 harness 一层做
         )
         self.effort = effort
         self.thinking = thinking
         self.thinking_display = thinking_display
-        self.server_fallback = server_fallback
+        # server-side fallback 是 Anthropic 官方 API 的 beta：兼容网关（OpenRouter、DeepSeek 的 /anthropic 端点、
+        # 自建代理）不认识 fallbacks: "default"，实测 OpenRouter 直接 400。只在官方端点上开启
+        self.first_party = not base_url or base_url.rstrip("/").startswith("https://api.anthropic.com")
+        self.server_fallback = server_fallback and self.first_party
 
     async def aclose(self) -> None:
         await self.client.close()

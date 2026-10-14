@@ -10,6 +10,9 @@
     flywhl replay <run_id>       确定性回放；--fork-at N 从第 N 次模型调用起换成当前模型（反事实回放）
     flywhl trace <run_id>        导出轨迹（含 OTel GenAI 风格的 span）
     flywhl tools                 列出工具及其副作用等级
+    flywhl doctor                模型接入自检：对每个配置了密钥的供应商跑流式文本 + 工具往返
+
+启动时会读取当前目录的 ``.env``（不覆盖已有环境变量），也可以用 ``--env-file`` 指定。
 """
 
 from __future__ import annotations
@@ -21,11 +24,13 @@ import secrets
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import HarnessConfig
+from .config import HarnessConfig, load_dotenv
 from .events import E, Event
+from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
 from .runtime.manager import Harness
 
@@ -315,14 +320,26 @@ async def cmd_tools(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_doctor(args: argparse.Namespace) -> int:
+    from .llm.doctor import check_all, format_report
+
+    cfg = _config(args)
+    specs = args.models or None
+    print(_c("dim", "逐个供应商检查：流式文本 → 工具调用往返（每项一两次很小的真实调用）"))
+    results = await check_all(cfg, specs, timeout=args.timeout)
+    print(format_report(results, color=bool(C["reset"])))
+    return 0 if results and all(r.ok for r in results) else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="flywhl", description="flywhl-harness：从零手写的最小 Agent Harness")
     p.add_argument("--version", action="version", version=__version__)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-w", "--workspace", help="工作区目录（默认当前目录）")
     common.add_argument("-c", "--config", help="配置文件（默认 ./flywhl.toml）")
-    common.add_argument("--provider", choices=["auto", "mock", "openai", "anthropic"])
-    common.add_argument("--model")
+    common.add_argument("--provider", choices=["auto", *PROFILES])
+    common.add_argument("--model", help="模型，写成 <供应商>:<模型>（如 deepseek:deepseek-flash）或只写模型名")
+    common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
     common.add_argument("--thinking", action="store_true", help="显示模型的思考过程")
@@ -359,11 +376,18 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("-o", "--output")
     sp.set_defaults(fn=cmd_trace)
     sub.add_parser("tools", parents=[common], help="列出工具").set_defaults(fn=cmd_tools)
+    sp = sub.add_parser("doctor", parents=[common], help="模型接入自检")
+    sp.add_argument("models", nargs="*", help="要检查的模型（默认：每个配置了密钥的供应商的默认模型）")
+    sp.add_argument("--timeout", type=float, default=90.0, help="单个检查的超时秒数")
+    sp.set_defaults(fn=cmd_doctor)
 
     args = p.parse_args(argv)
     if not getattr(args, "fn", None):
         p.print_help()
         return
+    if args.env_file and not load_dotenv(args.env_file) and not Path(args.env_file).is_file():
+        p.error(f"找不到 --env-file 指定的文件：{args.env_file}")
+    load_dotenv(".env")
     try:
         code = asyncio.run(args.fn(args))
     except KeyboardInterrupt:

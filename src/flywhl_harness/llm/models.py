@@ -3,8 +3,9 @@
 harness 需要知道每个模型的：上下文窗口（决定何时压缩）、最大输出、价格（计算成本、执行费用预算），
 以及若干行为特征（是否要求历史严格只追加等）。
 
-价格单位：美元 / 百万 token。表中价格仅作示例，**以各家官方价格页为准**；
-未知模型使用保守默认值（128K 窗口、成本记 0），可通过配置覆盖窗口大小。
+价格单位：美元 / 百万 token，**以各家官方价格页为准**（DeepSeek 价格核对于 2026-10，见其 Models & Pricing 页）。
+未登记的模型使用保守默认值（128K 窗口、成本记 0），可通过配置覆盖窗口大小；
+OpenRouter 这类在 usage 里直接返回实际费用的服务，以返回值为准。
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ class ModelInfo:
 
 
 _CLAUDE = dict(provider="anthropic", context_window=1_000_000, max_output=128_000, supports_thinking=True, append_only=True)
+_DS_FLASH = dict(context_window=1_000_000, max_output=384_000, input_price=0.30, output_price=1.20,
+                 cache_read_price=0.006, supports_thinking=True)
 
 MODELS: dict[str, ModelInfo] = {
     # ---- Anthropic（价格：输入 / 输出 / 缓存读 / 缓存写(5 分钟)） ----
@@ -45,11 +48,14 @@ MODELS: dict[str, ModelInfo] = {
                                   cache_write_price=0.125, **_CLAUDE),
     "claude-fable-5-1": ModelInfo("claude-fable-5-1", input_price=10.0, output_price=50.0, cache_read_price=0.25,
                                   cache_write_price=12.5, server_fallback=True, **_CLAUDE),
-    # ---- OpenAI 兼容（示例：DeepSeek / 通义 / 本地 vLLM、Ollama）----
-    "deepseek-chat": ModelInfo("deepseek-chat", "openai", context_window=128_000, max_output=8_192,
-                               input_price=0.28, output_price=0.42, cache_read_price=0.028),
-    "deepseek-reasoner": ModelInfo("deepseek-reasoner", "openai", context_window=128_000, max_output=32_768,
-                                   input_price=0.28, output_price=0.42, cache_read_price=0.028, supports_thinking=True),
+    # ---- DeepSeek（OpenAI 兼容；价格取高峰时段价作为上限，非高峰时段为其一半，以官方价格页为准）----
+    # deepseek-flash 即 DeepSeek-V4.1-Flash：默认开启思考模式，带 tools 的多轮请求必须回传 reasoning_content
+    "deepseek-flash": ModelInfo("deepseek-flash", "deepseek", **_DS_FLASH),
+    "deepseek-v4-pro": ModelInfo("deepseek-v4-pro", "deepseek", context_window=1_000_000, max_output=384_000,
+                                 input_price=1.32, output_price=3.96, cache_read_price=0.044, supports_thinking=True),
+    # 旧模型名仍被接受，实际由 deepseek-flash 提供服务并按其价格计费
+    "deepseek-chat": ModelInfo("deepseek-chat", "deepseek", **_DS_FLASH),
+    "deepseek-reasoner": ModelInfo("deepseek-reasoner", "deepseek", **_DS_FLASH),
     # ---- 内置演示模型：窗口刻意设小，方便观察上下文压缩 ----
     "flywhl-demo": ModelInfo("flywhl-demo", "mock", context_window=24_000, max_output=4_096),
     "scripted": ModelInfo("scripted", "mock", context_window=200_000, max_output=8_192),

@@ -1,10 +1,17 @@
 # flywhl-harness 配置示例：复制为工作区（或启动目录）下的 flywhl.toml 后按需修改。
 # 加载顺序：默认值 → flywhl.toml → 环境变量（FLYWHL_*）→ 命令行参数。未知字段会直接报错。
 
-provider = "auto"                 # auto | mock | openai | anthropic
-# model = "claude-opus-5-5"       # 不填则按 provider 选默认模型
-# base_url = "https://api.deepseek.com"
-# fallback_models = ["deepseek-reasoner"]   # 降级链：主模型重试失败后依次尝试
+# 模型写成 "<供应商>:<模型>"。供应商：deepseek | dashscope | kimi | zhipu | minimax | openrouter | openai | ollama | anthropic | mock
+# 不填 model 时按 provider 选择；provider = "auto" 按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter
+# 选第一个配置了密钥的供应商（密钥放在环境变量或启动目录的 .env 中，见 .env.example）
+provider = "auto"
+model = "deepseek:deepseek-flash"
+# 降级链：主模型重试失败、余额不足、模型不存在时依次尝试，可以跨供应商
+# fallback_models = ["deepseek:deepseek-v4-pro", "dashscope:qwen3.8-flash"]
+# base_url = "https://your-proxy.example.com/v1"   # 只覆盖主模型供应商的地址
+# api_key_env = "OPENROUTER_API_KEY"               # 从指定的环境变量读密钥（例如经 OpenRouter 调 Claude）
+# thinking = "enabled"            # 思考开关：enabled | disabled，不填用服务默认（DeepSeek V4 默认开启）
+# reasoning_effort = "high"       # 思考强度，取值以各家文档为准
 max_tokens = 8192
 max_retries = 4
 

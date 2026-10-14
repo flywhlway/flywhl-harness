@@ -1,0 +1,30 @@
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","created":1791987497,"object":"chat.completion.chunk","usage":null,"choices":[{"logprobs":null,"index":0,"delta":{"content":"","role":"assistant","reasoning_content":""},"finish_reason":null}]}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":"Both"},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":" cities: sunny"},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":","},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":" 20°C"},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":". Answer in one"},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":" sentence."},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"北京","reasoning_content":""},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"和上海今天都是晴天","reasoning_content":""},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"，气温均为 ","reasoning_content":""},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"20°C","reasoning_content":""},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"。","reasoning_content":""},"index":0,"finish_reason":null,"logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"model":"qwen3.8-flash","id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","choices":[{"delta":{"content":"","reasoning_content":""},"index":0,"finish_reason":"stop","logprobs":null}],"created":1791987497,"object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[],"created":1791987497,"id":"chatcmpl-3334984b-cb7b-942c-87f1-baa3c33aea52","model":"qwen3.8-flash","object":"chat.completion.chunk","usage":{"completion_tokens":31,"completion_tokens_details":{"reasoning_tokens":15,"text_tokens":31},"prompt_tokens":415,"prompt_tokens_details":{"cached_tokens":0,"text_tokens":415},"total_tokens":446}}
+
+data: [DONE]
+

@@ -60,6 +60,7 @@ class ErrorKind(StrEnum):
     CONTEXT_OVERFLOW = "context_overflow"  # 上下文超长：不能原样重试，要先压缩
     BAD_REQUEST = "bad_request"          # 400：消息结构非法等，原样重试无意义
     AUTH = "auth"                        # 401/403：告警，不重试
+    BILLING = "billing"                  # 402 / 余额不足 / 配额用尽：不重试，可降级到别家
     NOT_FOUND = "not_found"              # 模型不存在
     UNKNOWN = "unknown"
 
@@ -88,11 +89,19 @@ class ProviderError(Exception):
 
 
 _OVERFLOW_HINTS = ("context_length", "context length", "maximum context", "too long", "prompt is too long",
-                   "max_tokens_exceeded", "exceeds the context", "reduce the length")
+                   "max_tokens_exceeded", "exceeds the context", "reduce the length", "context window",
+                   "exceeded model token limit", "range of input length")
+# 余额 / 配额问题常被各家包装成 429（智谱 1113、Moonshot exceeded_current_quota、OpenAI insufficient_quota）：
+# 按限流处理会白白退避重试，必须先于状态码识别出来
+_BILLING_HINTS = ("insufficient balance", "insufficient_balance", "insufficient_quota", "exceeded_current_quota",
+                  "arrearage", "余额不足", "欠费", "账户已欠费")
+# 模型不存在：OpenAI 是 404，DeepSeek 是 400 + “supported API model names”，降级链需要把它识别为 NOT_FOUND
+_MODEL_NOT_FOUND_HINTS = ("model_not_found", "model not found", "does not exist", "supported api model names",
+                          "unknown model", "model_not_exist", "model not exist")
 
 
 def classify_http_error(status: int, body: str, headers: dict[str, str] | None = None, provider: str | None = None) -> ProviderError:
-    """把 HTTP 错误归类。分类决定策略：重试同样的请求、改变输入后重试、还是不重试。"""
+    """把 HTTP 错误归类。分类决定策略：重试同样的请求、改变输入后重试、换一家、还是不重试。"""
     headers = {k.lower(): v for k, v in (headers or {}).items()}
     retry_after = None
     if "retry-after" in headers:
@@ -101,7 +110,9 @@ def classify_http_error(status: int, body: str, headers: dict[str, str] | None =
         except ValueError:
             retry_after = None
     low = body.lower()
-    if status == 429:
+    if status == 402 or (400 <= status < 500 and any(h in low for h in _BILLING_HINTS)):
+        kind = ErrorKind.BILLING
+    elif status == 429:
         kind = ErrorKind.RATE_LIMIT
     elif status in (529, 503) or "overloaded" in low:
         kind = ErrorKind.OVERLOADED
@@ -109,7 +120,7 @@ def classify_http_error(status: int, body: str, headers: dict[str, str] | None =
         kind = ErrorKind.SERVER
     elif status in (401, 403):
         kind = ErrorKind.AUTH
-    elif status == 404:
+    elif status == 404 or (status in (400, 422) and "model" in low and any(h in low for h in _MODEL_NOT_FOUND_HINTS)):
         kind = ErrorKind.NOT_FOUND
     elif status in (400, 413, 422) and any(h in low for h in _OVERFLOW_HINTS):
         kind = ErrorKind.CONTEXT_OVERFLOW
@@ -191,6 +202,7 @@ class Provider(ABC):
     """模型 provider 的统一接口。"""
 
     name: str = "base"
+    reports_cost: bool = False   # usage 里自带实际费用（不依赖价格表），费用预算对未登记价格的模型也有效
 
     def model_info(self, model: str) -> ModelInfo:
         return get_model_info(model, self.name)

@@ -5,9 +5,8 @@
 
 示例 flywhl.toml::
 
-    provider = "openai"
-    model = "deepseek-chat"
-    base_url = "https://api.deepseek.com"
+    model = "deepseek:deepseek-flash"                 # <供应商>:<模型>
+    fallback_models = ["dashscope:qwen3.8-flash"]     # 降级链，可以跨供应商
 
     [budget]
     max_turns = 40
@@ -94,13 +93,17 @@ class HookConfig:
 @dataclass
 class HarnessConfig:
     # ---- 模型 ----
-    provider: str = "auto"                 # auto | mock | openai | anthropic
-    model: str | None = None
-    base_url: str | None = None
+    provider: str = "auto"                 # auto | deepseek | dashscope | kimi | zhipu | minimax | openrouter | openai | ollama | anthropic | mock
+    model: str | None = None               # "<供应商>:<模型>"（如 deepseek:deepseek-flash）或只写模型名
+    base_url: str | None = None            # 覆盖主模型供应商的地址（代理、私有部署、兼容网关）
     api_key: str | None = None             # 不建议写在文件里；优先用环境变量
-    fallback_models: list[str] = field(default_factory=list)
+    api_key_env: str | None = None         # 从指定的环境变量读密钥（例如经 OpenRouter 调 Claude：OPENROUTER_API_KEY）
+    fallback_models: list[str] = field(default_factory=list)   # 降级链，每项同样可写 "<供应商>:<模型>"
     max_tokens: int = 8192
     temperature: float | None = None
+    thinking: str | None = None            # None=服务默认 | enabled | disabled（按供应商翻译成各自的开关字段）
+    reasoning_effort: str | None = None    # 思考强度（low / medium / high / max……，各家取值不同）
+    extra_body: dict[str, Any] = field(default_factory=dict)   # 原样并入 OpenAI 兼容请求体的厂商私有参数
     request_timeout: float = 300.0
     max_retries: int = 4
     # ---- 提示词 ----
@@ -147,10 +150,19 @@ class HarnessConfig:
             "FLYWHL_BASE_URL": "base_url",
             "FLYWHL_WORKSPACE": "workspace",
             "FLYWHL_DATA_DIR": "data_dir",
+            "FLYWHL_THINKING": "thinking",
+            "FLYWHL_REASONING_EFFORT": "reasoning_effort",
+            "FLYWHL_API_KEY_ENV": "api_key_env",
         }
         for env, attr in env_map.items():
             if os.environ.get(env):
                 setattr(cfg, attr, os.environ[env])
+        # 也接受 LLM_PRIMARY_MODEL / LLM_FALLBACK_MODEL（<provider>:<model> 写法的通用约定），FLYWHL_* 优先
+        if not os.environ.get("FLYWHL_MODEL") and os.environ.get("LLM_PRIMARY_MODEL"):
+            cfg.model = os.environ["LLM_PRIMARY_MODEL"]
+        fallbacks = os.environ.get("FLYWHL_FALLBACK_MODELS") or os.environ.get("LLM_FALLBACK_MODEL")
+        if fallbacks:
+            cfg.fallback_models = [m.strip() for m in fallbacks.split(",") if m.strip()]
         if os.environ.get("FLYWHL_PERMISSION_MODE"):
             cfg.permissions.mode = os.environ["FLYWHL_PERMISSION_MODE"]
         _merge(cfg, {k: v for k, v in overrides.items() if v is not None})
@@ -162,6 +174,34 @@ class HarnessConfig:
             p = Path(self.workspace).resolve() / p
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+
+def load_dotenv(path: str | Path = ".env", *, override: bool = False) -> list[str]:
+    """读取 ``KEY=VALUE`` 形式的 .env 文件写入环境变量，返回加载了哪些变量名（不返回值）。
+
+    默认 **不覆盖** 已存在的环境变量。只由 CLI 在启动目录调用：库代码不应隐式改写进程环境，
+    也不要加载工作区里的 .env——工作区可能是不可信的仓库，它的 .env 可以把 ``*_BASE_URL`` 指向
+    第三方服务器，从而骗走你在环境里配置的真实密钥。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return []
+    loaded: list[str] = []
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()   # 行尾注释
+        if not key.replace("_", "").isalnum() or (key in os.environ and not override):
+            continue
+        os.environ[key] = value
+        loaded.append(key)
+    return loaded
 
 
 def _merge(dc: Any, data: dict[str, Any]) -> None:

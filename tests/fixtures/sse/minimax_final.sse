@@ -1,0 +1,42 @@
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"<think>两个","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"城市的","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"天气","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"查询","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"结果都返回","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"了：","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"晴，","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"20°C。现在","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"需要","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"用","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"一句话回答用户","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"</think>\n\n\n\n","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"北京","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"和上海今天的","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"天气都是","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"晴，气","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"温均为","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"index":0,"delta":{"content":"20","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[{"finish_reason":"stop","index":0,"delta":{"content":"°C。","role":"assistant"}}],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"071ec2297205dc56e927f1839a104b5c","choices":[],"created":1791987497,"model":"MiniMax-M2.7","object":"chat.completion.chunk","usage":{"total_tokens":319,"total_characters":0,"prompt_tokens":282,"completion_tokens":37,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens_details":{"cached_tokens":0}},"base_resp":{"status_code":0,"status_msg":""}}
+

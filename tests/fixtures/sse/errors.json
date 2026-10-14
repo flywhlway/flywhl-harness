@@ -1,0 +1,26 @@
+{
+  "deepseek_bad_model": {
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-nope. (request_id: 6f0e5888-a50a-42e1-ae9f-3e8748ee17d8)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "deepseek_bad_key": {
+    "status": 401,
+    "body": "{\"error\":{\"message\":\"Authentication Fails, Your api key: ****test is invalid (request_id: 8087aaae-37f2-4dce-9f69-907ff4cf68f4)\",\"type\":\"authentication_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "dashscope_model_not_found": {
+    "status": 404,
+    "body": "{\"error\":{\"message\":\"The model `qwen3.8` does not exist or you do not have access to it.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"model_not_found\"},\"request_id\":\"bdf8d5a5-032c-99bc-8481-4beaa8e4969b\"}"
+  },
+  "zhipu_insufficient_balance": {
+    "status": 429,
+    "body": "{\"error\":{\"code\":\"1113\",\"message\":\"余额不足或无可用资源包,请充值。\"}}"
+  },
+  "kimi_bad_model": {
+    "status": 404,
+    "body": "{\"error\":{\"message\":\"Not found the model kimi-nope or Permission denied\",\"type\":\"resource_not_found_error\"}}"
+  },
+  "kimi_context_overflow": {
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"Invalid request: Your request exceeded model token limit: 262144 (requested: 300014)\",\"type\":\"invalid_request_error\"}}"
+  }
+}

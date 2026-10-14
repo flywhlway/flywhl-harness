@@ -4,7 +4,8 @@
 并先发出一个 ``retry`` 事件（``discard_partial=True``），让上层丢弃半截消息（尤其是半截 tool_use），
 已产生的 token 成本由 usage 如实记录。
 
-降级链的坑：备用模型的工具调用行为、提示词效果、上下文窗口都可能不同；
+降级链可以跨供应商（``deepseek:deepseek-flash`` → ``dashscope:qwen3.8-flash``）：余额不足、密钥失效这类
+“某一家”的问题，换到另一家才有意义。降级链的坑：备用模型的工具调用行为、提示词效果、上下文窗口都可能不同；
 每条 assistant 消息都记录了实际服务的 ``provider/model``，便于评测时做归因。
 """
 
@@ -18,8 +19,17 @@ from ..runtime.retry import CircuitBreaker, RetryPolicy
 from .base import ErrorKind, ModelRequest, Provider, ProviderError, StreamEvent
 from .models import ModelInfo
 
-# 这些错误换一个模型也许能成功；鉴权/上下文超长/参数非法换模型也没用（上下文超长交给 Loop 去压缩）
-_FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK, ErrorKind.NOT_FOUND}
+# 这些错误换一个模型也许能成功；上下文超长/参数非法换模型也没用（上下文超长交给 Loop 去压缩）
+_FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK,
+                   ErrorKind.NOT_FOUND, ErrorKind.BILLING}
+# 鉴权失败是“这一家”的问题：同一家换模型没用，换到另一家（另一把密钥）才有意义
+_CROSS_PROVIDER_KINDS = {ErrorKind.AUTH}
+
+
+def _can_fallback(err: ProviderError, cur: Provider, nxt: Provider | None) -> bool:
+    if nxt is None:
+        return False
+    return err.kind in _FALLBACK_KINDS or (err.kind in _CROSS_PROVIDER_KINDS and nxt is not cur)
 
 
 class ResilientProvider(Provider):
@@ -33,6 +43,7 @@ class ResilientProvider(Provider):
         self.policy = policy or RetryPolicy()
         self.breakers = {i: CircuitBreaker(breaker_threshold, breaker_reset) for i in range(len(chain))}
         self.name = chain[0][0].name
+        self.reports_cost = chain[0][0].reports_cost
 
     def model_info(self, model: str) -> ModelInfo:
         return self.chain[0][0].model_info(model)
@@ -85,7 +96,8 @@ class ResilientProvider(Provider):
                 except BaseException:
                     breaker.release()  # 取消、生成器被关闭等：结果不说明服务健康与否，归还探测名额
                     raise
-            if last is not None and last.kind not in _FALLBACK_KINDS:
+            nxt = self.chain[i + 1][0] if i + 1 < len(self.chain) else None
+            if last is not None and not _can_fallback(last, provider, nxt):
                 raise last
         assert last is not None
         raise last
