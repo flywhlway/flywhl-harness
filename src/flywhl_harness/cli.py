@@ -12,7 +12,8 @@
     flywhl tools                 列出工具及其副作用等级
     flywhl doctor                模型接入自检：对每个配置了密钥的供应商跑流式文本 + 工具往返
 
-启动时会读取当前目录的 ``.env``（不覆盖已有环境变量），也可以用 ``--env-file`` 指定。
+启动时读取当前目录的 ``.env``，但只接受各家密钥与模型选择类变量（见 ``IMPLICIT_ENV_KEYS``）；
+地址、代理、权限模式等变量要么写进环境，要么用 ``--env-file`` 显式指定（表示你信任这个文件）。
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import signal
 import sys
@@ -28,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import HarnessConfig, load_dotenv
+from .config import HarnessConfig, load_dotenv, read_dotenv
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
@@ -122,6 +124,22 @@ async def terminal_approval(rec) -> ApprovalDecision:
         return ApprovalDecision(True, by="terminal-user", remember=ans == "a")
     reason = "" if ans in ("n", "no", "") else ans
     return ApprovalDecision(False, by="terminal-user", reason=reason)
+
+
+# 启动目录的 .env 可能来自不可信仓库（工作区默认就是启动目录），只放行“最多换一家官方端点或多花点钱”的变量。
+# 用白名单而不是黑名单：*_BASE_URL、HTTPS_PROXY + SSL_CERT_FILE、权限模式、数据目录……能被滥用的变量列不全。
+IMPLICIT_ENV_KEYS = frozenset({k for p in PROFILES.values() for k in p.key_env} | {
+    "FLYWHL_MODEL", "FLYWHL_FALLBACK_MODELS", "LLM_PRIMARY_MODEL", "LLM_FALLBACK_MODEL",
+    "FLYWHL_THINKING", "FLYWHL_REASONING_EFFORT",
+})
+
+
+def load_env(env_file: str | None) -> tuple[list[str], list[str]]:
+    """返回 (加载的变量名, 被忽略的变量名)。``--env-file`` 是用户显式信任的文件，全部加载。"""
+    if env_file:
+        return load_dotenv(env_file), []
+    ignored = [k for k in read_dotenv(".env") if k not in IMPLICIT_ENV_KEYS and k not in os.environ]
+    return load_dotenv(".env", allow=IMPLICIT_ENV_KEYS.__contains__), ignored
 
 
 def _config(args: argparse.Namespace) -> HarnessConfig:
@@ -387,9 +405,12 @@ def main(argv: list[str] | None = None) -> None:
     if not getattr(args, "fn", None):
         p.print_help()
         return
-    if args.env_file and not load_dotenv(args.env_file) and not Path(args.env_file).is_file():
+    if args.env_file and not Path(args.env_file).is_file():
         p.error(f"找不到 --env-file 指定的文件：{args.env_file}")
-    load_dotenv(".env")
+    _, ignored = load_env(args.env_file)
+    if ignored:
+        print(_c("yellow", f"! 已忽略当前目录 .env 中的 {', '.join(ignored)}：启动目录的 .env 只接受密钥与模型选择；"
+                           "地址、代理、权限类变量请写进环境变量，或用 --env-file 显式指定"), file=sys.stderr)
     try:
         code = asyncio.run(args.fn(args))
     except KeyboardInterrupt:

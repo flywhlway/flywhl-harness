@@ -417,7 +417,8 @@ asyncio.create_task(watch(h, run.id))
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
 `FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`；
 也接受 `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL`（同样是 `<供应商>:<模型>` 写法），`FLYWHL_*` 优先。
-`flywhl` 命令启动时读取当前目录的 `.env`（或 `--env-file` 指定的文件），不覆盖已存在的环境变量；库代码不会隐式读取 `.env`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。
+`flywhl` 命令启动时从当前目录的 `.env` 读取密钥与模型选择类变量（其余变量忽略并提示），`--env-file` 指定的文件则完整加载；
+两者都不覆盖已存在的环境变量，库代码也不会隐式读取 `.env`。显式参数支持嵌套字典，例如 `HarnessConfig.load(budget={"max_turns": 80})`。
 
 ## ⑩ 测试你的扩展
 

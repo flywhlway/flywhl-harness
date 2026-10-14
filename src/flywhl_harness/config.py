@@ -28,7 +28,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -176,17 +176,12 @@ class HarnessConfig:
         return p
 
 
-def load_dotenv(path: str | Path = ".env", *, override: bool = False) -> list[str]:
-    """读取 ``KEY=VALUE`` 形式的 .env 文件写入环境变量，返回加载了哪些变量名（不返回值）。
-
-    默认 **不覆盖** 已存在的环境变量。只由 CLI 在启动目录调用：库代码不应隐式改写进程环境，
-    也不要加载工作区里的 .env——工作区可能是不可信的仓库，它的 .env 可以把 ``*_BASE_URL`` 指向
-    第三方服务器，从而骗走你在环境里配置的真实密钥。
-    """
+def read_dotenv(path: str | Path = ".env") -> dict[str, str]:
+    """解析 ``KEY=VALUE`` 形式的 .env 文件（支持注释、``export`` 前缀、引号与行尾注释），不改动环境。"""
     p = Path(path)
     if not p.is_file():
-        return []
-    loaded: list[str] = []
+        return {}
+    out: dict[str, str] = {}
     for raw in p.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -197,7 +192,22 @@ def load_dotenv(path: str | Path = ".env", *, override: bool = False) -> list[st
             value = value[1:-1]
         elif " #" in value:
             value = value.split(" #", 1)[0].rstrip()   # 行尾注释
-        if not key.replace("_", "").isalnum() or (key in os.environ and not override):
+        if key.replace("_", "").isalnum():
+            out[key] = value
+    return out
+
+
+def load_dotenv(path: str | Path = ".env", *, override: bool = False,
+                allow: Callable[[str], bool] | None = None) -> list[str]:
+    """把 .env 写入环境变量，返回加载了哪些变量名（不返回值）。默认 **不覆盖** 已存在的环境变量。
+
+    ``allow`` 限定可以加载的变量名。来源不可信的文件必须给它：工作区可能是刚克隆的仓库，
+    它的 .env 只要设置 ``OPENAI_BASE_URL`` / ``HTTPS_PROXY`` 就能把你环境里的真实密钥引到第三方，
+    设置 ``FLYWHL_PERMISSION_MODE=bypass`` 就能绕过审批。库代码不会隐式调用它。
+    """
+    loaded: list[str] = []
+    for key, value in read_dotenv(path).items():
+        if (key in os.environ and not override) or (allow is not None and not allow(key)):
             continue
         os.environ[key] = value
         loaded.append(key)

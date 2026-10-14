@@ -45,7 +45,7 @@ uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv &
 接入真实模型（默认 `deepseek:deepseek-flash`）：
 
 ```bash
-cp .env.example .env                 # 填入密钥；flywhl 启动时读取当前目录的 .env，不覆盖已有环境变量
+cp .env.example .env                 # 填入密钥；flywhl 启动时从当前目录的 .env 读取密钥与模型选择
 .venv/bin/flywhl doctor              # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
 .venv/bin/flywhl serve -w playground # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
 .venv/bin/flywhl chat --model kimi:kimi-k2.6                 # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、
@@ -162,6 +162,7 @@ src/flywhl_harness/
 - **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定）+ 跨站写请求检查；`--host 0.0.0.0` 时自动启用访问令牌。
 - **Anthropic 模型默认开启 server-side fallback**（`fallbacks: "default"`），被安全策略拒答时服务端改用推荐的备用模型；
   只在官方端点上发送（经 OpenRouter 等网关调用时自动关闭），可通过 `AnthropicProvider(server_fallback=False)` 关闭。
-- **`.env` 只从启动目录加载**：不读工作区里的 `.env`，避免不可信仓库把 `*_BASE_URL` 指向第三方、骗走真实密钥。
+- **启动目录的 `.env` 只接受密钥与模型选择**：工作区默认就是启动目录，可能是不可信的仓库；它的 `.env` 若能设置 `*_BASE_URL`、
+  `HTTPS_PROXY` 或权限模式，就能骗走真实密钥或绕过审批。这类变量只从环境变量或 `--env-file` 显式指定的文件读取。
 
 MIT License
