@@ -130,7 +130,7 @@ async def terminal_approval(rec) -> ApprovalDecision:
 # 用白名单而不是黑名单：*_BASE_URL、HTTPS_PROXY + SSL_CERT_FILE、权限模式、数据目录……能被滥用的变量列不全。
 IMPLICIT_ENV_KEYS = frozenset({k for p in PROFILES.values() for k in p.key_env} | {
     "FLYWHL_MODEL", "FLYWHL_FALLBACK_MODELS", "LLM_PRIMARY_MODEL", "LLM_FALLBACK_MODEL",
-    "FLYWHL_THINKING", "FLYWHL_REASONING_EFFORT",
+    "FLYWHL_THINKING", "FLYWHL_REASONING_EFFORT", "FLYWHL_CNY_PER_USD",
 })
 
 

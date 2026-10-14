@@ -294,3 +294,40 @@ def test_cli_dotenv_only_accepts_keys_and_model_choice(tmp_path, monkeypatch):
     assert "OPENAI_BASE_URL" not in os.environ and "FLYWHL_PERMISSION_MODE" not in os.environ
     loaded, ignored = load_env(str(tmp_path / ".env"))      # 用户显式指定的文件
     assert set(loaded) == {"OPENAI_BASE_URL", "HTTPS_PROXY", "FLYWHL_PERMISSION_MODE"} and not ignored
+
+
+def test_cny_priced_models_convert_to_usd_and_use_tiers(monkeypatch):
+    """百炼 / Kimi / MiniMax 按官方人民币价格登记，统一折算成美元；分档价格按本次请求的输入规模选档。"""
+    from flywhl_harness.llm.models import compute_cost, get_model_info
+    from flywhl_harness.types import Usage
+
+    monkeypatch.setenv("FLYWHL_CNY_PER_USD", "7.0")
+    u = Usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    kimi = get_model_info("kimi-k2.6")
+    assert kimi.provider == "kimi" and kimi.currency == "CNY" and kimi.context_window == 262_144
+    assert compute_cost(kimi, u) == pytest.approx((6.5 + 27.0 + 1.1) / 7.0)
+    assert compute_cost(get_model_info("qwen3.8-flash"), u) == pytest.approx((0.8 + 2.7 + 0.16) / 7.0)
+    m3 = get_model_info("MiniMax-M3")
+    small = Usage(input_tokens=100_000, output_tokens=1_000_000)
+    big = Usage(input_tokens=600_000, output_tokens=1_000_000)               # 输入超过 512K：整次请求按高一档
+    assert compute_cost(m3, small) == pytest.approx((0.1 * 2.1 + 8.4) / 7.0)
+    assert compute_cost(m3, big) == pytest.approx((0.6 * 4.2 + 16.8) / 7.0)
+    # 模型表登记了供应商：只写模型名也能找到对应的档案
+    assert resolve("MiniMax-M2.7")[0].name == "minimax" and resolve("qwen3.8-flash")[0].name == "dashscope"
+    monkeypatch.delenv("FLYWHL_CNY_PER_USD")
+    assert compute_cost(kimi, u) == pytest.approx((6.5 + 27.0 + 1.1) / 6.70)  # 默认汇率
+
+
+def test_doctor_labels_configured_chain(no_keys):
+    from flywhl_harness.llm.doctor import CheckResult, Step, configured_roles, default_specs, format_report
+
+    no_keys.setenv("DEEPSEEK_API_KEY", "k")
+    no_keys.setenv("KIMI_API_KEY", "k")
+    cfg = HarnessConfig(model="deepseek:deepseek-flash", fallback_models=["dashscope:qwen3.8-flash"])
+    assert configured_roles(cfg) == {"deepseek:deepseek-flash": "主模型", "dashscope:qwen3.8-flash": "降级 1"}
+    # 降级链上的模型即使没配密钥也要检查（降级时才发现接不通就晚了）；其余只检查配置了密钥的供应商
+    assert default_specs(cfg) == ["deepseek:deepseek-flash", "dashscope:qwen3.8-flash", "kimi:kimi-k2.6"]
+    bad = CheckResult("dashscope:qwen3.8-flash", "百炼", role="降级 1", error="[auth] 未配置密钥")
+    out = format_report([CheckResult("deepseek:deepseek-flash", "DeepSeek", role="主模型", steps=[Step("流式文本", True)]), bad],
+                        color=False)
+    assert "［主模型］deepseek:deepseek-flash" in out and "接不通的项：dashscope:qwen3.8-flash" in out

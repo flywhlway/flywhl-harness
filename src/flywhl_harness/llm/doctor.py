@@ -38,6 +38,7 @@ class Step:
 class CheckResult:
     spec: str
     label: str
+    role: str = ""                       # 主模型 / 降级 N：对应当前配置里的位置，空表示只是“配置了密钥”
     steps: list[Step] = field(default_factory=list)
     served_model: str = ""
     thinking_chars: int = 0
@@ -120,13 +121,21 @@ async def check_model(cfg: HarnessConfig, spec: str, *, timeout: float = 90.0) -
     return res
 
 
+def configured_roles(cfg: HarnessConfig) -> dict[str, str]:
+    """当前配置里的主模型与降级链：{"deepseek:deepseek-flash": "主模型", "dashscope:qwen3.8-flash": "降级 1"}。"""
+    roles: dict[str, str] = {}
+    primary, model = resolve(cfg.model, cfg.provider)
+    if primary.kind != "mock":
+        roles[f"{primary.name}:{model}"] = "主模型"
+    for i, spec in enumerate(cfg.fallback_models, 1):
+        p, m = resolve(spec, primary.name)
+        roles.setdefault(f"{p.name}:{m}", f"降级 {i}")
+    return roles
+
+
 def default_specs(cfg: HarnessConfig) -> list[str]:
     """默认检查：当前配置的主模型 + 降级链 + 每个配置了密钥的供应商的默认模型（去重）。"""
-    specs: list[str] = []
-    for spec in [cfg.model, *cfg.fallback_models]:
-        if spec:
-            p, m = resolve(spec, cfg.provider)
-            specs.append(f"{p.name}:{m}")
+    specs = list(configured_roles(cfg))
     for p in PROFILES.values():
         if p.kind != "mock" and p.needs_key and p.api_key():
             specs.append(f"{p.name}:{p.default_model}")
@@ -134,7 +143,11 @@ def default_specs(cfg: HarnessConfig) -> list[str]:
 
 
 async def check_all(cfg: HarnessConfig, specs: list[str] | None = None, *, timeout: float = 90.0) -> list[CheckResult]:
-    return list(await asyncio.gather(*(check_model(cfg, s, timeout=timeout) for s in (specs or default_specs(cfg)))))
+    results = list(await asyncio.gather(*(check_model(cfg, s, timeout=timeout) for s in (specs or default_specs(cfg)))))
+    roles = configured_roles(cfg)
+    for r in results:
+        r.role = roles.get(r.spec, "")
+    return results
 
 
 def format_report(results: list[CheckResult], *, color: bool = True) -> str:
@@ -146,7 +159,8 @@ def format_report(results: list[CheckResult], *, color: bool = True) -> str:
     lines = []
     for r in results:
         mark = c("32", "✓") if r.ok else c("31", "✗")
-        lines.append(f"{mark} {r.spec}  {c('2', r.label)}")
+        role = c("36", f"［{r.role}］") if r.role else ""
+        lines.append(f"{mark} {role}{r.spec}  {c('2', r.label)}")
         if r.error:
             lines.append(f"    {c('31', r.error[:300])}")
         for s in r.steps:
@@ -157,7 +171,10 @@ def format_report(results: list[CheckResult], *, color: bool = True) -> str:
                                 f" · 缓存命中 {r.cache_read_tokens} · ${r.cost_usd:.6f}"))
     ok = sum(r.ok for r in results)
     lines.append(f"\n{ok}/{len(results)} 个模型通过")
+    broken = [r.spec for r in results if r.role and not r.ok]
+    if broken:
+        lines.append(c("31", f"当前配置的模型链上有接不通的项：{', '.join(broken)}——降级到这里时会失败"))
     return "\n".join(lines)
 
 
-__all__ = ["CheckResult", "Step", "check_model", "check_all", "default_specs", "format_report"]
+__all__ = ["CheckResult", "Step", "check_model", "check_all", "configured_roles", "default_specs", "format_report"]

@@ -189,7 +189,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         return {
             "version": __version__, "provider": h.provider.name, "model": h.model,
             "model_info": {"context_window": h.config.context.context_window or mi.context_window,
-                           "max_output": mi.max_output, "input_price": mi.input_price, "output_price": mi.output_price},
+                           "max_output": mi.max_output, "input_price": mi.input_price, "output_price": mi.output_price,
+                           "currency": mi.currency},
             "workspace": str(h.workspace_root), "mode": h.config.permissions.mode,
             "tools": [{"name": t.name, "description": t.description, "effect": str(t.effect)} for t in h.tools],
             "budget": h.config.budget.__dict__, "worker_id": h.worker_id,

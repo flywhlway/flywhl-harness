@@ -117,6 +117,29 @@ async def test_cross_provider_fallback_on_bad_key(ws):
     assert res.status == "completed", transcript(h, res.session_id)
     served = [m for m in h.log(res.session_id).context().messages if m.role == "assistant"][-1]
     assert served.provider == "dashscope" and "换家成功" in res.text
+    assert served.usage.cost_usd > 0                      # 百炼按官方人民币价格计费并折算成美元
+
+
+async def test_configured_fallback_chain_from_env(ws):
+    """项目 .env 里配置的降级链（LLM_PRIMARY_MODEL / LLM_FALLBACK_MODEL）：每一项都接得通；
+    主模型失败时，Run 由链上的下一项完成。"""
+    if not os.environ.get("LLM_FALLBACK_MODEL"):
+        pytest.skip("未配置 LLM_FALLBACK_MODEL")
+    cfg = HarnessConfig.load(path=ws / "no-such-config.toml", workspace=str(ws))   # 与 CLI 相同的加载路径
+    assert cfg.model and cfg.fallback_models, (cfg.model, cfg.fallback_models)
+    for spec in [cfg.model, *cfg.fallback_models]:
+        r = await check_model(cfg, need(spec), timeout=120)
+        assert r.ok, (spec, r.error, r.steps)                # 链上任何一项接不通，降级时才发现就晚了
+    fb_profile, fb_model = resolve(cfg.fallback_models[0])
+    # 让主模型必然失败（密钥无效 → auth），降级链的下一项是另一家时应当接手
+    h = live_harness(ws, model=cfg.model, api_key="sk-invalid-for-test", fallback_models=cfg.fallback_models)
+    async with h:
+        res = await run(h, "只回复：降级链可用", label="配置的降级链")
+    assert res.status == "completed", transcript(h, res.session_id)
+    served = [m for m in h.log(res.session_id).context().messages if m.role == "assistant"][-1]
+    assert (served.provider, served.model) == (fb_profile.name, fb_model)
+    assert any(e.type == E.NOTICE and e.data.get("code") == "fallback" for e in res.events)
+    assert served.usage.cost_usd > 0
 
 
 # ---------------------------------------------------------------------- 多供应商：每家完整跑一次多步任务
