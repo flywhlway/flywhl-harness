@@ -1,0 +1,70 @@
+# flywhl-harness 配置示例：复制为工作区（或启动目录）下的 flywhl.toml 后按需修改。
+# 加载顺序：默认值 → flywhl.toml → 环境变量（FLYWHL_*）→ 命令行参数。未知字段会直接报错。
+
+provider = "auto"                 # auto | mock | openai | anthropic
+# model = "claude-opus-5-5"       # 不填则按 provider 选默认模型
+# base_url = "https://api.deepseek.com"
+# fallback_models = ["deepseek-reasoner"]   # 降级链：主模型重试失败后依次尝试
+max_tokens = 8192
+max_retries = 4
+
+# Stop 验收：模型想结束时运行该命令，失败则阻止结束并把输出作为缺口反馈（最多 max_stop_blocks 次）
+# verify_command = "python3 -m pytest -q"
+verify_todos = true
+max_stop_blocks = 3
+
+tool_timeout = 120
+parallel_tool_limit = 8
+cancel_grace_seconds = 5          # 不可中断工具在取消后的宽限期
+snapshots = true                  # 写操作前用影子 git 打工作区快照
+subagent_max_depth = 2
+enable_demo_tools = true          # send_notification / sleep 演示工具
+
+[context]
+# context_window = 128000         # 不填则按模型能力表
+compact_threshold = 0.8
+reserve_tokens = 8192
+keep_recent_tokens = 12000
+tool_result_max_tokens = 6000
+clear_old_tool_results = true
+clear_threshold = 0.55
+keep_tool_results_turns = 3
+
+[budget]
+max_turns = 40
+max_tool_calls = 200
+# max_total_tokens = 2000000
+# max_cost_usd = 1.0
+# max_wall_seconds = 3600
+soft_ratio = 0.8
+wrap_up_on_exhaust = true
+
+[loop_guard]
+warn_repeats = 3
+stop_repeats = 5
+max_consecutive_errors = 6
+same_file_edit_warn = 6
+
+[permissions]
+mode = "default"                  # default | accept_edits | plan | bypass
+on_ask = "wait"                   # wait（等待人审）| allow | deny（无人值守）
+approval_timeout = 600
+strip_secret_env = true
+rules = [
+  "allow:bash(git status*)",
+  "allow:bash(git diff*)",
+  "allow:bash(python3 -m pytest*)",
+  "deny:bash(git push*)",
+]
+
+# 进程外 hook：stdin 收到 JSON，exit 2 阻断（stderr 作为原因回给模型），协议与 Claude Code 兼容
+# [[hooks]]
+# event = "pre_tool_use"
+# matcher = "bash"
+# command = "python3 scripts/guard.py"
+# fail_closed = true
+
+# MCP 服务器：工具名会加上 mcp__<名字>__ 前缀
+# [mcp_servers.demo]
+# command = "python3"
+# args = ["examples/mcp_echo_server.py"]

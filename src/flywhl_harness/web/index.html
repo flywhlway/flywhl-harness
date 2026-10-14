@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>flywhl · Agent 控制台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563EB'/%3E%3Cpath d='M10 22V10h12M10 16h8' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- 首帧就用正确的主题，避免明暗闪烁 -->
+  <script>try { document.documentElement.dataset.theme = localStorage.getItem("flywhl-theme") || "system"; } catch {}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主内容</a>
+
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="sidebar-head">
+        <a class="brand" href="#/" aria-label="flywhl 首页">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">flywhl</span>
+          <span class="brand-sub">Agent 控制台</span>
+        </a>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="btn primary block" id="new-session" type="button"></button>
+        <button class="search-trigger" id="open-palette" type="button" aria-keyshortcuts="Meta+K Control+K"></button>
+      </div>
+
+      <nav class="nav" id="nav" aria-label="页面"></nav>
+
+      <div class="sidebar-section">
+        <div class="section-label" id="recent-label">最近会话</div>
+        <ul class="session-list" id="session-list" aria-labelledby="recent-label"></ul>
+      </div>
+
+      <div class="sidebar-foot" id="sidebar-foot"></div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <main class="main" id="main" tabindex="-1"></main>
+  </div>
+
+  <!-- 全局浮层：提示、对话框、命令面板；屏幕阅读器的状态播报区 -->
+  <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+  <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+  <div id="overlay-root"></div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

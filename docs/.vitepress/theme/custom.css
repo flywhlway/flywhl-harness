@@ -1,0 +1,25 @@
+/* 与 flywhl Web UI 一致的品牌色：纸色底 + 信号橙 */
+:root {
+  --vp-c-brand-1: #c9461f;
+  --vp-c-brand-2: #e4572e;
+  --vp-c-brand-3: #e4572e;
+  --vp-c-brand-soft: rgba(228, 87, 46, 0.12);
+  --vp-c-bg: #faf8f3;
+  --vp-c-bg-alt: #f2eee5;
+  --vp-c-bg-soft: #f2eee5;
+  --vp-font-family-mono: "IBM Plex Mono", "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #1c1a15 30%, #e4572e);
+}
+.dark {
+  --vp-c-brand-1: #ff8a63;
+  --vp-c-brand-2: #ff6b3d;
+  --vp-c-brand-3: #ff6b3d;
+  --vp-c-bg: #141311;
+  --vp-c-bg-alt: #11100e;
+  --vp-c-bg-soft: #1b1a17;
+  --vp-home-hero-name-background: linear-gradient(120deg, #ece6d8 30%, #ff6b3d);
+}
+.vp-doc table { font-size: 0.92em; }
+.vp-doc h2 { border-top: 1px dashed var(--vp-c-divider); }
+.vp-doc .mermaid { text-align: center; margin: 1.2em 0; }

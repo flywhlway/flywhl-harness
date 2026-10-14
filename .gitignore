@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.flywhl/
+playground/.flywhl/
+playground/hello.py
+playground/demo_big.txt
+dist/
+*.egg-info/
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+.DS_Store
