@@ -41,14 +41,23 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 |---|---|---|
 | 缺密钥 | 0 | 不带 `.env`、清空环境变量运行，33 个全部 skipped；缺密钥不会造成失败 |
 | 运行环境 / 网络（推断） | 29 | 同样的密钥在 de488df 上重跑全部通过；原始日志缺失，无法确定是沙箱断网、代理还是供应商侧 |
-| 真实缺陷 | 1 | `test_plan_mode_is_read_only`：见下 |
+| 真实缺陷 | 1 | `test_plan_mode_is_read_only`：见下文缺陷 1 |
 
-`test_plan_mode_is_read_only` 的缺陷：模型在 plan 模式下用绝对路径 `cat /ws/app.py` 查看文件。权限层带着工作区分析，判为只读并放行
-（文件确实没被改）；执行器调用 `effect_for()` 时没传工作区，把同一条命令记成 external。于是界面、预写 intent、重试与取消语义
-都按另一个等级处理，用例按记录的等级检查“写操作是否都被拒绝”时失败。修复后 `Tool.effect_for()` 接收工作区根目录，
-执行器与权限层同一口径；离线回归测试是 `tests/test_policy.py::test_recorded_effect_matches_permission_verdict`。
+修复过程中又复跑了 4 次，plan 模式用例在第二次失败时暴露出缺陷 2。另有两次失败属于模型随机性：
+一次是压缩用例里模型没有真正读完日志，上下文没涨到阈值；一次是跨供应商续聊时模型读到“第 0 个数字是 10”却回答 13。
+两次单独重跑都通过，没有改代码。
 
-修复后完整重跑：33 passed，31.8 万 token，0.051 美元。
+**缺陷 1：执行器记录的副作用等级与权限判定口径不一致。** 模型在 plan 模式下用绝对路径 `cat /ws/app.py` 查看文件。
+权限层带着工作区分析，判为只读并放行；执行器调用 `effect_for()` 时没传工作区，把同一条命令记成 external。
+界面、预写 intent、重试与取消语义因此都按另一个等级处理。修复后 `Tool.effect_for()` 接收工作区根目录，执行器与权限层同一口径。
+回归测试是 `tests/test_policy.py::test_recorded_effect_matches_permission_verdict`。
+
+**缺陷 2：plan 模式下规则可以放行写操作。** 规则先于模式评估，命中后就不再看模式。模型看到 `ls` 输出里的 `.flywhl` 后，
+常写 `find . -not -path './.flywhl/*' -exec …`。这条命令命中托管基线 `ask:bash(*.flywhl*)` 变成审批，live 配置自动批准，
+于是在规划阶段执行了写操作。用户的 allow 规则与会话授权也有同样问题。修复后 plan 模式对非只读操作是硬上限。
+回归测试是 `tests/test_policy.py::test_plan_mode_is_a_hard_ceiling_for_side_effects`。
+
+全部修复后完整重跑（f212ce0）：33 passed，34.4 万 token，0.051 美元。
 
 ## 场景
 
