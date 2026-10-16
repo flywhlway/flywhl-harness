@@ -701,6 +701,10 @@ OpenAI 兼容协议则更直接：tool 消息没有紧跟它的 assistant 调用
 # 真实 kill -9：崩溃现场 → 接管 → 对账 → completed，外部通知数始终为 1
 .venv/bin/python examples/02_crash_resume.py
 
+# 同一条时间线，两端都是 CLI 进程（flywhl run 被 kill -9，flywhl recover 接管），不需要 API Key；
+# 打印 created → queued → running → interrupted → queued → running → completed 的迁移轨迹，并核对不变量（CI 也跑它）
+.venv/bin/python examples/11_kill9_cli_recover.py --keep
+
 # 恢复测试：进程内抢占式终止、fencing、真实 kill -9 子进程、恢复说明排在 tool 结果之后
 .venv/bin/python -m pytest tests/test_recovery.py -q
 
