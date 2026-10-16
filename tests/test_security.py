@@ -227,6 +227,13 @@ async def test_stop_hook_warnings_are_visible(ws):
     ("cat a/../b.txt", "read", False),
     ("rm -fr ~/projects", "dangerous", True),                   # 家目录下的一级目录
     ("rm -rf ~/.cache/pip", "dangerous", False),
+    ("cat {a,../../etc/passwd}", "external", False),            # 花括号展开后才爬出工作区
+    ("rm -rf {~,build}", "dangerous", True),                    # 实际执行的是 rm -rf ~ build
+    ("echo {a,b}.txt", "read", False),                          # 展开后仍在工作区内
+    ("D=/etc; cat $D/passwd", "external", False),               # 以变量开头的路径：位置取决于运行时的值
+    ("cat ${D}x/passwd", "external", False),
+    ("cat $PWD/README.md", "read", False),                      # 命令在工作区根目录执行，$PWD 就是工作区
+    ("echo $PATH", "read", False),                              # 不含 / 的变量不按路径处理
 ])
 def test_analyzer_edge_cases(cmd, level, catastrophic):
     a = analyze(cmd)
@@ -358,21 +365,66 @@ def _content_calls(path):
 
 @pytest.mark.parametrize("path", CREDENTIAL_SAMPLES)
 def test_credential_paths_agree_across_file_tools_and_bash(tmp_path, path):
-    """同一个凭证位置：read / grep / write / edit 在任何模式下都拒绝，bash 命令分析判为 dangerous。
+    """同一个凭证位置：read / grep / write / edit 与 bash 在任何模式下都拒绝，allow 规则也放不过。
 
     早期版本 read 只拒绝 .ssh / id_rsa / .aws/credentials：工作区里的 .kube/config 在 default 模式下直接可读，
-    工作区外的在 bypass 模式下可读，grep 完全不受基线约束。
+    工作区外的在 bypass 模式下可读，grep 完全不受基线约束。之后 bash 命中凭证位置也只升为 dangerous：
+    default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。
     """
     ws = Workspace(tmp_path, snapshots=False)
     tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
-    for mode in ("default", "accept_edits", "bypass"):
-        pol = PermissionPolicy(mode, workspace=ws)
-        for name, args in _content_calls(path):
-            assert pol.evaluate(tools[name], args).decision == Decision.DENY, (mode, name)
-    assert analyze(f"cat {path}").level == "dangerous"
+    for mode in ("default", "accept_edits", "plan", "bypass"):
+        pol = PermissionPolicy(mode, ["allow:bash"], workspace=ws)
+        for name, args in [*_content_calls(path), ("bash", {"command": f"cat {path}"})]:
+            r = pol.evaluate(tools[name], args)
+            assert r.decision == Decision.DENY, (mode, name, r.reason)
+        assert "凭证" in pol.evaluate(tools["bash"], {"command": f"cat {path}"}).reason
 
 
-@pytest.mark.parametrize("path", [".env", "config/.env.production", "~/.npmrc", "~/.zsh_history"])
+@pytest.mark.parametrize("cmd", [
+    "cat ~/.k''ube/config",                    # 引号拼接：shell 去掉引号后就是 ~/.kube/config
+    "cat ~/.ku\\be/config",                    # 反斜杠转义同理
+    "cat ~/.ku{be,}/config",                   # 花括号展开
+    "tar czf /tmp/k.tgz ~/.ssh",               # 整个目录，结尾不带 /
+    "cd ~ && cat .kube/config",                # 先进家目录再用相对路径
+    "sh -c 'cat ~/.aws/credentials'",
+    'eval "cat ~/.do""cker/config.json"',
+    "git status && cat < ~/.git-credentials",  # 输入重定向，搭在只读命令后面
+    "cat $KUBECONFIG",                         # 指向凭证位置的环境变量
+    "cat $XDG_CONFIG_HOME/gh/hosts.yml",
+])
+def test_bash_credential_tricks_are_denied_even_in_bypass(tmp_path, cmd):
+    """字符串匹配要看 shell 去掉引号、展开花括号之后的样子；bypass 与 allow:bash 规则都放不过。"""
+    ws = Workspace(tmp_path, snapshots=False)
+    bash = default_tools(HarnessConfig()).get("bash")
+    for mode in ("default", "bypass"):
+        r = PermissionPolicy(mode, ["allow:bash"], workspace=ws).evaluate(bash, {"command": cmd})
+        assert r.decision == Decision.DENY and "凭证" in r.reason, (mode, r.reason)
+
+
+@pytest.mark.parametrize("cmd,decision", [
+    ("ssh deploy-host uptime", Decision.ASK),          # ssh 按默认位置自己读密钥，命令里不出现路径
+    ("kubectl get pods", Decision.ASK),
+    ("cat src/ssh_utils.py", Decision.ALLOW),
+    ("ls docs/.ssh_notes", Decision.ALLOW),            # 只是名字以 .ssh 开头，不是那个目录
+    ("cat .venv/pyvenv.cfg", Decision.ALLOW),          # .venv 不是 .env
+    ("cp .env.example .env", Decision.ASK),            # 线索档：要确认，但不拒绝
+    ("pytest tests/test_credentials.py", Decision.ASK),
+])
+def test_bash_credential_deny_stays_narrow(tmp_path, cmd, decision):
+    """硬拒绝没有“批准后执行”的出路，误报的代价比 ask 高：只有凭证档拒绝，而且按目录名整段匹配。"""
+    ws = Workspace(tmp_path, snapshots=False)
+    tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
+    pol = PermissionPolicy("default", workspace=ws)
+    assert pol.evaluate(tools["bash"], {"command": cmd}).decision == decision
+    # 被拒绝的命令只是想搜索这段文字时，grep 工具是出路：它只检查搜索的路径，不检查搜索词
+    assert pol.evaluate(tools["grep"], {"pattern": r"\.kube/", "path": "src"}).decision == Decision.ALLOW
+
+
+HINT_SAMPLES = [".env", "config/.env.production", "~/.npmrc", "~/.zsh_history"]
+
+
+@pytest.mark.parametrize("path", HINT_SAMPLES)
 def test_secret_hint_paths_need_approval_in_every_mode(tmp_path, path):
     ws = Workspace(tmp_path, snapshots=False)
     tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
@@ -381,18 +433,23 @@ def test_secret_hint_paths_need_approval_in_every_mode(tmp_path, path):
         for name, args in _content_calls(path):
             assert pol.evaluate(tools[name], args).decision == Decision.ASK, (mode, name)
     assert analyze(f"cat {path}").level == "dangerous"
+    # bash 的线索档维持“高危要确认”：匹配面宽（.env、credentials 字样），硬拒绝会误伤日常命令
+    r = PermissionPolicy("default", workspace=ws).evaluate(tools["bash"], {"command": f"cat {path}"})
+    assert r.decision == Decision.ASK, r.reason
 
 
 def test_every_sensitive_glob_is_exercised_and_known_to_bash():
-    """清单新增一项而忘了补样例、或 bash 的 SECRET_HINTS 漏了它，这里会失败——两份清单不会再悄悄分叉。"""
+    """清单新增一项而忘了补样例、或 bash 的命令线索漏了它，这里会失败——两份清单不会再悄悄分叉。"""
     import fnmatch
-    from flywhl_harness.policy.sensitive import CREDENTIAL_GLOBS, SECRET_HINTS
+    from flywhl_harness.policy.sensitive import CREDENTIAL_GLOBS, CREDENTIAL_HINTS, SECRET_HINTS
 
     samples = [os.path.expanduser(p) for p in CREDENTIAL_SAMPLES]
     for g in CREDENTIAL_GLOBS:
         hit = [p for p in samples if fnmatch.fnmatchcase(p, g)]
         assert hit, f"{g} 没有样例"
-        assert all(SECRET_HINTS.search(p) for p in hit), g
+        assert all(CREDENTIAL_HINTS.search(p) and SECRET_HINTS.search(p) for p in hit), g
+    for p in HINT_SAMPLES:  # 两档不串：线索档的样例不能被当成凭证档硬拒绝
+        assert SECRET_HINTS.search(p) and not CREDENTIAL_HINTS.search(p), p
 
 
 def test_symlink_to_credential_is_denied(tmp_path):
@@ -426,6 +483,69 @@ async def test_recursive_grep_withholds_secret_files(tmp_path):
     in_ws, in_home = (e["content"] for e in tool_ends(res.events))
     assert "app.py" in in_ws and "s3cr3t" not in in_ws and "跳过 1 个" in in_ws
     assert "notes.txt" in in_home and "s3cr3t" not in in_home and "跳过 1 个" in in_home
+
+
+# ---------------------------------------------------------------------- macOS 系统沙箱（原型）
+def _seatbelt_usable() -> bool:
+    import subprocess
+
+    exe = "/usr/bin/sandbox-exec"
+    if sys.platform != "darwin" or not os.path.exists(exe):
+        return False
+    return subprocess.run([exe, "-p", "(version 1)(allow default)", "/usr/bin/true"]).returncode == 0
+
+
+needs_seatbelt = pytest.mark.skipif(not _seatbelt_usable(), reason="需要可用的 macOS sandbox-exec")
+SPLICED = "D=$HOME/.ku; cat ${D}be/config"   # 变量拼出来的路径：命令串里没有 .kube 字样
+
+
+@pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=needs_seatbelt)])
+async def test_sandbox_blocks_credential_reads_static_analysis_misses(ws, tmp_path, monkeypatch, sandbox, leaked):
+    """命令分析看不出 ${D}be/config 是凭证，只按“工作区外路径”处理，bypass 下照样执行；沙箱按真实路径拒绝。"""
+    home = tmp_path / "home"
+    (home / ".kube").mkdir(parents=True)
+    (home / ".kube" / "config").write_text("token: s3cr3t\n")
+    monkeypatch.setenv("HOME", str(home))
+    assert not analyze(SPLICED).credential
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": f"{SPLICED}; echo ok > in.txt"}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox=sandbox)
+    out = tool_ends((await h.run("看看配置")).events)[0]["content"]
+    assert ("s3cr3t" in out) is leaked, out
+    assert (ws / "in.txt").read_text() == "ok\n"   # 工作区照常可写
+
+
+@needs_seatbelt
+def test_macos_sandbox_confines_writes(tmp_path):
+    import subprocess
+    from flywhl_harness.tools.sandbox import sandbox_argv
+
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    (ws / ".flywhl").mkdir(parents=True)
+    outside.mkdir()
+    cmd = f"echo x > {outside}/a; echo x > .flywhl/config.toml; echo x > flywhl.toml; echo ok > app.py"
+    # 临时目录默认可写；这里不放开，tmp_path 里的目录才能充当“工作区外”
+    subprocess.run(sandbox_argv(cmd, ws, writable=()), cwd=ws, capture_output=True)
+    assert not (outside / "a").exists(), "工作区外不可写"
+    assert not (ws / ".flywhl" / "config.toml").exists() and not (ws / "flywhl.toml").exists(), "harness 自己的状态与配置不可写"
+    assert (ws / "app.py").read_text() == "ok\n"
+
+
+async def test_sandbox_fails_closed_when_unavailable(ws, monkeypatch):
+    """配置了沙箱却用不了（Linux、sandbox-exec 被删）：拒绝执行，而不是悄悄退回沙箱外。"""
+    import flywhl_harness.tools.sandbox as sb
+    from flywhl_harness.config import split_untrusted
+    from flywhl_harness.tools.shell import BashTool
+
+    monkeypatch.setattr(sb, "SANDBOX_EXEC", "/nonexistent/sandbox-exec")
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "touch ran.txt"}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="macos")
+    end = tool_ends((await h.run("跑一下")).events)[0]
+    assert "沙箱不可用" in end["content"] and not (ws / "ran.txt").exists()
+    with pytest.raises(ValueError, match="沙箱档位"):
+        BashTool(sandbox="docker")
+    # 项目配置可以打开沙箱，关掉它要先信任
+    assert split_untrusted({"permissions": {"sandbox": "macos"}})[1] == []
+    assert split_untrusted({"permissions": {"sandbox": "off"}})[1] == ["permissions.sandbox = 'off'"]
 
 
 # ---------------------------------------------------------------------- 项目配置信任

@@ -74,6 +74,7 @@
 | `registry.py` | 顺序稳定的注册表、`subset()` |
 | `fs.py` | `read` / `write` / `edit` / `ls` / `grep`，过期读取保护、严格 UTF-8、原子写、审批 diff 预览 |
 | `shell.py` | `bash`：进程组、两段式终止、流式输出、保尾截断、密钥环境变量剥离 |
+| `sandbox.py` | macOS sandbox-exec 档位（原型）：从凭证清单生成 Seatbelt 配置、写操作限制在工作区与临时目录、不可用时拒绝执行 |
 | `extra.py` | `todo_write`、`read_ref`、`search_ref`、`latest_todos()` |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
 | `mcp.py` | 最小 MCP stdio 客户端与 `MCPTool`（注解的保守默认值、环境隔离、`notifications/cancelled`） |
@@ -83,7 +84,8 @@
 | 文件 | 内容 |
 |---|---|
 | `permissions.py` | `Mode`、`Rule`、`PermissionPolicy.evaluate()`、`MANAGED_BASELINE`、`grant_for()` |
-| `bash_analyzer.py` | `analyze()`：词法切分、剥包装命令、`sh -c` / `eval` 递归分析、工作区边界、`catastrophic` 与 `network` 标记；无法静态分析的结构一律保守 |
+| `bash_analyzer.py` | `analyze()`：词法切分、剥包装命令、`sh -c` / `eval` 递归分析、花括号展开、工作区边界、`catastrophic` / `credential` / `network` 标记；无法静态分析的结构一律保守 |
+| `sensitive.py` | 凭证位置清单分两档：`CREDENTIAL_GLOBS` / `CREDENTIAL_HINTS`（文件工具、bash、沙箱共用，任何模式拒绝）与 `SECRET_HINT_GLOBS` / `SECRET_HINTS`（需确认） |
 | `hooks.py` | `HookEvent`、`HookInput`、`HookOutput`、`normalize_decision()`、`Hook`、`HookBus`、`CommandHook` |
 | `approvals.py` | `ApprovalBroker`：持久化审批、超时、CAS 决定一次 |
 

@@ -59,6 +59,7 @@ mode = "default"                  # default | accept_edits | plan | bypass
 on_ask = "wait"                   # wait（等待人审）| allow | deny（无人值守）
 approval_timeout = 600
 strip_secret_env = true
+sandbox = "off"                   # off | macos（bash 跑在 sandbox-exec 里：凭证位置不可读写，写操作限制在工作区与临时目录；原型）
 rules = [
   "allow:bash(git status*)",
   "allow:bash(git diff*)",

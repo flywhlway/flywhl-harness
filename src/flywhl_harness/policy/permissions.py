@@ -8,8 +8,30 @@
    - bash 命令被分析为 dangerous → 至少 ask（bypass 模式除外）；
    - 会话读取过不可信内容（污点）→ 非只读操作的 allow 升级为 ask（对抗提示注入）。
 
-例外：命令分析判定为 **灾难性**（删根目录/家目录、格式化磁盘、写块设备、fork 炸弹）时，
+例外：命令分析判定为 **灾难性**（删根目录/家目录、格式化磁盘、写块设备、fork 炸弹）或 **碰到凭证位置** 时，
 在一切规则与模式之前直接 deny——bypass 模式、会话授权、allow 规则都不能放行。
+
+bash 与凭证位置
+---------------
+文件工具对凭证位置（``policy/sensitive.py`` 的 ``CREDENTIAL_GLOBS``）在任何模式下都拒绝；bash 早期只把命中升为 dangerous，
+default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。现在 bash 命中凭证档同样直接拒绝，理由：
+
+- **没人看的路径不止 bypass**：``--yes`` / ``on_ask="allow"`` 会自动批准所有 ask；有人看时，``cat ~/.kube/config``
+  也像是在排查 kubectl，很容易被顺手批准。凭证一旦进了上下文，就留在事件流、轨迹和日志里，快照回滚撤不回来；
+- **只在 bypass 下拒绝说不通**：bypass 是最宽松的模式，单独在这里更严，同一条命令在 default 下却能批准执行；
+- **同一个位置，各通道结论一致**：read / grep / write / edit / bash 对凭证位置给出同一个答案。
+
+代价是误报没有“批准后执行”的出路，所以只拒绝凭证档，并尽量收窄匹配（目录按完整路径段匹配，见 ``CREDENTIAL_HINTS``）。
+被误伤的三类命令和出路：命令里只是提到这些字样（``grep '\\.kube/' src``、``git commit -m '... .ssh ...'``）——用 grep 工具
+（它只检查路径、不检查搜索词）或 ``git commit -F``；显式使用凭证（``ssh -i ~/.ssh/k``、``kubectl --kubeconfig ~/.kube/x``）——
+改用默认位置或 ``~/.ssh/config`` 里的 Host 别名，命令里就不必出现路径；管理凭证（``ssh-keygen``、``chmod 600 ~/.ssh/config``）——
+由用户自己执行。关掉托管基线（``baseline=False``）时这条拒绝一并关掉，退回“高危要确认”。
+
+线索档（``.env``、``credentials`` 字样、shell 历史、钥匙串查询）维持高危要确认，bypass 下不升级：
+``cp .env.example .env``、``pytest tests/test_credentials.py`` 都会命中，硬拒绝会误伤日常命令。
+
+字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（``D=$HOME/.ku; cat ${D}be/config``、
+glob、编码）。后者要靠系统沙箱：``permissions.sandbox = "macos"`` 让 bash 跑在 sandbox-exec 里，由内核按真实路径拒绝。
 
 四种模式
 --------
@@ -17,7 +39,7 @@
 default         只读放行；写文件、执行命令、外部操作都需确认
 accept_edits    额外放行工作区内的文件编辑；命令与外部操作仍需确认
 plan            只允许只读工具；其它一律拒绝（工具定义仍然保留，只在执行层拒绝）
-bypass          全部放行（deny 规则仍然有效）——只应在隔离沙箱中使用
+bypass          全部放行（deny 规则、灾难性命令、凭证位置仍然拒绝）——只应在隔离沙箱中使用
 ==============  ===================================================
 
 规则语法：``决策:工具(模式)``，模式为 glob，例如::
@@ -120,6 +142,7 @@ class PermissionPolicy:
                  baseline: bool = True):
         self.mode = Mode(mode)
         self.workspace = workspace
+        self.baseline = baseline
         parsed = [r if isinstance(r, Rule) else Rule.parse(r) for r in rules]
         self.rules: list[Rule] = ([Rule.parse(r, "managed") for r in MANAGED_BASELINE] if baseline else []) + parsed
 
@@ -162,6 +185,11 @@ class PermissionPolicy:
             risk = "critical"
         if analysis and analysis.catastrophic:
             return PermissionResult(Decision.DENY, "灾难性命令，任何模式下都拒绝：" + analysis.catastrophic_reason,
+                                    "critical", effect, None, analysis.reasons)
+        if analysis and analysis.credential and self.baseline:  # 与文件工具的托管基线同一档、同一结论，见模块注释
+            return PermissionResult(Decision.DENY, f"命令涉及凭证位置，任何模式下都拒绝（{analysis.credential_reason}）。"
+                                    "只是搜索这段文字请用 grep 工具，它只检查搜索的路径、不检查搜索词；"
+                                    "确实要用到凭证的操作（ssh -i、--kubeconfig、ssh-keygen……）请让用户自己执行",
                                     "critical", effect, None, analysis.reasons)
         all_rules = [*self.rules, *grants]
 

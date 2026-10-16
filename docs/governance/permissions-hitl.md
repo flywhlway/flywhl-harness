@@ -26,8 +26,8 @@
 ```mermaid
 flowchart TD
     A["工具调用 + 已校验参数"] --> B["计算目标串与副作用等级<br/>bash：命令分析决定 effect"]
-    B --> CAT{"命令分析标记 catastrophic？"}
-    CAT -->|"是"| R0["deny：灾难性命令<br/>任何模式、规则、授权都不能放行"]
+    B --> CAT{"命令分析标记 catastrophic<br/>或 credential？"}
+    CAT -->|"是"| R0["deny：灾难性命令 / 凭证位置<br/>任何模式、规则、授权都不能放行"]
     CAT -->|"否"| C{"规则：deny → ask → allow<br/>先命中者生效"}
     C -->|"命中"| E["规则决定"]
     C -->|"未命中"| D["模式默认姿态"]
@@ -61,6 +61,8 @@ flowchart TD
 | dangerous 命令被规则 allow 时 | 升为 ask | 升为 ask | — | 不升级 |
 | 污点状态下的非只读 allow | 升为 ask | 升为 ask | — | 不升级 |
 | 灾难性命令（`rm -rf ~`、`mkfs`、写块设备……） | deny | deny | deny | **deny** |
+| bash 碰到凭证位置（`cat ~/.kube/config`、`tar czf k.tgz ~/.ssh`、`cat $KUBECONFIG`） | deny | deny | deny | **deny** |
+| bash 碰到密钥线索（`cat .env`、`pytest tests/test_credentials.py`） | ask | ask | deny | allow |
 
 `examples/05_hooks_permissions.py` 打印的判定矩阵可以直接对照（`read ~/.ssh/id_rsa` 在四种模式下都是 deny，因为托管基线规则先于模式生效）。
 
@@ -73,7 +75,7 @@ flowchart TD
   “本会话总是允许”的授权会在 plan 模式下直接放行写操作；托管基线的 `ask:bash(*.flywhl*)` 会把
   `find . -not -path './.flywhl/*' -exec sed -i …` 变成审批，无人值守自动批准时就在规划阶段改了文件（真实模型测试里出现过）。
   现在 plan 模式下非只读操作一律 deny；只读操作仍按规则判定（命中 ask 规则照样要确认）。
-- **bypass 仍然受 deny 规则和灾难性命令拦截约束**，但不再做 dangerous 和污点升级——它只应在隔离沙箱里使用。
+- **bypass 仍然受 deny 规则、灾难性命令和凭证位置拦截约束**，但不再做 dangerous 和污点升级——它只应在隔离沙箱里使用。
 - **模式按 Run 生效。** `Harness.set_mode()` 只更新会话元数据，策略对象在 `_build_rc` 构造 Run 时创建，所以运行中切换模式从下一次 Run 起生效。
 
 与 Claude Code 的模式对照（按调研资料，以官方文档为准）：
@@ -115,7 +117,7 @@ _RULE_RE = re.compile(r"^\s*(allow|ask|deny)\s*:\s*([\w*?\-\[\]]+)\s*(?:\((.*)\)
 
 | 规则 | 意图 |
 |---|---|
-| `deny:read/grep/write/edit(<凭证位置>)`：`.ssh`、`id_rsa`/`id_ed25519`、`.aws`、`.config/gcloud`、`.azure`、`.kube`、`.docker/config.json`、`.netrc`、`.git-credentials`、`.config/gh`、`.pypirc`、`.pgpass`、`.vault-token`、`.gnupg`、`/etc/shadow`、`/proc/*/environ` | 模型不能通过文件工具读写凭证。清单在 `policy/sensitive.py`，与 bash 命令分析的 `SECRET_HINTS` 共用并由测试逐项核对；grep 递归遍历时也逐个文件跳过这些位置 |
+| `deny:read/grep/write/edit(<凭证位置>)`：`.ssh`、`id_rsa`/`id_ed25519`、`.aws`、`.config/gcloud`、`.azure`、`.kube`、`.docker/config.json`、`.netrc`、`.git-credentials`、`.config/gh`、`.pypirc`、`.pgpass`、`.vault-token`、`.gnupg`、`/etc/shadow`、`/proc/*/environ` | 模型不能通过文件工具读写凭证。清单在 `policy/sensitive.py`，与 bash 命令分析的 `CREDENTIAL_HINTS` 共用并由测试逐项核对，bash 命中同样拒绝（见下文“bash 与凭证位置”）；grep 递归遍历时也逐个文件跳过这些位置 |
 | `ask:read/grep/write/edit(*.env、.env.*、.npmrc、*_history)` | 常含密钥、也常有正当用途的文件，读写都需确认 |
 | `deny:write/edit(.flywhl/*)`、`ask:write/edit(flywhl.toml)`、`ask:bash(*.flywhl*)` | Agent 不能改写 harness 自己的状态与配置：`.flywhl/` 里是会话库、审批记录、快照与 `.flywhl/config.toml`，`flywhl.toml` 在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权——`accept_edits` 模式会自动接受工作区内的编辑，bypass 更不必说，所以放在基线里 |
 | `deny:bash(rm -rf /)`、`deny:bash(rm -rf /*)`、`deny:bash(rm -rf ~*)`、`deny:bash(mkfs*)`、`deny:bash(:(){*)` | 最具破坏性的命令直接拒绝 |
@@ -148,6 +150,56 @@ all_rules = [*self.rules, *grants]
 而不是排在最前面的原因：`sudo env FOO=1 nice -n 5 rm -rf ~` 显示的是“递归删除 ~”，而不是“sudo 提权执行”
 （`tests/test_security.py::test_catastrophic_reason_names_the_real_danger`）。
 `dd of=/dev/null`、`echo > /dev/tty` 这类写设备文件只是 dangerous，只有块设备（`/dev/sd*`、`/dev/disk*`、`/dev/nvme*`……）才是灾难。
+
+## bash 与凭证位置
+
+文件工具对凭证位置的拒绝是精确的：目标就是一个路径，解析符号链接后用 glob 比较。bash 只能在命令串里找字样，
+早期版本命中后只升为 dangerous：default 模式下要确认，bypass 模式下 `cat ~/.kube/config` 直接执行。补这个口子有三个候选：
+
+| 方案 | bypass | default / accept_edits | `--yes` 自动批准 | 误报的代价 |
+|---|---|---|---|---|
+| 维持高危要确认 | 放行 | ask | 放行 | 一次审批 |
+| 只在 bypass 下拒绝 | deny | ask | **放行** | bypass 下失败一次；有人时一次审批 |
+| **任何模式都拒绝（采用）** | deny | deny | deny | 没有“批准后执行”的出路，只能换做法 |
+
+选第三种的理由：
+
+- **没人看的路径不止 bypass。** `on_ask="allow"`（`flywhl run --yes`）会自动批准所有 ask；有人看时，`cat ~/.kube/config`
+  像是在排查 kubectl，很容易被顺手批准。凭证一旦进了上下文，就留在事件流、轨迹和日志里，快照回滚撤不回来。
+- **只在 bypass 下拒绝说不通。** 最宽松的模式在这一处比 default 更严，同一条命令在 default 下却能批准执行。
+- **同一个位置，五个通道给同一个答案。** `test_credential_paths_agree_across_file_tools_and_bash` 在四种模式下、
+  带着 `allow:bash` 规则，逐项核对 read / grep / write / edit / bash 都是 deny。
+
+实现上它和灾难性命令走同一条路：命令分析给出 `credential` 标记，`evaluate()` 在查规则之前返回 deny，
+所以 allow 规则、“本会话总是允许”、审批改参都放不过它；关掉托管基线（`PermissionPolicy(baseline=False)`）时一并关掉。
+
+**误报的代价决定了只拒绝哪一档。** 硬拒绝没有出路，所以只有“除了碰凭证几乎不会出现在命令里”的字样进入凭证档
+（`policy/sensitive.py::CREDENTIAL_HINTS`），目录按完整的路径段匹配：`~/.ssh`、`~/.ssh/x`、`cd ~ && cat .kube/config` 命中，
+`src/ssh_utils.py`、`docs/.ssh_notes` 不命中。仍会误伤的三类命令：
+
+| 误报 | 例子 | 出路 |
+|---|---|---|
+| 命令里只是提到这些字样 | `grep -rn '\.kube/' src`、`git commit -m "补 .ssh 路径"` | grep 工具只检查搜索的路径、不检查搜索词；提交信息先用 write 写进文件再 `git commit -F` |
+| 显式使用凭证 | `ssh -i ~/.ssh/deploy host`、`kubectl --kubeconfig ~/.kube/staging get pods` | 用默认位置、`~/.ssh/config` 里的 Host 别名或预先设好的 `KUBECONFIG`，命令里就不出现路径——`ssh deploy-host`、`kubectl get pods` 不受影响 |
+| 管理凭证 | `ssh-keygen -f ~/.ssh/id_ed25519`、`chmod 600 ~/.ssh/config`、`cat ~/.ssh/id_ed25519.pub` | 由用户自己执行 |
+
+拒绝理由里提示了 grep 工具和“交给用户执行”两条出路，模型通常能自己换做法。
+线索档（`.env`、`credentials` 字样、shell 历史、钥匙串查询，即 `SECRET_HINTS` 多出来的部分）维持高危要确认、bypass 下不升级：
+`cp .env.example .env`、`pytest tests/test_credentials.py` 都会命中，误报率高，内容也常是任务本身要用的项目配置。
+`tests/test_security.py::test_bash_credential_deny_stays_narrow` 守住这条边界。
+
+**字符串匹配能看到什么。** 匹配同时作用于原始命令串（`sh -c` 字符串、heredoc 里的也算）和 shell 处理之后的每个词——
+shlex 已经去掉引号与反斜杠，花括号再按 bash 的规则展开：
+
+| 写法 | 结果 |
+|---|---|
+| `cat ~/.kube/config`、`tar czf k.tgz ~/.ssh`、`sh -c 'cat ~/.aws/credentials'` | deny |
+| `cat ~/.k''ube/config`、`cat ~/.ku\be/config`、`cat ~/.ku{be,}/config`、`eval "cat ~/.do""cker/config.json"` | deny（去引号、展开之后再匹配） |
+| `cat $KUBECONFIG`、`cat $XDG_CONFIG_HOME/gh/hosts.yml` | deny（指向凭证位置的环境变量） |
+| `D=$HOME/.ku; cat ${D}be/config`、`cat ~/.kub?/config`、`cat $(printf '\x7e/.kube/config')` | **认不出是凭证**：前两条按工作区外路径、第三条按命令替换，default 下要确认，bypass 下放行 |
+
+最后一行是字符串匹配的上限：它挡得住顺手的读取和简单变形，挡不住刻意混淆。被注入之后的对抗场景要靠系统沙箱，
+见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) 的 sandbox-exec 档位。
 
 ## 复合命令不能搭便车
 
@@ -339,17 +391,21 @@ for j, w in enumerate(args, start=1):
 `git` 单独解析：先跳过 `-C <dir>`、`--git-dir=…` 等全局选项再取子命令，所以 `git -C sub status` 是 read；
 但 `-c` 能配置任意命令（`core.pager`、`core.sshCommand`、`*.textconv`、`alias.x=!cmd`），这类 `-c` 直接记为 external。
 
-密钥线索（`SECRET_HINTS`）按字面匹配，命中即 dangerous：`.ssh/`、`id_rsa`、`.aws/`、`.kube/`、`.netrc`、`.env`、`credentials`、
-`.npmrc`、`.pypirc`、`.pgpass`、`.git-credentials`、`.docker/config.json`、`.gnupg`、`.config/gh/`、`.vault-token`、`*_history`、
-`/proc/*/environ`，以及 macOS 钥匙串的 `security find-generic-password` / `find-internet-password`。
+密钥线索分两档按字面匹配，都判为 dangerous（见上文“bash 与凭证位置”）。凭证档（`CREDENTIAL_HINTS`）：`.ssh`、`.aws`、`.azure`、
+`.kube`、`.gnupg`、`.config/gcloud`、`.config/gh` 这几个目录（按完整路径段），`id_rsa`、`id_ed25519`、`.docker/config.json`、`.netrc`、
+`.git-credentials`、`.pypirc`、`.pgpass`、`.vault-token`、`/etc/shadow`、`/proc/*/environ`，以及 `$KUBECONFIG`、`$GNUPGHOME`、
+`$DOCKER_CONFIG`、`$CLOUDSDK_CONFIG`、`$GH_CONFIG_DIR`、`$AWS_SHARED_CREDENTIALS_FILE`、`$XDG_CONFIG_HOME/gh|gcloud`。
+线索档（`SECRET_HINTS` 多出来的部分）：`.env`、`credentials`、`.npmrc`、`*_history`，以及 macOS 钥匙串的
+`security find-generic-password` / `find-internet-password`。
 
-### 两个附加标记：catastrophic 与 network
+### 三个附加标记：catastrophic、credential 与 network
 
-等级回答“要不要问”，两个布尔标记服务于另外两个决策：
+等级回答“要不要问”，三个布尔标记服务于另外几个决策：
 
 | 标记 | 命中条件 | 谁在用 |
 |---|---|---|
 | `catastrophic` | 递归删除根目录、家目录或根下一级目录（`/usr`、`/etc`……）；`mkfs*`；`dd of=/dev/*`；重定向写块设备（`/dev/sd*`、`/dev/disk*`、`/dev/nvme*`……）；fork 炸弹；`chmod/chown -R` 根或家目录 | `evaluate()` 在一切规则与模式之前直接 deny |
+| `credential` | 命令串或 shell 处理后的某个词命中凭证档线索 | 同上，在 catastrophic 之后、规则之前 deny |
 | `network` | `curl`/`wget`/`ssh` 等外部命令、`git push/fetch/pull/clone`、`npm install`/`pip install` 等 | `BashTool.untrusted_for()` 据此把输出标记为污点，见下文 |
 
 ### 局限：它不是安全边界
@@ -364,18 +420,24 @@ for j, w in enumerate(args, start=1):
 | `sort -o /etc/x a.txt`、`git diff --output=/tmp/x` | read，**allow** | external，ask |
 | `cat /etc/passwd`、`cat ~/.bashrc` | read，**allow** | external，ask（plan 下 deny） |
 | `bash -c 'git status'`、`git -C sub status` | ask | read，allow |
+| `cat {a,../../etc/passwd}`、`D=/etc; cat $D/passwd` | read，**allow** | external，ask |
+| `rm -rf {~,build}` | write，ask，**bypass 放行** | catastrophic，所有模式 deny |
+| `cat ~/.kube/config` | dangerous，ask，**bypass 放行** | credential，所有模式 deny |
+| `cat $XDG_CONFIG_HOME/gh/hosts.yml` | read，**allow** | credential，所有模式 deny |
 
 剩下的缺口有一个共同点：判断它们需要 shell **运行时** 的状态（当前目录、变量的值、脚本文件的内容），静态分析拿不到。
 
 | 命令 | 分析结果 | 判定 | 问题所在 |
 |---|---|---|---|
-| `D=/etc; cat $D/passwd` | read | **allow** | 变量不展开 |
-| `cat $XDG_CONFIG_HOME/gh/hosts.yml` | read | **allow** | 同上；密钥线索按字面匹配，`.config/gh/` 没有出现 |
+| `F=/etc/passwd; cat $F` | read | **allow** | 整个路径都在变量里；只有“以变量开头、又带 `/`”的词才按越界处理（否则 `echo $PATH` 也要确认） |
+| `D=$HOME/.ku; cat ${D}be/config` | external | ask，**bypass 放行** | 变量拼出来的凭证路径，字符串里没有凭证字样 |
 | `python3 script.py` | write | ask | 脚本内容不可见，能做的事和 `python -c` 一样多 |
 | `rm -fr ~/.cache/pip` | dangerous | ask，**bypass 放行** | 家目录下的深层路径不算 catastrophic，基线 glob 又只认 `rm -rf ~*` |
 
 相对路径用 `..` 爬出工作区（`cat ../../etc/passwd`）现在会被识别：命令在工作区根目录执行，`_is_outside()` 对含 `..` 的相对路径做
 `os.path.normpath`，结果以 `..` 开头即视为越界（`a/../b.txt` 仍在工作区内，`tests/test_security.py::test_analyzer_edge_cases`）。
+花括号先按 bash 的规则展开再判断（结果超过 64 个按无法分析处理）；以变量开头、又带 `/` 的词落在哪里取决于变量的值，
+按越界处理，`$PWD` 除外（它就是工作区根目录）。
 但像变量、脚本内容这样的运行时状态，静态分析 shell 本质上做不完。这正是本章末尾“与 pi 的对照”一节中 pi 立场的出发点，
 也是本项目在 [18 章](/governance/workspace-sandbox) 讨论沙箱的原因。
 分析器的真正价值是 **降低审批疲劳**：让 `ls`、`git status` 这类高频只读命令不用问，把审批留给真正值得看的动作。
@@ -665,9 +727,9 @@ project trust 也只决定加载哪些项目资源，不是安全边界。
 uv run pytest tests/test_policy.py -q
 uv run pytest tests/test_cancel.py::test_cancel_during_approval_wait -q
 
-# 包装命令与递归分析（参数化用例）、灾难性命令全模式拒绝、工作区外读取需确认、网络输出污点持久化、
-# 改参重跑 PreToolUse、审批 diff 预览
-uv run pytest tests/test_security.py -q -k "analyzer or catastrophic or outside_read or taints or rerun_pre_tool or diff_preview"
+# 包装命令与递归分析（参数化用例）、灾难性命令与凭证位置全模式拒绝、工作区外读取需确认、网络输出污点持久化、
+# 改参重跑 PreToolUse、审批 diff 预览、sandbox-exec 档位（非 macOS 自动跳过）
+uv run pytest tests/test_security.py -q -k "analyzer or catastrophic or credential or sandbox or outside_read or taints or rerun_pre_tool or diff_preview"
 
 # 命令风险分析表、四模式判定矩阵、审批人改参后批准
 uv run python examples/05_hooks_permissions.py
@@ -692,6 +754,8 @@ for cmd in ["git status && git diff", "ls 'a;rm -rf ~'", "rm -fr /", "echo hi > 
 
 - 权限是纵深防御中的一层：模式给默认姿态，规则做显式声明，命令分析细化 bash，污点做动态升级，沙箱兜底。
 - 灾难性命令（删根/家目录、格式化、写块设备、fork 炸弹）在一切规则与模式之前直接 deny，bypass 也放不过。
+- bash 碰到凭证位置同样任何模式都 deny，与文件工具结论一致；只拒绝误报少的凭证档，线索档维持确认。
+  字符串匹配挡不住刻意混淆，那一层交给 sandbox-exec 档位。
 - 规则按 deny → ask → allow 先命中者生效；bash 的 allow 必须覆盖每一段，防止复合命令搭便车。
 - 命令分析器用词法切分和逐段分级代替正则：剥包装命令、递归分析 `sh -c`/`eval`、工作区外路径即使只读也要确认，
   无法静态分析的一律保守；剩下的绕过依赖运行时状态（变量、脚本内容），它不是安全边界。

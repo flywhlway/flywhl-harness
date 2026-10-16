@@ -113,7 +113,7 @@
 | Workspace 抽象与生命周期 | [18](/governance/workspace-sandbox) | `runtime/workspace.py` | — |
 | 快照与回滚、快照技术路线对比 | [18](/governance/workspace-sandbox) | `ShadowGit` | Web UI 检查器“历史”页签、`test_shadow_repo_is_per_workspace` |
 | 多 Agent 并行改同一仓库：worktree 与合并 | [18](/governance/workspace-sandbox) | — | — |
-| 沙箱运行时选型、冷启动与预热池 | [18](/governance/workspace-sandbox) | — | — |
+| 沙箱运行时选型、冷启动与预热池 | [18](/governance/workspace-sandbox) | `tools/sandbox.py`（macOS sandbox-exec 原型） | `test_sandbox_blocks_credential_reads_static_analysis_misses` |
 | 网络出口管控与凭据代持 | [18](/governance/workspace-sandbox)、[19](/governance/security) | `tools/shell.py` · `_clean_env()` | — |
 | 浏览器自动化隔离 | [18](/governance/workspace-sandbox) | — | — |
 | 提示注入纵深防御、最小权限、供应链、OWASP Agentic Top 10、红队 | [19](/governance/security) | `policy/` | — |

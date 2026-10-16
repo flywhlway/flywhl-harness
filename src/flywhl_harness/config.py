@@ -85,6 +85,7 @@ class PermissionConfig:
     on_ask: str = "wait"                   # wait（等待人审）| allow | deny（无人值守时）
     approval_timeout: float = 600.0        # 审批超时，超时默认拒绝
     strip_secret_env: bool = True          # bash 子进程剥离 *KEY*/*TOKEN*/*SECRET* 等环境变量
+    sandbox: str = "off"                   # off | macos（bash 跑在 sandbox-exec 里，原型，见 tools/sandbox.py）
 
 
 @dataclass
@@ -249,7 +250,7 @@ _SAFE_KEYS = frozenset({
 })
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
-    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,),
+    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos",),
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 

@@ -1,8 +1,8 @@
 # 18 Workspace 与沙箱
 
 前两章回答“这个动作能不能做”，本章回答另一半：**动作落在哪里，出了错能退回到哪里，最坏情况下能伤到什么。**
-Workspace 是 Agent 的工作现场，沙箱是这个现场的围墙。flywhl-harness 实现了前者的路径约束、漂移检测和影子 git 快照，
-没有实现后者，本章最后说明怎样把 bash 接到远程沙箱上。
+Workspace 是 Agent 的工作现场，沙箱是这个现场的围墙。flywhl-harness 实现了前者的路径约束、漂移检测和影子 git 快照；
+后者只有一个只包 bash 的 macOS sandbox-exec 档位原型。本章最后说明这个档位的范围，以及怎样把 bash 接到远程沙箱上。
 
 ## Workspace 是什么
 
@@ -78,7 +78,8 @@ def resolve(self, path: str, *, allow_outside: bool = False) -> Path:
 
 - **bash 不经过它。** 命令分析器对 bash 做了一层近似：参数里出现工作区外的绝对路径、`~`、`$HOME` 时，即使是 `cat /etc/hosts` 这样的只读命令
   也判为 external，default 模式下要确认、plan 模式下拒绝（见 [17 权限与人审](/governance/permissions-hitl)）；用 `..` 爬出工作区的相对路径
-  （`cat ../../etc/hosts`）按 `normpath` 识别。但它只看字面参数，变量拼出来的路径（`D=/etc; cat $D/hosts`）、符号链接都识别不到、直接放行，
+  （`cat ../../etc/hosts`）按 `normpath` 识别，花括号先展开再判断，以变量开头的路径（`D=/etc; cat $D/hosts`）按越界处理。
+  但它只看字符串，整个路径都放在变量里（`F=/etc/hosts; cat $F`）、符号链接都识别不到、直接放行，
   和 `resolve()` 的“先解析再比较”不是一个强度。
 - **硬链接。** 工作区内一个指向外部文件的硬链接，`resolve()` 看到的就是工作区内路径。`read` 会读到外部文件的内容；
   `write` / `edit` 因为走原子写（见下文），替换的是工作区里的目录项，外部文件不受影响——但 bash 里的 `echo >> link` 仍会改到它。
@@ -384,7 +385,7 @@ harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `e
 | `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY` | 是 |
 | `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是 bash 里的 git 无法使用 ssh-agent |
 | `DATABASE_URL=postgres://user:pass@host/db` | **否**，密码藏在值里 |
-| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：路径命中密钥线索（dangerous），又在工作区外，default 模式下要确认，但 bypass 模式下照样能读 |
+| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但变量拼接等混淆写法认不出，要靠下文的 sandbox-exec 档位由内核拒绝 |
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
 需要的凭证必须在 `flywhl.toml` 该服务器的 `env` 里显式给出——第三方 MCP 服务器拿到什么，从配置里一眼可见。
@@ -403,10 +404,67 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
   `tools/mcp.py` 按规范把未声明 `openWorldHint` 的工具视为开放世界、输出标为污点，后续副作用操作会升级为人审；
   要警惕的反而是服务器把浏览器类工具声明成 `openWorldHint: false`——注解由服务器自己填写，接入第三方服务器前应核对。
 
+## macOS sandbox-exec 档位
+
+`permissions.sandbox = "macos"`（或 `flywhl chat --sandbox macos`）让 bash 工具的每条命令跑在 `sandbox-exec` 里（`tools/sandbox.py`）。
+它是原型：从 `(allow default)` 起步，只收紧文件访问。生成的配置大致是：
+
+```scheme
+(version 1)
+(allow default)
+; 凭证位置：CREDENTIAL_GLOBS 逐条转成正则，外加 $KUBECONFIG、$GNUPGHOME 等环境变量指向的位置
+(deny file-read* file-write* (regex #"^.*/\.ssh/.*$") (regex #"^.*/\.kube/.*$") ...)
+; 写操作只能落在工作区、临时目录和几个设备文件上
+(deny file-write* (require-not (require-any (subpath "<工作区>") (subpath "<临时目录>") (literal "/dev/null") ...)))
+; harness 自己的状态与配置，与托管基线一致
+(deny file-write* (subpath "<工作区>/.flywhl") (literal "<工作区>/flywhl.toml"))
+```
+
+凭证清单与文件工具、命令分析共用 `policy/sensitive.py` 那一份，区别在于内核按 **真实路径** 判定，不管命令怎么写：
+
+| 动作 | 命令分析（字符串） | sandbox-exec（内核） |
+|---|---|---|
+| `cat ~/.kube/config` | deny | 拒绝 |
+| `D=$HOME/.ku; cat ${D}be/config`、glob、编码过的路径 | 认不出，bypass 下放行 | 拒绝 |
+| 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
+| 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
+| 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
+| 网络外发、钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
+| 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
+
+`tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
+沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界。
+
+代价与边界：
+
+- **要用凭证的命令会失败。** `ssh`、`git push`（SSH 协议）、`kubectl`、`gh`、`docker login` 读不到自己的凭证文件——
+  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。
+- **写全局缓存的工具可能失败或退化。** 默认只放开工作区和临时目录，`~/.cache`、`~/Library/Caches`、`~/.npm` 写不进去；
+  原型没有做可配置的白名单（`sandbox_argv()` 的 `writable` 参数留了口子）。
+- **fail-closed。** 配置了 `macos` 但 sandbox-exec 不可用（Linux、文件被删）时，命令不执行、返回错误，
+  不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
+- **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
+  非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
+- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。
+
+### 设计草案：只在沙箱档位下允许 bypass（未实现）
+
+bypass 的注释一直写着“只应在隔离沙箱中使用”，但没有任何机制检查这一点。打算这样补：
+
+1. `permissions.sandbox` 增加取值 `external`：使用者声明 harness 已经跑在容器或 VM 里，隔离由外部负责。harness 验证不了这个声明，
+   作用是让“我在沙箱外开 bypass”不再是默认值，而是一个写进配置、留在审计里的显式选择；
+2. 构造 Run 时（`Harness._build_rc`）mode 为 bypass 而 sandbox 为 `off`，**拒绝启动** 并说明原因，而不是悄悄降级成 default——
+   无人值守的任务降级之后会卡在审批上，比报错更难排查；
+3. Web UI 与 `/mode bypass` 在 sandbox 为 `off` 时给出同样的拒绝。
+
+没有直接实现，是因为它改变现有的公开行为：`examples/` 默认以 bypass 运行，CI 的 Ubuntu job 会跑这些示例；
+回放（`observe/replay.py`）也以 bypass 创建会话；测试里大量使用 bypass。迁移要把这些位置显式声明为 `external`
+（它们用脚本化模型，不需要真实隔离），这是对 v0.1.0 的不兼容改动，留待单独决定。
+
 ## 接入远程沙箱执行器
 
-本项目没有 VM 或容器沙箱：bash 在宿主机上以工作区为 `cwd` 运行，`start_new_session=True` 只是为了能整组终止进程树，不是隔离。
-有两条路可以补上这一层。
+除了上面的原型，本项目没有 VM 或容器沙箱：默认档位下 bash 在宿主机上以工作区为 `cwd` 运行，
+`start_new_session=True` 只是为了能整组终止进程树，不是隔离。有两条路可以补上这一层。
 
 **整体放进容器。** 最简单：把 flywhl-harness 进程连同工作区一起跑在容器里，只挂载工作区目录，不挂载家目录，不传入除模型 API 密钥之外的凭据，
 并限制容器的网络出口。这就是 pi 推荐的形态，适合本地开发。
@@ -515,6 +573,8 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
+- macOS sandbox-exec 档位是本项目唯一的系统级隔离（原型）：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
+  不管网络；“只在沙箱档位下允许 bypass”还是设计草案。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash 与 MCP 服务器共用）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

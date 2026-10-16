@@ -9,8 +9,12 @@ read 工具的托管基线却只拒绝 ``.ssh``、``id_rsa``、``.aws/credential
 分两档：
 
 - ``CREDENTIAL_GLOBS``：凭证的固定存放位置。文件工具（read / grep / write / edit）在 **任何模式** 下都拒绝，
-  写也拒绝——往 ``~/.ssh/authorized_keys`` 追加一行就是持久化后门；
-- ``SECRET_HINT_GLOBS``：可能含密钥、但也常有正当用途的文件（项目 ``.env``、``.npmrc``、shell 历史）。读写都要人确认。
+  写也拒绝——往 ``~/.ssh/authorized_keys`` 追加一行就是持久化后门；bash 命令命中对应的 ``CREDENTIAL_HINTS`` 同样拒绝；
+- ``SECRET_HINT_GLOBS``：可能含密钥、但也常有正当用途的文件（项目 ``.env``、``.npmrc``、shell 历史）。读写都要人确认；
+  bash 命中 ``SECRET_HINTS`` 判为高危，default 模式下要确认。
+
+两档的取舍（为什么 bash 只对凭证档硬拒绝）写在 ``permissions.py`` 的模块注释里。``tools/sandbox.py`` 的 sandbox-exec 档位
+也从 ``CREDENTIAL_GLOBS`` 生成内核层面的读写拒绝。
 
 glob 用 ``fnmatch`` 匹配完整路径，``*`` 可以跨目录；权限层同时拿原始路径、解析符号链接后的绝对路径、
 相对工作区路径去匹配，所以 ``../../.kube/config`` 和指向它的软链接都会命中。
@@ -33,12 +37,25 @@ CREDENTIAL_GLOBS: tuple[str, ...] = (
 )
 SECRET_HINT_GLOBS: tuple[str, ...] = ("*.env", "*/.env.*", "*/.npmrc", "*_history")
 
-# bash 命令只能按字符串找线索：上面两档的每个位置都要能在这里命中（测试逐项核对），
-# 另外加上只在命令里出现的写法（钥匙串查询）和更宽的 credentials 字样——命令分析的结论只是“需要确认”，宽一点代价不大
+# bash 命令只能按字符串找线索，同样分两档，结论不同（见 permissions.py 模块注释“bash 与凭证位置”）：
+#
+# - CREDENTIAL_HINTS 对应 CREDENTIAL_GLOBS，命中即拒绝、任何模式都一样。硬拒绝没有“批准后执行”的出路，误报只能换个做法，
+#   所以只收录除了碰凭证几乎不会出现在命令里的字样：目录按完整的路径段匹配（~/.ssh、~/.ssh/x 命中，ssh_utils.py、
+#   .ssh_notes 不命中），再加上指向这些位置的环境变量（cat $KUBECONFIG）；
+# - SECRET_HINTS 是两档的并集，再加上更宽的字样（.env、credentials、shell 历史、钥匙串查询）。只判为高危要确认——
+#   cp .env.example .env、pytest tests/test_credentials.py 都会命中，宽一点的代价只是多问一次。
+#
+# 两档各自要覆盖对应 glob 的每个位置，测试逐项核对，也核对线索档的样例不会落进凭证档
+_SEG_START, _SEG_END = r"(?<![\w.-])", r"(?![\w.-])"   # 前后不能紧挨着名字字符：整段匹配
+CREDENTIAL_HINTS = re.compile(
+    rf"{_SEG_START}\.(ssh|aws|azure|kube|gnupg){_SEG_END}|\.config/(gcloud|gh){_SEG_END}"
+    r"|id_rsa|id_ed25519|\.docker/config\.json|\.netrc\b|\.git-credentials|\.pypirc|\.pgpass|\.vault-token"
+    r"|/etc/shadow|/proc/[^/\s]+/environ"
+    r"|\$\{?(KUBECONFIG|GNUPGHOME|DOCKER_CONFIG|CLOUDSDK_CONFIG|GH_CONFIG_DIR|AWS_SHARED_CREDENTIALS_FILE)\b"
+    rf"|\$\{{?XDG_CONFIG_HOME\}}?/(gcloud|gh){_SEG_END}")
 SECRET_HINTS = re.compile(
-    r"(\.ssh/|id_rsa|id_ed25519|\.aws/|\.config/gcloud/|\.azure/|\.kube/|\.netrc|/etc/shadow|\.env\b|credentials"
-    r"|\.npmrc|\.pypirc|\.pgpass|\.git-credentials|\.docker/config\.json|\.gnupg|\.config/gh/|\.vault-token"
-    r"|_history\b|/proc/[^/\s]+/environ|find-generic-password|find-internet-password)")
+    CREDENTIAL_HINTS.pattern
+    + r"|\.env\b|credentials|\.npmrc|_history\b|find-generic-password|find-internet-password")
 
 
 def sensitivity(path: str | Path) -> str | None:
@@ -51,4 +68,4 @@ def sensitivity(path: str | Path) -> str | None:
     return None
 
 
-__all__ = ["CREDENTIAL_GLOBS", "SECRET_HINT_GLOBS", "SECRET_HINTS", "sensitivity"]
+__all__ = ["CREDENTIAL_GLOBS", "CREDENTIAL_HINTS", "SECRET_HINT_GLOBS", "SECRET_HINTS", "sensitivity"]

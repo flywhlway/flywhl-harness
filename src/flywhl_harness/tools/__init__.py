@@ -17,7 +17,8 @@ def default_tools(cfg: HarnessConfig, data_dir: Path | None = None) -> ToolRegis
     from ..agent.subagent import TaskTool
 
     reg = ToolRegistry([
-        ReadTool(), WriteTool(), EditTool(), BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout),
+        ReadTool(), WriteTool(), EditTool(),
+        BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout, cfg.permissions.sandbox),
         LsTool(), GrepTool(), TodoWriteTool(), ReadRefTool(), SearchRefTool(), TaskTool(),
     ])
     if cfg.enable_demo_tools:

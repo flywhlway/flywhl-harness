@@ -10,6 +10,8 @@ bash 是最强也最危险的工具。这里的工程要点：
 - **密钥不可见**：默认从子进程环境中剥离名字含 KEY/TOKEN/SECRET/PASSWORD 的变量，
   模型即使执行 ``env`` 也看不到原始凭据。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
+- **可选的系统沙箱**：``sandbox="macos"`` 时命令跑在 sandbox-exec 里，凭证位置不可读、写操作限制在工作区与临时目录，
+  见 ``tools/sandbox.py``。
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from typing import Any
 from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
+from .sandbox import SANDBOX_LEVELS, sandbox_argv
 
 _SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.I)
 OUT_LINES = 400
@@ -80,9 +83,12 @@ class BashTool(Tool):
     interruptible = True
     manages_timeout = True
 
-    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0):
+    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off"):
+        if sandbox not in SANDBOX_LEVELS:
+            raise ValueError(f"未知的沙箱档位 {sandbox!r}（可选：{' | '.join(SANDBOX_LEVELS)}）")
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
+        self.sandbox = sandbox
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         level = analyze(str(args.get("command", "")), workspace).level
@@ -107,16 +113,19 @@ class BashTool(Tool):
         if ctx.time_left is not None:  # 截止时间沿调用链传递：不超过 Run 剩余的墙钟预算
             timeout = max(1.0, min(timeout, ctx.time_left))
         started = time.monotonic()
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(ctx.workspace.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            stdin=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-            env=_clean_env(self.strip_secret_env),
-            executable="/bin/bash" if os.path.exists("/bin/bash") else None,
-        )
+        spawn = dict(cwd=str(ctx.workspace.root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                     stdin=asyncio.subprocess.DEVNULL, start_new_session=True, env=_clean_env(self.strip_secret_env))
+        if self.sandbox == "macos":
+            try:
+                argv = sandbox_argv(command, ctx.workspace.root)
+            except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
+                return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
+                                  details={"command": command, "sandbox": self.sandbox})
+            # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变：取消、超时照样能整组终止
+            proc = await asyncio.create_subprocess_exec(*argv, **spawn)
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                command, executable="/bin/bash" if os.path.exists("/bin/bash") else None, **spawn)
         chunks: list[bytes] = []
         timed_out = False
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -152,6 +161,8 @@ class BashTool(Tool):
             "duration_ms": int((time.monotonic() - started) * 1000),
             "total_lines": total,
         }
+        if self.sandbox != "off":
+            details["sandbox"] = self.sandbox
         if cut:
             ref = ctx.blobs.put(ctx.session_id, output)
             details["full_output_ref"] = ref

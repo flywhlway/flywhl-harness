@@ -176,6 +176,8 @@ def _config(args: argparse.Namespace) -> HarnessConfig:
         cfg.permissions.mode = args.mode
     if getattr(args, "yes", False):
         cfg.permissions.on_ask = "allow"
+    if getattr(args, "sandbox", None):
+        cfg.permissions.sandbox = args.sandbox
     return cfg
 
 
@@ -391,6 +393,7 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
+    common.add_argument("--sandbox", choices=["off", "macos"], help="bash 的系统沙箱（macos：sandbox-exec，原型）")
     common.add_argument("--thinking", action="store_true", help="显示模型的思考过程")
     sub = p.add_subparsers(dest="cmd")
 
