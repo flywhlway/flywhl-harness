@@ -187,6 +187,10 @@ class PermissionPolicy:
         # 2) 模式默认姿态
         if decision is None:
             decision, reason = self._mode_default(tool, args, effect)
+        elif self.mode == Mode.PLAN and effect != Effect.READ and decision != Decision.DENY:
+            # plan 模式是只读的硬上限：allow 规则、会话授权放行不了副作用，托管基线的 ask 也不能变成“批准后执行”——
+            # 模型常写 find . -not -path './.flywhl/*' -exec ...，命中 ask:bash(*.flywhl*) 后经自动审批就在规划阶段跑了写操作
+            decision, reason = Decision.DENY, f"plan 模式只允许只读操作（{reason}）。请先给出计划，待用户切换到执行模式后再修改。"
 
         # 3) 只升不降的修正
         if analysis and analysis.level == "dangerous" and decision == Decision.ALLOW and self.mode != Mode.BYPASS:

@@ -94,6 +94,34 @@ async def test_recorded_effect_matches_permission_verdict(ws):
     assert (ws / "app.py").read_text() == "print('v1')\n"
 
 
+def test_plan_mode_is_a_hard_ceiling_for_side_effects(tmp_path):
+    """plan 模式下规则只能收紧：allow 规则、会话授权、托管基线的 ask 都不能让写操作执行；只读操作照常按规则判定。"""
+    ws = Workspace(tmp_path, snapshots=False)
+    t = _tools()
+    bash, write = t.get("bash"), t.get("write")
+    plan = PermissionPolicy("plan", ["allow:bash(npm test*)"], workspace=ws)
+    find_exec = "find . -type f -not -path './.flywhl/*' -exec sed -i s/v1/v2/ {} +"
+    assert plan.evaluate(bash, {"command": find_exec}).decision == Decision.DENY        # 早期版本：命中 ask 规则 → 审批后执行
+    assert plan.evaluate(bash, {"command": "npm test -- -u"}).decision == Decision.DENY  # 早期版本：allow 规则直接放行
+    grant = Rule.parse("allow:write(app.py)", "session")
+    assert plan.evaluate(write, {"path": "app.py", "content": "x"}, grants=[grant]).decision == Decision.DENY
+    assert plan.evaluate(bash, {"command": "ls -la .flywhl"}).decision == Decision.ASK  # 只读：仍按 ask 规则
+    assert plan.evaluate(bash, {"command": "git status"}).decision == Decision.ALLOW
+
+
+async def test_plan_mode_auto_approval_cannot_run_writes(ws):
+    """真实模型在 plan 模式下的写法：无人值守自动批准（on_ask=allow）也不能让它执行。"""
+    (ws / "app.py").write_text("print('v1')\n")
+    h = make_harness(ws, [
+        {"tool_calls": [{"name": "bash", "args": {"command": "find . -name '*.py' -not -path './.flywhl/*' -exec sed -i s/v1/v2/ {} +"}}]},
+        "ok",
+    ], permissions__mode="plan", on_ask="allow")
+    res = await h.run("把 v1 改成 v2")
+    (end,) = tool_ends(res.events)
+    assert end["status"] == "denied" and "plan 模式" in end["content"]
+    assert (ws / "app.py").read_text() == "print('v1')\n"
+
+
 async def test_legacy_effect_for_signature_still_works(ws):
     """扩展文档里的自定义工具按 effect_for(self, args) 覆盖（换成远端沙箱的 bash 就是这么写的）。
     effect_for 增加 workspace 参数之后，这种旧写法必须照常工作，只是拿不到工作区。"""
