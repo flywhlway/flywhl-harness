@@ -16,6 +16,40 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 - 断言只针对 harness 的可观测结果（工具序列、文件内容、Run 状态、事件），提示词要求原样输出时才匹配文字。
   模型偶尔不按要求做时，失败信息里附带完整对话记录（`transcript()`），可以直接判断是 harness 的问题还是模型的问题。
 
+## 需要哪些密钥
+
+每个用例开头用 `need()` 检查自己要的密钥，缺了就 **跳过**（skipped），不会失败。没有任何密钥时 33 个全部跳过——
+所以 live 用例的 **失败** 一定是“有密钥但没跑通”，原因只剩网络、供应商侧或 harness 缺陷三类，见下文的分类记录。
+
+| 密钥 | 用例 |
+|---|---|
+| 被测模型的密钥（默认 `DEEPSEEK_API_KEY`；换 `FLYWHL_LIVE_MODEL` 后是那家的） | 24 个：Agent 机制 12 个（跨供应商续聊除外），接入层 6 个（自检、思考开关、前缀缓存、截断、错误分类、模型不存在降级），运行时全部 6 个 |
+| `DEEPSEEK_API_KEY` | DeepSeek 的 Anthropic 协议端点 |
+| `DASHSCOPE_API_KEY` | 百炼多步任务；跨供应商降级（另需被测模型的密钥） |
+| `KIMI_API_KEY` 或 `MOONSHOT_API_KEY` | Kimi 多步任务 |
+| `MINIMAX_API_KEY` | MiniMax 多步任务 |
+| `OPENROUTER_API_KEY` | OpenRouter 多步任务；经 OpenRouter 调 Claude Haiku（Anthropic 协议） |
+| `DEEPSEEK_API_KEY` + Kimi + `MINIMAX_API_KEY` | 同一会话依次换用三家供应商续聊（共 4 次运行） |
+| `LLM_FALLBACK_MODEL`（及链上每一家的密钥） | 项目 `.env` 配置的降级链 |
+
+## 失败分类记录（2026-10-16）
+
+本机 `.pytest_cache` 里留有 2026-10-14 一次运行的 30 个失败（当时存在的用例几乎全部失败，横跨五家供应商），运行日志没有保留。
+按“缺密钥 / 网络与环境 / 真实缺陷”逐项排查：
+
+| 分类 | 个数 | 依据 |
+|---|---|---|
+| 缺密钥 | 0 | 不带 `.env`、清空环境变量运行，33 个全部 skipped；缺密钥不会造成失败 |
+| 运行环境 / 网络（推断） | 29 | 同样的密钥在 de488df 上重跑全部通过；原始日志缺失，无法确定是沙箱断网、代理还是供应商侧 |
+| 真实缺陷 | 1 | `test_plan_mode_is_read_only`：见下 |
+
+`test_plan_mode_is_read_only` 的缺陷：模型在 plan 模式下用绝对路径 `cat /ws/app.py` 查看文件。权限层带着工作区分析，判为只读并放行
+（文件确实没被改）；执行器调用 `effect_for()` 时没传工作区，把同一条命令记成 external。于是界面、预写 intent、重试与取消语义
+都按另一个等级处理，用例按记录的等级检查“写操作是否都被拒绝”时失败。修复后 `Tool.effect_for()` 接收工作区根目录，
+执行器与权限层同一口径；离线回归测试是 `tests/test_policy.py::test_recorded_effect_matches_permission_verdict`。
+
+修复后完整重跑：33 passed，31.8 万 token，0.051 美元。
+
 ## 场景
 
 | 文件 | 场景 |

@@ -1,5 +1,7 @@
 # flywhl-harness
 
+[![tests](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml)
+
 > **Agent = Model + Harness.** 模型负责“想”，harness 负责其余的一切。
 
 一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 10K 行（其中大量是中文注释），
@@ -21,7 +23,7 @@
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
 | **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
 | **生命周期** | 14 态状态机 + CAS 迁移（接管时钉住观察到的版本）；协作式取消（可中断/不可中断/结果未知）；暂停恢复 + 漂移说明；失败重试；心跳租约 + 周期性崩溃接管（kill -9 后副作用恰好一次）；关闭服务时暂停、重启后继续 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` |
-| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
+| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；文件工具与命令分析共用一份凭证路径清单；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
 | **执行环境** | 路径约束与逃逸检测；影子 git 快照 / 回滚；密钥不进子进程；端云幂等指令下发 | `runtime/workspace.py`、`runtime/dispatch.py` |
 | **多 Agent** | 子代理（隔离上下文 + 回传契约 + 违约修正）；DAG 调度（并发配额、失败策略、关键路径） | `agent/subagent.py`、`runtime/scheduler.py` |
 | **度量** | 轨迹导出 + OTel GenAI 风格 span；确定性回放 / 反事实分叉；评测（Wilson 区间、McNemar 检验、过早停止率） | `observe/` |
@@ -109,11 +111,32 @@ asyncio.run(main())
 | `examples/08_replay_eval.py` | 轨迹与 span、确定性回放、定位分叉、带置信区间的评测 |
 | `examples/09_edge_cloud.py` | 丢包/重复/乱序网络下的幂等指令下发 |
 | `examples/10_long_running.py` | 长时任务：功能清单 + 进度文件 + 每会话一个单元 |
+| `examples/11_kill9_cli_recover.py` | **跨进程接管**：`flywhl run` 被 kill -9，另一个 `flywhl recover` 进程接管；打印完整状态迁移轨迹并核对 7 条不变量（CI 每次都跑） |
 
 ```bash
-.venv/bin/python examples/02_crash_resume.py
-.venv/bin/python -m pytest -q          # 184 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python examples/11_kill9_cli_recover.py
+.venv/bin/python -m pytest -q          # 229 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
+
+`examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
+
+```
+━━ 崩溃现场
+  run.status = running  worker = w38180-37b3e8  心跳停在 0.2s 前  version = 2
+  step send_notification  status = started    effect = external 幂等键 = r_…:call_…_0
+  外部通知数 = 1
+━━ 状态迁移轨迹（每一次迁移都是一条 status 事件）
+   1.      created → queued       v1   已创建，等待执行
+   2.       queued → running      v2   开始执行
+   3.      running → interrupted  v3   Worker w38180-37b3e8 心跳超时
+   4.  interrupted → queued       v4   恢复执行
+   5.       queued → running      v5   开始执行
+   6.      running → completed    v6   自然完成
+  step send_notification：reconciled  [对账] 外部系统确认该通知已发送给 ops-team，未重复发送。
+```
+
+CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与 macOS × 3.12 上跑离线测试和这个演示；
+真实模型测试要花钱、要密钥，不进 CI。2026-10-16 本机复现（macOS，Python 3.12.13）：离线 229 项全部通过。
 
 ## 真实模型测试
 
@@ -127,7 +150,10 @@ Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算
 FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
 ```
 
-详见 [tests/live/README.md](tests/live/README.md)。
+2026-10-16 复现：33 个用例全部通过（约 32 万 token、0.05 美元）。此前本机记录的 30 个失败逐项排查过：
+缺密钥 0 个（没有密钥只会跳过，不会失败）；当时的运行环境问题 29 个（同样的密钥重跑即通过）；
+真实缺陷 1 个——plan 模式下执行器记录的副作用等级没带工作区，和权限判定口径不一致——已修复并补了离线回归测试。
+需要哪些密钥、分类明细见 [tests/live/README.md](tests/live/README.md)。
 
 ## 教程
 
