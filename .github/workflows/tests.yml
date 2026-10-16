@@ -20,6 +20,7 @@ concurrency:
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15            # 演示脚本等子进程输出时若卡住，别占满默认的 6 小时
     strategy:
       fail-fast: false
       matrix:

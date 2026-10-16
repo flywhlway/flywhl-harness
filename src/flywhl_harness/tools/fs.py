@@ -355,7 +355,8 @@ class GrepTool(Tool):
             if len(hits) >= cap:
                 break
             ctx.cancel.raise_if_cancelled()
-        note = f"\n[跳过 {withheld} 个凭证或密钥文件；确需搜索请把 path 指向该文件，按权限规则确认]" if withheld else ""
+        note = (f"\n[跳过 {withheld} 个凭证或密钥文件：.env 这类文件可以把 path 指向它、经人工确认后搜索；"
+                "~/.ssh、~/.kube 这类凭证任何模式下都不读取]") if withheld else ""
         if not hits:
             return ToolResult(content=f"未找到匹配（扫描了 {files_scanned} 个文件）。{note}",
                               details={"count": 0, "withheld": withheld})

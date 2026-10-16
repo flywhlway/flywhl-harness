@@ -123,7 +123,10 @@ async def test_legacy_effect_for_signature_still_works(ws):
     ("ls -la {ws}", "read"),                 # 工作区根目录本身不是越界
     ("cat {ws}/app.py", "read"),
     ("sort --output={ws}/o.txt a", "write"),
+    ("echo x >{ws}/out.txt", "write"),      # 重定向紧贴路径
+    ("cat <{ws}/in.txt", "read"),             # 输入重定向紧贴路径
     ("cat {ws}-other/a", "external"),        # 只是字符串前缀相同
+    ("cat {ws}.bak/a", "external"),
     ("cat /elsewhere{ws}/a", "external"),
     ("rm -rf {ws}", "dangerous"),            # 删整个工作区
 ])
