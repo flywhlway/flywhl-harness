@@ -1,0 +1,42 @@
+# 离线测试：脚本化模型驱动，结果确定、零成本、不需要任何密钥。
+# 真实模型测试（tests/live，标记 live）要花钱、要密钥，pyproject 的 addopts 默认把它们排除，这里也不跑；
+# 本地运行方式与分类结果见 tests/live/README.md。
+name: tests
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "design-system/**", "**.md"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest          # 开发机是 macOS：/etc → /private/etc 这类路径解析差异要覆盖到
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: 安装依赖（按 uv.lock 锁定版本）
+        run: uv sync --locked --all-extras   # 含 anthropic SDK，覆盖 Anthropic 协议的离线回归
+      - name: 离线测试（不含 live）
+        run: uv run pytest -q
+      - name: 演示：kill -9 后另一个进程接管并完成
+        run: uv run python examples/11_kill9_cli_recover.py
