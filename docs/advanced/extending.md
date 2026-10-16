@@ -87,7 +87,7 @@ class CreateTicketTool(Tool):
 | 属性 / 方法 | 取值依据 | 影响 |
 |---|---|---|
 | `effect` | 只读 → `READ`；只改工作区文件 → `WRITE`；改变外部世界 → `EXTERNAL` | 并发（只有 `READ` 进并行批）、默认审批、执行前快照、恢复时能否重做 |
-| `effect_for(args)` | 副作用随参数变化时覆盖（如“查询”与“删除”共用一个工具） | 权限判定与快照按动态等级进行 |
+| `effect_for(args, workspace=None)` | 副作用随参数变化时覆盖（如“查询”与“删除”共用一个工具）；`workspace` 是工作区根目录，只写 `args` 也可以 | 权限判定与快照按动态等级进行 |
 | `interruptible` / `interruptible_for(args)` | 中途打断会留下不一致状态时设 `False`；随参数变化时覆盖方法（bash 对外部操作返回 `False`） | 取消时不中止，给宽限期，仍未完成则报告“结果未知” |
 | `cancel_grace` | 不可中断工具的典型收尾时长；`None` 用全局 `cancel_grace_seconds` | 取消后最多再等这么久 |
 | `idempotent` | 外部系统能按幂等键去重时设 `True` | `TransientToolError` 自动重试；恢复时可安全重做；`EXTERNAL` 工具超时按普通 `timeout` 而不是 `unknown` 报告 |
@@ -319,15 +319,15 @@ class RemoteBashTool(Tool):
         self.sandbox = sandbox
 
     # 以下三个方法是本地 BashTool 的行为，换实现时要一并带上
-    def effect_for(self, args):
-        level = analyze(str(args.get("command", ""))).level
+    def effect_for(self, args, workspace=None):   # 带上工作区：/ws/app.py 这类绝对路径按工作区内处理
+        level = analyze(str(args.get("command", "")), workspace).level
         return {"read": Effect.READ, "write": Effect.WRITE}.get(level, Effect.EXTERNAL)
 
     def untrusted_for(self, args):   # curl / git pull 取回的内容是污点
         return analyze(str(args.get("command", ""))).network
 
-    def interruptible_for(self, args):
-        return self.effect_for(args) != Effect.EXTERNAL
+    def interruptible_for(self, args, workspace=None):
+        return self.effect_for(args, workspace) != Effect.EXTERNAL
 
     async def execute(self, args, ctx):
         job = await self.sandbox.exec(args["command"], timeout=args.get("timeout", self.default_timeout),

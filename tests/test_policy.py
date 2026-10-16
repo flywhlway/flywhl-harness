@@ -94,6 +94,31 @@ async def test_recorded_effect_matches_permission_verdict(ws):
     assert (ws / "app.py").read_text() == "print('v1')\n"
 
 
+async def test_legacy_effect_for_signature_still_works(ws):
+    """扩展文档里的自定义工具按 effect_for(self, args) 覆盖（换成远端沙箱的 bash 就是这么写的）。
+    effect_for 增加 workspace 参数之后，这种旧写法必须照常工作，只是拿不到工作区。"""
+    from flywhl_harness.tools.base import Effect, Tool, ToolResult
+
+    class Legacy(Tool):
+        name = "legacy"
+        effect = Effect.READ
+
+        def effect_for(self, args):
+            return Effect.WRITE
+
+        def interruptible_for(self, args):
+            return True
+
+        async def execute(self, args, ctx):
+            return ToolResult("done")
+
+    h = make_harness(ws, [{"tool_calls": [{"name": "legacy", "args": {}}]}, "ok"], permissions__mode="bypass")
+    h.tools.register(Legacy())
+    res = await h.run("x")
+    (end,) = tool_ends(res.events)
+    assert (end["status"], end["details"]["effect"], end["content"]) == ("ok", "write", "done")
+
+
 @pytest.mark.parametrize("cmd,level", [
     ("ls -la {ws}", "read"),                 # 工作区根目录本身不是越界
     ("cat {ws}/app.py", "read"),

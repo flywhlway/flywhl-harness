@@ -47,7 +47,7 @@ class RecordedTool(Tool):
         self.interruptible = True
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
-        return self.fallback.effect_for(args, workspace) if self.fallback else Effect.READ
+        return self.fallback.effect_in(args, workspace) if self.fallback else Effect.READ
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         rec = self.recorded.get(ctx.call_id)
@@ -55,7 +55,7 @@ class RecordedTool(Tool):
             return ToolResult(rec.text, rec.is_error, {**(rec.details or {}), "replayed": True})
         if self.fallback is None:
             return ToolResult.error(f"[回放] 没有 {self.name} 的录制结果，且无可用的真实工具")
-        if self.dry_run_external and self.fallback.effect_for(args, str(ctx.workspace.root)) == Effect.EXTERNAL:
+        if self.dry_run_external and self.fallback.effect_in(args, str(ctx.workspace.root)) == Effect.EXTERNAL:
             return ToolResult(f"[dry-run] {self.fallback.describe_call(args)} —— 分叉评测中不执行外部副作用",
                               details={"dry_run": True})
         return await self.fallback.execute(args, ctx)

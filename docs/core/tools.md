@@ -69,9 +69,9 @@ class Tool:
     async def execute(self, args, ctx: ToolContext) -> ToolResult: ...
     async def reconcile(self, args, ctx) -> ToolResult | None:  # 崩溃后凭幂等键对账
         return None
-    def interruptible_for(self, args) -> bool:                  # 按参数判定可中断性
+    def interruptible_for(self, args, workspace=None) -> bool:  # 按参数判定可中断性
         return self.interruptible
-    def effect_for(self, args) -> Effect:                       # 动态副作用等级
+    def effect_for(self, args, workspace=None) -> Effect:       # 动态副作用等级（workspace：工作区根目录）
         return self.effect
     def untrusted_for(self, args) -> bool:                      # 这次输出是否不可信（bash 下载网页时为 True）
         return self.untrusted_output
@@ -164,8 +164,8 @@ MCP 工具的映射就是例子：`readOnlyHint` 为真则 `READ` 且可中断�
 
 ```python
 # src/flywhl_harness/tools/shell.py::BashTool
-def effect_for(self, args: dict[str, Any]) -> Effect:
-    level = analyze(str(args.get("command", ""))).level
+def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
+    level = analyze(str(args.get("command", "")), workspace).level
     return {"read": Effect.READ, "write": Effect.WRITE}.get(level, Effect.EXTERNAL)
 
 @property
@@ -178,6 +178,10 @@ def concurrency_safe(self) -> bool:
 
 执行器会调用两次 `effect_for`：第一次在 `_run_one` 开头，用于 `tool_start` 事件；第二次在权限、hooks、审批全部处理完之后，
 用于决定要不要做写前快照。这是有意为之：PreToolUse hook 和审批人都可能改写参数，**定级必须基于最终要执行的参数**。
+
+两处都要传工作区根目录，和权限层用同一个口径：模型常用绝对路径指向工作区里的文件，`cat /ws/app.py` 不带工作区分析会被当成
+越界读取（external），权限层带着工作区却判为只读——早期版本就是这样，plan 模式放行了它，执行器却把它记成 external。
+执行器、权限层与回放统一通过 `Tool.effect_in(args, workspace)` 取等级；只接受 `args` 的旧覆盖写法照常工作，只是拿不到工作区。
 
 ::: details 为什么 todo_write 是 READ？
 `todo_write` 只修改 harness 内部的 `ctx.state`，不碰工作区和外部系统，重复执行也没有害处。把它标为 `READ`，

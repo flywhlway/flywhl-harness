@@ -23,6 +23,7 @@ EXTERNAL   发通知、下发指令、改生产数据   串行     否      必�
 
 from __future__ import annotations
 
+import functools
 import inspect
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -87,6 +88,14 @@ class ToolContext:
     time_left: float | None = None
 
 
+@functools.cache
+def _takes_workspace(fn: Callable[..., Any]) -> bool:
+    try:
+        return "workspace" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class Tool:
     """工具基类。子类实现 ``execute``；有外部副作用的工具建议同时实现 ``reconcile``。"""
 
@@ -126,6 +135,18 @@ class Tool:
         否则 ``cat /ws/app.py`` 在权限层是只读（plan 模式放行），执行器却记成 external，界面、预写意图与恢复各说各话。
         """
         return self.effect
+
+    # 执行器、权限层、回放只通过这两个入口取等级：早期的扩展示例按 effect_for(self, args) 覆盖，
+    # 直接把 workspace 传进去会抛 TypeError。旧写法照常工作，只是拿不到工作区
+    def effect_in(self, args: dict[str, Any], workspace: str | None) -> Effect:
+        if _takes_workspace(type(self).effect_for):
+            return self.effect_for(args, workspace)
+        return self.effect_for(args)
+
+    def interruptible_in(self, args: dict[str, Any], workspace: str | None) -> bool:
+        if _takes_workspace(type(self).interruptible_for):
+            return self.interruptible_for(args, workspace)
+        return self.interruptible_for(args)
 
     def untrusted_for(self, args: dict[str, Any]) -> bool:
         """这次调用的输出是否来自不可信来源（污点）。默认取静态 untrusted_output；bash 下载网页时返回 True。"""

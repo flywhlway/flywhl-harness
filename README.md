@@ -115,7 +115,7 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/11_kill9_cli_recover.py
-.venv/bin/python -m pytest -q          # 229 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python -m pytest -q          # 230 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
 
 `examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
@@ -136,7 +136,7 @@ asyncio.run(main())
 ```
 
 CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与 macOS × 3.12 上跑离线测试和这个演示；
-真实模型测试要花钱、要密钥，不进 CI。2026-10-16 本机复现（macOS，Python 3.12.13）：离线 229 项全部通过。
+真实模型测试要花钱、要密钥，不进 CI。2026-10-16 本机复现（macOS，Python 3.12.13）：离线 230 项全部通过。
 
 ## 真实模型测试
 
