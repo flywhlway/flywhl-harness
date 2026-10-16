@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .._utils import truncate_head
+from ..policy.sensitive import sensitivity
 from ..runtime.workspace import IGNORED_DIRS, IGNORED_FILES, PathEscape
 from .base import Effect, Tool, ToolContext, ToolResult
 
@@ -328,10 +329,14 @@ class GrepTool(Tool):
         glob = args.get("glob")
         cap = args.get("max_results", 100)
         hits: list[str] = []
-        files_scanned = 0
+        files_scanned = withheld = 0
         targets = [root] if root.is_file() else _iter_files(root)
         for fp in targets:
             if glob and not fnmatch.fnmatch(fp.name, glob):
+                continue
+            # 权限层只看得到遍历的根：grep -r 扫过 ~/.kube/config、项目 .env 时逐个文件拦下，要看须显式指定路径走审批
+            if fp is not root and sensitivity(fp.resolve()):
+                withheld += 1
                 continue
             try:
                 if fp.stat().st_size > 2 * 1024 * 1024:
@@ -350,10 +355,13 @@ class GrepTool(Tool):
             if len(hits) >= cap:
                 break
             ctx.cancel.raise_if_cancelled()
+        note = f"\n[跳过 {withheld} 个凭证或密钥文件；确需搜索请把 path 指向该文件，按权限规则确认]" if withheld else ""
         if not hits:
-            return ToolResult(content=f"未找到匹配（扫描了 {files_scanned} 个文件）。", details={"count": 0})
+            return ToolResult(content=f"未找到匹配（扫描了 {files_scanned} 个文件）。{note}",
+                              details={"count": 0, "withheld": withheld})
         more = f"\n[已达到 max_results={cap}，可能还有更多匹配；请缩小范围]" if len(hits) >= cap else ""
-        return ToolResult(content="\n".join(hits) + more, details={"count": len(hits), "files_scanned": files_scanned})
+        return ToolResult(content="\n".join(hits) + more + note,
+                          details={"count": len(hits), "files_scanned": files_scanned, "withheld": withheld})
 
 
 def _iter_files(root: Path):

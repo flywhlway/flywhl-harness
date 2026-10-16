@@ -439,7 +439,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 恶意网页调用本地 Web API（DNS 重绑定、CSRF） | Host 白名单 | 跨站写请求检查 | 访问令牌（非回环地址监听时自动启用） | 已实现，有测试 |
 | 只读白名单绕过（`env rm ...`、`awk system()`、`sort -o`） | 命令分析剥包装命令、检查关键参数 | — | 沙箱 | 已修复；相对路径、变量间接仍是缺口，见第 17 章 |
 | 灾难性命令（`rm -rf ~`、`mkfs`、写块设备） | `catastrophic` 在一切规则与模式之前 deny | 托管基线 glob | 沙箱 | 已实现，bypass 也拦得住 |
-| 读取密钥文件 | 托管基线 deny | 命令分析 `SECRET_HINTS` + 工作区外路径检查 | 凭据不放在执行环境 | read 工具 deny；bash 判为 dangerous 需确认，bypass 下仍可读 |
+| 读取密钥文件 | 托管基线 deny（read / grep / write / edit 共用一份清单） | 命令分析 `SECRET_HINTS` + 工作区外路径检查 | 凭据不放在执行环境 | 文件工具 deny，grep 递归时逐个跳过；bash 判为 dangerous 需确认，bypass 下仍可读 |
 | 从环境变量窃取密钥 | 子进程剥离密钥变量 | — | 凭据代持 | bash 与 MCP 子进程有效；命令 hook 无 |
 | 符号链接逃逸工作区 | `Workspace.resolve()` 跟随链接后比较 | — | 沙箱文件系统隔离 | 文件工具有效；bash 只有字面参数检查 |
 | hook 改写参数绕过规则 | 改写后重新校验 + 重新判定 | 决策只能收紧 | — | 已实现 |

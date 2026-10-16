@@ -341,6 +341,93 @@ def test_agent_cannot_rewrite_harness_state_or_project_config(tmp_path):
     assert PermissionPolicy("accept_edits", workspace=ws).evaluate(tools["write"], {"path": "app.py", "content": "x"}).decision == Decision.ALLOW
 
 
+# ---------------------------------------------------------------------- 凭证路径：文件工具与 bash 共用一份清单
+CREDENTIAL_SAMPLES = [
+    "~/.ssh/id_ed25519", "~/keys/id_rsa", "~/keys/id_ed25519.pub", "~/.aws/credentials", "~/.aws/sso/cache/t.json",
+    "~/.config/gcloud/application_default_credentials.json", "~/.azure/msal_token_cache.json", "~/.kube/config",
+    "~/.docker/config.json", "~/.netrc", "~/.git-credentials", "~/.config/gh/hosts.yml", "~/.pypirc", "~/.pgpass",
+    "~/.vault-token", "~/.gnupg/private-keys-v1.d/a.key", "/etc/shadow", "/proc/1/environ",
+    ".kube/config", "deploy/.docker/config.json",       # 凭证就在工作区里：早期版本 read 在 default 模式下直接放行
+]
+
+
+def _content_calls(path):
+    return [("read", {"path": path}), ("grep", {"pattern": ".", "path": path}),
+            ("write", {"path": path, "content": "x"}), ("edit", {"path": path, "old_string": "a", "new_string": "b"})]
+
+
+@pytest.mark.parametrize("path", CREDENTIAL_SAMPLES)
+def test_credential_paths_agree_across_file_tools_and_bash(tmp_path, path):
+    """同一个凭证位置：read / grep / write / edit 在任何模式下都拒绝，bash 命令分析判为 dangerous。
+
+    早期版本 read 只拒绝 .ssh / id_rsa / .aws/credentials：工作区里的 .kube/config 在 default 模式下直接可读，
+    工作区外的在 bypass 模式下可读，grep 完全不受基线约束。
+    """
+    ws = Workspace(tmp_path, snapshots=False)
+    tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
+    for mode in ("default", "accept_edits", "bypass"):
+        pol = PermissionPolicy(mode, workspace=ws)
+        for name, args in _content_calls(path):
+            assert pol.evaluate(tools[name], args).decision == Decision.DENY, (mode, name)
+    assert analyze(f"cat {path}").level == "dangerous"
+
+
+@pytest.mark.parametrize("path", [".env", "config/.env.production", "~/.npmrc", "~/.zsh_history"])
+def test_secret_hint_paths_need_approval_in_every_mode(tmp_path, path):
+    ws = Workspace(tmp_path, snapshots=False)
+    tools = {t.name: t for t in default_tools(HarnessConfig(), tmp_path / ".flywhl")}
+    for mode in ("default", "accept_edits", "bypass"):
+        pol = PermissionPolicy(mode, workspace=ws)
+        for name, args in _content_calls(path):
+            assert pol.evaluate(tools[name], args).decision == Decision.ASK, (mode, name)
+    assert analyze(f"cat {path}").level == "dangerous"
+
+
+def test_every_sensitive_glob_is_exercised_and_known_to_bash():
+    """清单新增一项而忘了补样例、或 bash 的 SECRET_HINTS 漏了它，这里会失败——两份清单不会再悄悄分叉。"""
+    import fnmatch
+    from flywhl_harness.policy.sensitive import CREDENTIAL_GLOBS, SECRET_HINTS
+
+    samples = [os.path.expanduser(p) for p in CREDENTIAL_SAMPLES]
+    for g in CREDENTIAL_GLOBS:
+        hit = [p for p in samples if fnmatch.fnmatchcase(p, g)]
+        assert hit, f"{g} 没有样例"
+        assert all(SECRET_HINTS.search(p) for p in hit), g
+
+
+def test_symlink_to_credential_is_denied(tmp_path):
+    home = tmp_path / "home"
+    (home / ".kube").mkdir(parents=True)
+    (home / ".kube" / "config").write_text("token: s3cr3t\n")
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "cfg").symlink_to(home / ".kube" / "config")
+    ws = Workspace(root, snapshots=False)
+    read = {t.name: t for t in default_tools(HarnessConfig(), root / ".flywhl")}["read"]
+    assert PermissionPolicy("bypass", workspace=ws).evaluate(read, {"path": "cfg"}).decision == Decision.DENY
+
+
+async def test_recursive_grep_withholds_secret_files(tmp_path):
+    """grep 的权限只看遍历的根：在工作区或家目录里递归搜索时，凭证与 .env 文件逐个跳过，并告诉模型跳过了几个。"""
+    home = tmp_path / "home"
+    (home / ".kube").mkdir(parents=True)
+    (home / ".kube" / "config").write_text("token: s3cr3t\n")
+    (home / "notes.txt").write_text("token: public\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / ".env").write_text("API_TOKEN=s3cr3t\n")
+    (ws / "app.py").write_text("token = os.environ['API_TOKEN']\n")
+    h = make_harness(ws, [
+        {"tool_calls": [{"name": "grep", "args": {"pattern": "(?i)token", "path": "."}},
+                        {"name": "grep", "args": {"pattern": "token", "path": str(home)}}]},
+        "ok",
+    ], permissions__mode="bypass")
+    res = await h.run("搜索 token")
+    in_ws, in_home = (e["content"] for e in tool_ends(res.events))
+    assert "app.py" in in_ws and "s3cr3t" not in in_ws and "跳过 1 个" in in_ws
+    assert "notes.txt" in in_home and "s3cr3t" not in in_home and "跳过 1 个" in in_home
+
+
 # ---------------------------------------------------------------------- 项目配置信任
 HOSTILE_TOML = '''
 model = "deepseek:deepseek-flash"

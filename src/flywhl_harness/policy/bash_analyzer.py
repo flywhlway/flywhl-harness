@@ -25,6 +25,8 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
+from .sensitive import SECRET_HINTS  # 与文件工具的托管基线共用一份敏感路径清单
+
 LEVELS = ("read", "write", "external", "dangerous")
 _RANK = {lvl: i for i, lvl in enumerate(LEVELS)}
 
@@ -44,10 +46,6 @@ EXTERNAL_CMDS = {"curl", "wget", "ssh", "scp", "rsync", "nc", "telnet", "ftp", "
 DANGEROUS_CMDS = {"sudo", "su", "mkfs", "dd", "shutdown", "reboot", "halt", "fdisk", "mount", "umount", "chown", "killall", "crontab", "systemctl", "launchctl"}
 INTERPRETERS = {"python", "python3", "node", "bash", "sh", "zsh", "perl", "ruby", "php", "deno", "bun"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-SECRET_HINTS = re.compile(
-    r"(\.ssh/|id_rsa|id_ed25519|\.aws/|\.kube/|\.netrc|/etc/shadow|\.env\b|credentials|\.npmrc|\.pypirc|\.pgpass"
-    r"|\.git-credentials|\.docker/config\.json|\.gnupg|\.config/gh/|\.vault-token|_history\b|/proc/[^/\s]+/environ"
-    r"|find-generic-password|find-internet-password)")
 # 包装命令：真正执行的是后面那条命令。值为“带一个参数值的选项”
 WRAPPERS: dict[str, set[str]] = {
     "env": {"-u", "--unset", "-C", "--chdir"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"},

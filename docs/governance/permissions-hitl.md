@@ -111,8 +111,8 @@ _RULE_RE = re.compile(r"^\s*(allow|ask|deny)\s*:\s*([\w*?\-\[\]]+)\s*(?:\((.*)\)
 
 | 规则 | 意图 |
 |---|---|
-| `deny:read(*/.ssh/*)`、`deny:read(*id_rsa*)`、`deny:read(*id_ed25519*)`、`deny:read(*/.aws/credentials)` | 模型不能通过 read 工具读取密钥 |
-| `ask:read/write/edit(*.env)` | `.env` 常含密钥，读写都需确认 |
+| `deny:read/grep/write/edit(<凭证位置>)`：`.ssh`、`id_rsa`/`id_ed25519`、`.aws`、`.config/gcloud`、`.azure`、`.kube`、`.docker/config.json`、`.netrc`、`.git-credentials`、`.config/gh`、`.pypirc`、`.pgpass`、`.vault-token`、`.gnupg`、`/etc/shadow`、`/proc/*/environ` | 模型不能通过文件工具读写凭证。清单在 `policy/sensitive.py`，与 bash 命令分析的 `SECRET_HINTS` 共用并由测试逐项核对；grep 递归遍历时也逐个文件跳过这些位置 |
+| `ask:read/grep/write/edit(*.env、.env.*、.npmrc、*_history)` | 常含密钥、也常有正当用途的文件，读写都需确认 |
 | `deny:write/edit(.flywhl/*)`、`ask:write/edit(flywhl.toml)`、`ask:bash(*.flywhl*)` | Agent 不能改写 harness 自己的状态与配置：`.flywhl/` 里是会话库、审批记录、快照与 `.flywhl/config.toml`，`flywhl.toml` 在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权——`accept_edits` 模式会自动接受工作区内的编辑，bypass 更不必说，所以放在基线里 |
 | `deny:bash(rm -rf /)`、`deny:bash(rm -rf /*)`、`deny:bash(rm -rf ~*)`、`deny:bash(mkfs*)`、`deny:bash(:(){*)` | 最具破坏性的命令直接拒绝 |
 
