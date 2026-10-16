@@ -40,16 +40,20 @@ class Prepared:
     args: dict[str, Any]
     error: str | None = None
 
-    @property
-    def parallel(self) -> bool:
+    def parallel(self, workspace: str | None = None) -> bool:
         return self.tool is not None and self.error is None and self.tool.concurrency_safe \
-            and self.tool.effect_for(self.args) == Effect.READ
+            and self.tool.effect_for(self.args, workspace) == Effect.READ
 
 
 class ToolExecutor:
     def __init__(self, rc: RunContext):
         self.rc = rc
         self.last_results: dict[str, Message] = {}
+
+    @property
+    def _root(self) -> str:
+        # 副作用等级与权限层同一口径（见 Tool.effect_for）：bash 命令里工作区内的绝对路径不算越界
+        return str(self.rc.workspace.root)
 
     # ================================================================== 入口
     async def run_batch(self, calls: list[ToolCall], *, recovering: bool = False) -> AsyncIterator[Event]:
@@ -66,7 +70,7 @@ class ToolExecutor:
         prepared = [self._prepare(c) for c in calls]
         batches: list[list[Prepared]] = []
         for p in prepared:
-            if batches and p.parallel and batches[-1][0].parallel:
+            if batches and p.parallel(self._root) and batches[-1][0].parallel(self._root):
                 batches[-1].append(p)
             else:
                 batches.append([p])
@@ -149,7 +153,7 @@ class ToolExecutor:
     async def _run_one(self, p: Prepared, publish, recovering: bool) -> Message:
         rc, call, tool = self.rc, p.call, p.tool
         t0 = time.monotonic()
-        effect = tool.effect_for(p.args) if tool and not p.error else Effect.READ
+        effect = tool.effect_for(p.args, self._root) if tool and not p.error else Effect.READ
         publish(E.TOOL_START, {
             "call_id": call.id, "name": call.name, "args": call.arguments, "effect": str(effect),
             "summary": tool.describe_call(p.args) if tool else call.name, "recovering": recovering,
@@ -246,7 +250,7 @@ class ToolExecutor:
         rc.cancel.raise_if_cancelled()
 
         # ---- 预写 intent（+ 写操作前快照）----
-        effect = tool.effect_for(args)
+        effect = tool.effect_for(args, self._root)
         snapshot = None
         if effect != Effect.READ and rc.config.snapshots and rc.workspace.shadow is not None:
             snapshot = await rc.workspace.shadow.snapshot(f"before {tool.name} {call.id}")
@@ -303,7 +307,7 @@ class ToolExecutor:
                 return await self._race(tool, args, ctx, timeout)
             except TransientToolError as e:
                 attempt += 1
-                retryable = tool.effect_for(args) == Effect.READ or tool.idempotent
+                retryable = tool.effect_for(args, self._root) == Effect.READ or tool.idempotent
                 delay = 0.2 * 2 ** attempt
                 left_now = rc.budget.deadline_left()
                 if retryable and attempt < 3 and (left_now is None or left_now > delay + 1):
@@ -332,13 +336,14 @@ class ToolExecutor:
             waiter.cancel()
         if task in done:
             r = task.result()
-            if (r.details or {}).get("timed_out") and tool.effect_for(args) == Effect.EXTERNAL and not tool.idempotent:
+            if (r.details or {}).get("timed_out") and tool.effect_for(args, self._root) == Effect.EXTERNAL \
+                    and not tool.idempotent:
                 # 工具自己管理超时（bash）时也一样：外部命令（git push、curl -X POST）超时 ≠ 没发生
                 return ToolResult(f"{r.content}\n[结果未知：命令可能已经对外部系统生效（幂等键 {ctx.idempotency_key}）。"
                                   "请先核实外部状态，不要直接重试。]", True, r.details, r.tainted), "unknown"
             return r, ("error" if r.is_error else "ok")
         if rc.cancel.cancelled:
-            if tool.interruptible_for(args):
+            if tool.interruptible_for(args, self._root):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
@@ -355,7 +360,7 @@ class ToolExecutor:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
-        if tool.effect_for(args) == Effect.EXTERNAL and not tool.idempotent:
+        if tool.effect_for(args, self._root) == Effect.EXTERNAL and not tool.idempotent:
             # 外部副作用超时 ≠ 没发生：请求可能已经被对方处理，只是响应没回来
             return ToolResult.error(
                 f"工具执行超时（{timeout:.0f}s），结果未知：请求可能已经生效（幂等键 {ctx.idempotency_key}）。"

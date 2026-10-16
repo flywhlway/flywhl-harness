@@ -84,18 +84,18 @@ class BashTool(Tool):
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
 
-    def effect_for(self, args: dict[str, Any]) -> Effect:
-        level = analyze(str(args.get("command", ""))).level
+    def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
+        level = analyze(str(args.get("command", "")), workspace).level
         return {"read": Effect.READ, "write": Effect.WRITE}.get(level, Effect.EXTERNAL)
 
     def untrusted_for(self, args: dict[str, Any]) -> bool:
         # curl / wget / git pull 取回的是外部内容：可能夹带提示注入，之后的副作用操作要升级为人工确认
         return analyze(str(args.get("command", ""))).network
 
-    def interruptible_for(self, args: dict[str, Any]) -> bool:
+    def interruptible_for(self, args: dict[str, Any], workspace: str | None = None) -> bool:
         # 已经发出的外部操作（git push、curl POST、部署……）半途打断会留下“不知道成没成功”的状态：
         # 给它宽限期跑完，超时才标记为结果未知；本地命令可以直接杀进程组
-        return self.effect_for(args) != Effect.EXTERNAL
+        return self.effect_for(args, workspace) != Effect.EXTERNAL
 
     @property
     def concurrency_safe(self) -> bool:

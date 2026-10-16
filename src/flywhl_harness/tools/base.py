@@ -115,12 +115,16 @@ class Tool:
         """
         return None
 
-    def interruptible_for(self, args: dict[str, Any]) -> bool:
+    def interruptible_for(self, args: dict[str, Any], workspace: str | None = None) -> bool:
         """按参数判定能否在取消时直接中止。默认取静态 interruptible；bash 对外部操作（如 git push）返回 False。"""
         return self.interruptible
 
-    def effect_for(self, args: dict[str, Any]) -> Effect:
-        """动态副作用等级。默认取静态 ``effect``；bash 这类工具会按命令内容动态判定。"""
+    def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
+        """动态副作用等级。默认取静态 ``effect``；bash 这类工具会按命令内容动态判定。
+
+        ``workspace`` 是工作区根目录：命令里指向工作区内部的绝对路径按内部路径算。执行器与权限层都要传它，
+        否则 ``cat /ws/app.py`` 在权限层是只读（plan 模式放行），执行器却记成 external，界面、预写意图与恢复各说各话。
+        """
         return self.effect
 
     def untrusted_for(self, args: dict[str, Any]) -> bool:

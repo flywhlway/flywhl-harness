@@ -152,7 +152,7 @@ class PermissionPolicy:
     # ------------------------------------------------------------------ 判定
     def evaluate(self, tool: Tool, args: dict[str, Any], *, tainted: bool = False,
                  grants: Iterable[Rule] = ()) -> PermissionResult:
-        effect = tool.effect_for(args)
+        effect = tool.effect_for(args, self._root())
         targets = self._targets(tool, args)
         analysis = analyze(targets[0], self._root()) if tool.name == "bash" else None
         if analysis is not None:  # bash 的副作用等级以“工作区感知”的命令分析为准

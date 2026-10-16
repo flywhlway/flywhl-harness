@@ -75,6 +75,38 @@ def test_modes(tmp_path):
     assert PermissionPolicy("bypass", workspace=ws).evaluate(read, {"path": "~/.ssh/id_rsa"}).decision == Decision.DENY
 
 
+async def test_recorded_effect_matches_permission_verdict(ws):
+    """模型常用绝对路径指向工作区内的文件。权限层把 cat /ws/app.py 判为只读（plan 模式放行），
+    执行器记录的副作用等级也必须是 read——早期版本记成 external，真实模型的 plan 模式测试因此失败。"""
+    root = str(ws.resolve())
+    (ws / "app.py").write_text("print('v1')\n")
+    h = make_harness(ws, [
+        {"tool_calls": [{"name": "bash", "args": {"command": f"cat {root}/app.py"}},
+                        {"name": "bash", "args": {"command": f"ls -la {root}"}},
+                        {"name": "bash", "args": {"command": f"echo v2 > {root}/app.py"}}]},
+        "ok",
+    ], permissions__mode="plan")
+    res = await h.run("看看 app.py")
+    cat, ls, echo = tool_ends(res.events)
+    assert (cat["status"], cat["details"]["effect"]) == ("ok", "read")
+    assert (ls["status"], ls["details"]["effect"]) == ("ok", "read")
+    assert (echo["status"], echo["details"]["effect"]) == ("denied", "write")
+    assert (ws / "app.py").read_text() == "print('v1')\n"
+
+
+@pytest.mark.parametrize("cmd,level", [
+    ("ls -la {ws}", "read"),                 # 工作区根目录本身不是越界
+    ("cat {ws}/app.py", "read"),
+    ("sort --output={ws}/o.txt a", "write"),
+    ("cat {ws}-other/a", "external"),        # 只是字符串前缀相同
+    ("cat /elsewhere{ws}/a", "external"),
+    ("rm -rf {ws}", "dangerous"),            # 删整个工作区
+])
+def test_analyzer_workspace_absolute_paths(cmd, level):
+    ws = "/srv/proj"
+    assert analyze(cmd.format(ws=ws), ws).level == level, analyze(cmd.format(ws=ws), ws).reasons
+
+
 def test_taint_escalates_side_effects(tmp_path):
     ws = Workspace(tmp_path, snapshots=False)
     p = PermissionPolicy("accept_edits", workspace=ws)
