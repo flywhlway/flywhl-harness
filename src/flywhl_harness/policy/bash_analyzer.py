@@ -105,10 +105,11 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
     """分析命令风险。传入 workspace 时，指向工作区内部的绝对路径按工作区内路径处理。"""
     a = CommandAnalysis(command=command, workspace=workspace, depth=_depth)
     if workspace:
-        # 工作区根目录本身（ls /ws）和它下面的路径（cat /ws/app.py、>/ws/out、@/ws/body.json）都换成相对写法；
-        # 前后不能紧挨路径字符，/ws-other、/ws.bak、/x/ws/y 这类只是字符串上沾边的路径保持原样
+        # 工作区根目录本身（ls /ws）和它下面的路径（cat /ws/app.py、>/ws/out、@/ws/body.json）都换成相对写法。
+        # 前后都用白名单：后面只能是 / 、空白、命令分隔符或结尾——/ws*、/ws{,-other}、"/ws"-other、/ws$X 经 shell 展开后
+        # 会落到工作区外，改写成 . 就成了绕过；/ws-other、/x/ws/y 这类只是字符串沾边的路径同样保持原样（按越界处理）
         root = re.escape(workspace.rstrip("/"))
-        command = re.sub(rf"(?<![\w./~$-]){root}(?=/|[^\w.-]|$)", ".", command)
+        command = re.sub(rf"(?<![^\s=:'\"(<>@;|&]){root}(?=[/\s;&|<>)]|$)", ".", command)
     # 替换语法的检测直接作用于原始命令，不先“剔除单引号内容”：引号的语义依赖上下文
     # （双引号里的单引号只是普通字符，$( ) 里又会开始新的引号上下文），用正则猜引号很容易猜错，
     # 猜错就会放过真正会执行的命令。这里宁可把 echo '$(x)' 这样的字面量也当作不透明——误判的代价只是多问一次

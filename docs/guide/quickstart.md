@@ -239,7 +239,7 @@ asyncio.run(main())
 ## 跑测试与示例
 
 ```bash
-.venv/bin/python -m pytest -q                       # 233 个离线测试，约 15 秒（不含 tests/live）
+.venv/bin/python -m pytest -q                       # 238 个离线测试，约 15 秒（不含 tests/live）
 .venv/bin/python examples/02_crash_resume.py        # 真实 kill -9 后恢复，副作用恰好一次
 .venv/bin/python examples/11_kill9_cli_recover.py   # 同一件事换成两个 CLI 进程，并打印状态迁移轨迹
 ```

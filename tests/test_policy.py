@@ -127,6 +127,12 @@ async def test_legacy_effect_for_signature_still_works(ws):
     ("cat <{ws}/in.txt", "read"),             # 输入重定向紧贴路径
     ("cat {ws}-other/a", "external"),        # 只是字符串前缀相同
     ("cat {ws}.bak/a", "external"),
+    # shell 展开后会落到工作区外的写法：不能改写成工作区内路径
+    ("cat {ws}*/secret", "external"),
+    ("cat {ws}{{,-other}}/a", "external"),
+    ('cat "{ws}"-other/a', "external"),
+    ("cat {ws}$X/a", "external"),
+    ("cat {ws}\\-other/a", "external"),
     ("cat /elsewhere{ws}/a", "external"),
     ("rm -rf {ws}", "dangerous"),            # 删整个工作区
 ])
