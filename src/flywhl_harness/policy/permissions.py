@@ -56,7 +56,7 @@ from enum import StrEnum
 from typing import Any, Iterable
 
 from ..tools.base import Effect, Tool
-from .bash_analyzer import analyze
+from .bash_analyzer import _ASSIGN, RESERVED, WRAPPERS, analyze
 from .sensitive import CREDENTIAL_GLOBS, SECRET_HINT_GLOBS
 
 
@@ -251,12 +251,28 @@ class PermissionPolicy:
 
 
 def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
-    """审批时选择“本会话总是允许”所生成的授权规则：粒度尽量窄。"""
+    """审批时选择“本会话总是允许”所生成的授权规则：粒度尽量窄。
+
+    bash 默认按前两个词授权（``pytest -q*``）。前两个词说明不了实际执行什么的命令只精确授权这一条：
+    ``bash -lc '...'``、``python3 -c '...'``、``find . -exec ...`` 的代码在参数里，``timeout 10 ...``、``FOO=1 ...``
+    后面跟的才是真正的命令——按前缀授权，批准一次 ``bash -lc 'echo hi'`` 就等于放行之后所有 ``bash -lc``。
+    """
     target = tool.permission_target(args)
     if tool.name == "bash":
+        a = analyze(target)
         words = target.split()
+        head = words[0].rsplit("/", 1)[-1] if words else ""
+        if a.inline or a.opaque or head in WRAPPERS or head in RESERVED or (words and _ASSIGN.fullmatch(words[0])):
+            exact = a.segments[0] if len(a.segments) == 1 else target
+            return Rule(Decision.ALLOW, "bash", _glob_literal(exact), "session")
         prefix = " ".join(words[:2]) if len(words) > 1 else (words[0] if words else "")
         return Rule(Decision.ALLOW, "bash", f"{prefix}*", "session")
     if tool.name in _FILE_TOOLS and target:
         return Rule(Decision.ALLOW, tool.name, target, "session")
     return Rule(Decision.ALLOW, tool.name, None, "session")
+
+
+def _glob_literal(text: str) -> str:
+    """把一段文字转成只匹配它自己的 glob。换行换成 ``?``：授权以 ``allow:bash(...)`` 的文本存进会话元数据，
+    Rule.parse 读回时不跨行。"""
+    return re.sub(r"[*?\[]", lambda m: f"[{m.group(0)}]", text).replace("\r", "?").replace("\n", "?")

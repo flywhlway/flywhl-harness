@@ -292,6 +292,89 @@ def test_substitution_hiding_catastrophe_is_denied_even_in_bypass(tmp_path, cmd)
     assert r.decision == Decision.DENY
 
 
+# ---------------------------------------------------------------------- bash 认作命令边界、shlex 看不出来的结构
+@pytest.mark.parametrize("cmd", [
+    "echo safe\nrm -rf ~",                 # 换行就是命令分隔符：早期版本整段被当成一条只读 echo
+    "ls\n\nrm -rf ~",
+    "echo a#b; rm -rf ~",                  # shlex 把词中间的 # 当注释，后半句整个看不见
+    "echo hi # note\nrm -rf ~",            # 注释吞掉换行后，下一行并进了 echo 的参数
+    "echo x |& rm -rf ~",
+    "ls;(rm -rf ~)",                       # ;( 被 shlex 并成一个 token
+    "if true; then rm -rf ~; fi",          # 保留字后面的才是真正执行的命令
+    "while true; do rm -rf ~; done",
+    "{ rm -rf ~; }",
+    "! rm -rf ~",
+    "cat <<EOF\nhi\nEOF\nrm -rf ~",        # here-document 正文之后的行照样是命令
+    "cat <<EOF\nno terminator\nrm -rf ~",  # 找不到结束符：正文按命令分析，宁可多拒
+    "(( x << 2 ))\nrm -rf ~\n2",           # 算术里的 << 是移位，不是 here-document
+    "bash -lc 'rm -rf ~'",                 # -c 和别的短选项合写
+    "sh -ec 'rm -rf ~'",
+    "bash -o pipefail -c 'rm -rf ~'",
+    "find ~ -delete",                      # find 的起点会被自己的动作处理到
+    "find / -delete",
+    "find ~ -exec rm -rf {} +",
+])
+def test_command_boundaries_follow_bash(tmp_path, cmd):
+    found = analyze(cmd, str(tmp_path))
+    assert found.catastrophic, (found.segments, found.reasons)
+    bash = default_tools(HarnessConfig()).get("bash")
+    r = PermissionPolicy("bypass", ["allow:bash"], workspace=Workspace(tmp_path, snapshots=False)).evaluate(bash, {"command": cmd})
+    assert r.decision == Decision.DENY, r.reason
+
+
+@pytest.mark.parametrize("cmd,level", [
+    ("echo safe\ntouch x", "write"),
+    ("echo 'a\nb'", "read"),                         # 引号里的换行只是字符
+    ('echo "a\nb"', "read"),
+    ("git status\n", "read"),
+    ("ls \\\n  -la", "read"),                        # 续行
+    ("cat <<'EOF'\nrm -rf ~\nEOF", "read"),          # here-document 正文是数据，不是命令
+    ("cat <<'EOF' > gen.py\nimport os\nEOF", "write"),
+    ("echo '#x' a#b ${#x} $#", "read"),              # 只有词首的 # 才是注释
+    ("find . -name '*.pyc' -delete", "write"),       # 工作区内的 -delete 只是写
+    ("find . -name x", "read"),
+    ("find src -exec curl -s x \\;", "external"),    # -exec 的命令递归分析
+    ("bash -c 'git status'", "read"),
+])
+def test_command_boundaries_do_not_overreach(tmp_path, cmd, level):
+    found = analyze(cmd, str(tmp_path))
+    assert (found.level, found.catastrophic) == (level, False), (found.segments, found.reasons)
+
+
+async def test_newline_cannot_smuggle_a_write_into_plan_mode(ws):
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "echo safe\ntouch marker.txt"}}]}, "好"],
+                     on_ask="deny", permissions__mode="plan")
+    res = await h.run("看看")
+    assert tool_ends(res.events)[0]["status"] == "denied"
+    assert not (ws / "marker.txt").exists()
+
+
+async def test_session_grant_for_inline_script_is_exact(ws):
+    """批准一次 bash -lc 'echo one' 并选“本会话总是允许”，不能顺带放行之后所有 bash -lc。"""
+    h = make_harness(ws, [
+        {"tool_calls": [{"name": "bash", "args": {"command": "bash -lc 'echo one > a.txt'"}}]},
+        {"tool_calls": [{"name": "bash", "args": {"command": "bash -lc 'echo two > b.txt'"}}]},
+        {"tool_calls": [{"name": "bash", "args": {"command": "bash -lc 'echo one > a.txt'"}}]},
+        "好"])
+    seen = with_resolver(h, lambda rec: ApprovalDecision(True, remember=True))
+    await h.run("写文件")
+    assert [r.args["command"] for r in seen] == ["bash -lc 'echo one > a.txt'", "bash -lc 'echo two > b.txt'"]
+
+
+def test_session_grant_shapes(tmp_path):
+    from flywhl_harness.policy.permissions import Rule, grant_for
+
+    bash = default_tools(HarnessConfig()).get("bash")
+    assert str(grant_for(bash, {"command": "pytest -q tests"})) == "allow:bash(pytest -q*)"
+    for cmd in ("python3 -c 'print(1)'", "timeout 10 rm -rf build", "FOO=1 BAR=2 make", "find . -exec rm {} +"):
+        assert not str(grant_for(bash, {"command": cmd})).endswith("*)"), cmd
+    g = grant_for(bash, {"command": "bash -c 'touch [a]*\ntouch b'"})
+    back = Rule.parse(str(g), "session")                 # 授权以文本存进会话元数据，读回来必须还是同一条
+    p = PermissionPolicy("default", workspace=Workspace(tmp_path, snapshots=False))
+    assert p.evaluate(bash, {"command": "bash -c 'touch [a]*\ntouch b'"}, grants=[back]).decision == Decision.ALLOW
+    assert p.evaluate(bash, {"command": "bash -c 'touch ab\ntouch b'"}, grants=[back]).decision == Decision.ASK
+
+
 # ---------------------------------------------------------------------- Web 服务的访问控制
 def _client(app, host="127.0.0.1:8765"):
     import httpx
@@ -392,6 +475,9 @@ def test_credential_paths_agree_across_file_tools_and_bash(tmp_path, path):
     "git status && cat < ~/.git-credentials",  # 输入重定向，搭在只读命令后面
     "cat $KUBECONFIG",                         # 指向凭证位置的环境变量
     "cat $XDG_CONFIG_HOME/gh/hosts.yml",
+    "ps eww -p $PPID",                         # 子进程的密钥剥掉了，ps 读的却是 harness 自己的环境
+    "ps -E -p 1",
+    "ps axe",
 ])
 def test_bash_credential_tricks_are_denied_even_in_bypass(tmp_path, cmd):
     """字符串匹配要看 shell 去掉引号、展开花括号之后的样子；bypass 与 allow:bash 规则都放不过。"""
@@ -410,6 +496,9 @@ def test_bash_credential_tricks_are_denied_even_in_bypass(tmp_path, cmd):
     ("cat .venv/pyvenv.cfg", Decision.ALLOW),          # .venv 不是 .env
     ("cp .env.example .env", Decision.ASK),            # 线索档：要确认，但不拒绝
     ("pytest tests/test_credentials.py", Decision.ASK),
+    ("ps -ef", Decision.ALLOW),                        # -e 是“所有进程”，不打印环境
+    ("ps aux | grep python", Decision.ALLOW),
+    ("ps -o pid,user -U deploy", Decision.ALLOW),      # 选项的值里出现 e 不算
 ])
 def test_bash_credential_deny_stays_narrow(tmp_path, cmd, decision):
     """硬拒绝没有“批准后执行”的出路，误报的代价比 ask 高：只有凭证档拒绝，而且按目录名整段匹配。"""
