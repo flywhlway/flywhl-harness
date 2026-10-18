@@ -412,6 +412,7 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--inspector-w); }
 .workspace.no-inspector { grid-template-columns: minmax(0, 1fr); }
 .workspace.no-inspector .inspector { display: none; }
+.inspector-scrim { display: none; }
 .conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .timeline { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp-6) var(--sp-6) var(--sp-4); }
 .timeline-inner { max-width: var(--content-w); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
@@ -725,13 +726,19 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .approval-inbox { display: grid; gap: var(--sp-4); }
 
 /* ===================================================================== 响应式 */
+/* 窄屏：检查器改为覆盖层。从页头下方开始，页头右侧的开关始终点得到；覆盖层外是遮罩，点一下就收起——
+   早期版本从 top: 0 盖住整屏，开关被压在下面，手机上打开之后就关不掉，对话只剩左边一条缝 */
 @media (max-width: 1279px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
   .inspector {
-    position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--inspector-w), 92vw); z-index: var(--z-modal);
+    position: fixed; top: var(--header-h); right: 0; bottom: 0; width: min(var(--inspector-w), 92vw); z-index: var(--z-modal);
     box-shadow: var(--shadow-lg); animation: slide-in-right var(--dur-base) var(--ease-out);
   }
-  .workspace.no-inspector .inspector { display: none; }
+  .inspector-scrim {
+    display: block; position: fixed; inset: var(--header-h) 0 0 0; background: var(--scrim); z-index: var(--z-overlay);
+    animation: fade-in var(--dur-base) var(--ease-out);
+  }
+  .workspace.no-inspector .inspector, .workspace.no-inspector .inspector-scrim { display: none; }
 }
 @keyframes slide-in-right { from { transform: translateX(16px); opacity: 0; } }
 

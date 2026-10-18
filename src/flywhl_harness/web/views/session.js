@@ -48,8 +48,10 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     get info() { return app.info; },
     resumeRun: (r) => resumeRun(r),
   });
-  ws.append(conv, insp.el);
+  const scrim = h("div", { class: "inspector-scrim", "aria-hidden": "true" });   // 窄屏覆盖层外的遮罩（样式见 style.css）
+  ws.append(conv, insp.el, scrim);
   root.append(header, ws);
+  const overlay = matchMedia("(max-width: 1279px)");
 
   const setInspector = (open, remember = true) => {
     if (remember) app.prefs.inspector = open;      // 只记住用户的主动选择；按屏幕宽度推断的默认值不写入偏好
@@ -59,6 +61,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
   };
   setInspector(innerWidth >= 1280 ? app.prefs.inspector ?? true : false, false);
   $("#s-insp", header).onclick = () => setInspector(ws.classList.contains("no-inspector"));
+  scrim.onclick = () => setInspector(false, false);   // 收起覆盖层不改桌面宽度下的偏好
   $("#s-mode", header).onclick = (e) => openModeMenu(e.currentTarget);
   jump.onclick = () => { stick = true; timeline.scrollTo({ top: timeline.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); jump.hidden = true; };
 
@@ -480,6 +483,11 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     dispose() { V.disposed = true; disconnect(); },
     focusComposer() { input.focus(); },
     toggleInspector() { setInspector(ws.classList.contains("no-inspector")); },
+    closeInspectorOverlay() {   // Esc：只在窄屏覆盖层打开时生效，返回是否处理了
+      if (!overlay.matches || ws.classList.contains("no-inspector")) return false;
+      setInspector(false, false);
+      return true;
+    },
     setMode(id) { const m = MODES.find((x) => x.id === id); if (m) setMode(m); },
     stop() { if (V.running) stopRun(); },
     get running() { return V.running; },

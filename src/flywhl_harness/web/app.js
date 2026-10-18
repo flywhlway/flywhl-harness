@@ -156,6 +156,7 @@ function installShortcuts() {
     else if (mod && e.key === "\\") { e.preventDefault(); app.view?.toggleInspector?.(); }
     else if (e.key === "/" && !isTyping(e) && !mod) { e.preventDefault(); app.view?.focusComposer?.(); }
     else if (e.key === "Escape" && $("#app").classList.contains("nav-open")) closeNav();
+    else if (e.key === "Escape" && app.view?.closeInspectorOverlay?.()) e.preventDefault();
   });
   document.addEventListener("click", (e) => { if (e.target.closest('[data-action="open-nav"]')) openNav(); });
 }
