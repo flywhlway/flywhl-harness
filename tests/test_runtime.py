@@ -517,3 +517,30 @@ async def test_web_logo_matches_docs_site(ws):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as c:
         r = await c.get("/static/logo.svg")
     assert r.status_code == 200 and "image/svg" in r.headers["content-type"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 没有 POSIX 权限位")
+def test_session_db_is_private_to_owner(tmp_path):
+    """会话库里有提示词与工具输出：只给属主读写。早期版本沿用 umask，库与 -wal/-shm 都是 0644。"""
+    import os
+    import stat
+
+    from flywhl_harness import Store
+
+    old = os.umask(0o022)
+    try:
+        s = Store(tmp_path / "data" / "harness.db")    # 建表即写入 WAL，-wal / -shm 随之出现
+        mode = lambda p: stat.S_IMODE(p.stat().st_mode)   # noqa: E731
+        files = sorted((tmp_path / "data").iterdir())
+        assert {f.name for f in files} >= {"harness.db", "harness.db-wal", "harness.db-shm"}
+        assert {f.name: mode(f) for f in files} == {f.name: 0o600 for f in files}
+        assert mode(tmp_path / "data") == 0o700
+        s.close()
+        # 早期版本留下的 0644 库：再次打开时收紧
+        legacy = tmp_path / "legacy.db"
+        Store(legacy).close()
+        legacy.chmod(0o644)
+        Store(legacy).close()
+        assert mode(legacy) == 0o600
+    finally:
+        os.umask(old)

@@ -26,6 +26,7 @@ Event     细粒度事件流（带 seq）                        流式展示、
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -245,6 +246,23 @@ def _dump(v: Any) -> str | None:
     return None if v is None else json.dumps(v, ensure_ascii=False, default=str)
 
 
+def _owner_only(db: Path) -> None:
+    """会话库里有提示词、工具输出，密钥一旦进了上下文也在这里：只给属主读写。
+
+    沿用进程 umask 时是 0644，同一台机器上的其他用户都能读。数据库文件先以 0600 建好再交给 SQLite——
+    SQLite 新建 -wal / -shm 时沿用主库文件的权限；早期版本留下的 0644 文件在打开时收紧（只动自己的文件）。
+    """
+    mine = getattr(os, "getuid", None)   # Windows 没有属主 uid
+    try:
+        os.close(os.open(db, os.O_WRONLY | os.O_CREAT, 0o600))
+        for f in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+            st = f.stat() if f.exists() else None
+            if st is not None and (mine is None or st.st_uid == mine()) and st.st_mode & 0o077:
+                f.chmod(0o600)
+    except OSError:
+        pass   # 只读介质、不支持权限位的文件系统：不影响使用
+
+
 # ====================================================================== Store
 class Store:
     """线程安全的 SQLite 存储。单连接 + 可重入锁；``tx()`` 提供可嵌套事务。"""
@@ -252,7 +270,8 @@ class Store:
     def __init__(self, path: str | Path = ":memory:"):
         self.db_path = str(path)
         if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.db_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _owner_only(Path(self.db_path))
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()

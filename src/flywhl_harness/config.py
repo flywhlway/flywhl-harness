@@ -193,7 +193,7 @@ class HarnessConfig:
         p = Path(self.data_dir)
         if not p.is_absolute():
             p = Path(self.workspace).resolve() / p
-        p.mkdir(parents=True, exist_ok=True)
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)   # 新建时只给属主：里面是会话库与审批记录
         return p
 
 
