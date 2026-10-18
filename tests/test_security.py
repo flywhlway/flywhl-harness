@@ -411,6 +411,35 @@ async def test_server_token_flow(ws):
         assert cross.status_code == 403, "带着 cookie 的跨站写请求同样拒绝"
 
 
+@pytest.mark.parametrize("token", [None, "s3cret"])
+async def test_server_rejects_writes_from_other_local_ports(ws, token):
+    """同一台机器上别的端口的网页（本地开发服务器、别的工具的控制台）不是本服务：早期版本只比主机名，一律放行。"""
+    from flywhl_harness.server.app import create_app
+
+    app = create_app(make_harness(ws, ["好"]), auto_recover=False, token=token)
+    auth = {"Authorization": f"Bearer {token}"} if token else {}
+    async with _client(app) as c:
+        for origin in ("http://127.0.0.1:9999", "http://localhost:8765", "http://127.0.0.1", "http://127.0.0.1:bad"):
+            r = await c.post("/api/sessions", json={"title": "x"}, headers={"Origin": origin, **auth})
+            assert r.status_code == 403, origin
+        ok = await c.post("/api/sessions", json={"title": "x"}, headers={"Origin": "http://127.0.0.1:8765", **auth})
+        assert ok.status_code == 200
+        assert (await c.post("/api/sessions", json={"title": "x"}, headers=auth)).status_code == 200   # 非浏览器客户端不带 Origin
+
+
+async def test_query_token_is_only_exchanged_at_root(ws):
+    """查询串里的令牌会进访问日志、浏览器历史和 Referer：只在打开 / 时兑换成 cookie，API 路径不认。"""
+    from flywhl_harness.server.app import create_app
+
+    app = create_app(make_harness(ws, ["好"]), auto_recover=False, token="s3cret")
+    async with _client(app) as c:
+        assert (await c.get("/api/sessions?token=s3cret")).status_code == 401
+        assert (await c.get("/api/info?token=s3cret")).status_code == 401
+        r = await c.get("/?token=s3cret")
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        assert (await c.get("/api/sessions")).status_code == 200   # 兑换后的 cookie 照常可用
+
+
 def test_agent_cannot_rewrite_harness_state_or_project_config(tmp_path):
     """.flywhl/ 下的会话库与配置不许 Agent 写；flywhl.toml 下次启动会被加载，写它必须人工确认——任何模式都一样。"""
     from flywhl_harness.policy.permissions import Decision, PermissionPolicy

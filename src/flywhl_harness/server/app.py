@@ -14,9 +14,12 @@ SSE 设计要点
 
 - **Host 白名单**：挡住 DNS 重绑定。攻击者的域名解析到 127.0.0.1 后，恶意页面与本服务“同源”，
   但浏览器发来的 ``Host`` 仍是攻击者的域名；
-- **跨站写请求**：改变状态的请求（非 GET / HEAD / OPTIONS）若带 ``Origin``，必须指向本服务自己，挡住 CSRF；
+- **跨站写请求**：改变状态的请求（非 GET / HEAD / OPTIONS）若带 ``Origin``，必须与本次请求的 ``Host`` 同源——
+  主机名 **和端口** 都相同，挡住 CSRF。只比主机名不够：同一台机器上任何 ``http://127.0.0.1:<别的端口>`` 的网页
+  （本地开发服务器、别的工具的控制台）都能对本服务发写请求；SameSite cookie 挡的是跨站，同主机不同端口不算跨站；
 - **访问令牌**（可选；监听非回环地址时 CLI 会自动生成）：首次用 ``/?token=…`` 打开页面后写入 HttpOnly cookie，
-  之后的 API 与 SSE 请求都带着它；也接受 ``Authorization: Bearer …``。
+  之后的 API 与 SSE 请求都带着它；也接受 ``Authorization: Bearer …``。查询串里的令牌只在 ``/`` 兑换这一次——
+  其他路径也认的话，令牌会跟着链接进访问日志、浏览器历史和 Referer。
 """
 
 from __future__ import annotations
@@ -100,6 +103,17 @@ def _hostname(netloc: str) -> str:
     return (urlsplit(f"//{netloc}").hostname or "").lower()
 
 
+def _same_origin(origin: str, host: str) -> bool:
+    """``Origin`` 是否就是本次请求的 ``Host``：主机名与端口都相同（``Origin: null``、非 http(s) 一律不算）。"""
+    o, h = urlsplit(origin), urlsplit(f"//{host}")
+    if o.scheme not in ("http", "https") or not o.hostname:
+        return False
+    try:
+        return o.hostname.lower() == (h.hostname or "").lower() and o.port == h.port
+    except ValueError:  # 端口不是合法数字
+        return False
+
+
 def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None = None,
                allowed_hosts: Iterable[str] = ()) -> FastAPI:
     """``allowed_hosts`` 追加到回环地址之外的可信主机名；含 ``"*"`` 时不校验 Host（此时必须配置 token）。"""
@@ -130,20 +144,20 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         # 1) Host 白名单：DNS 重绑定时 Host 是攻击者的域名
         if not any_host and _hostname(request.headers.get("host", "")) not in hosts:
             return JSONResponse({"detail": "Host 不在白名单中（可用 --allow-host 添加）"}, status_code=403)
-        # 2) 跨站写请求：Origin（含 "null"）必须指向可信主机
+        # 2) 跨站写请求：Origin（含 "null"）必须与 Host 同源，端口也要一致（Host 已经过上面的白名单）
         origin = request.headers.get("origin")
         if request.method not in _SAFE_METHODS and origin is not None:
-            o = _hostname(urlsplit(origin).netloc)
-            if not (o in hosts or (any_host and o == _hostname(request.headers.get("host", "")))):
+            if not _same_origin(origin, request.headers.get("host", "")):
                 return JSONResponse({"detail": "拒绝跨站请求"}, status_code=403)
-        # 3) 访问令牌
+        # 3) 访问令牌：查询串里的只在 / 兑换（随后 303 去掉），其他路径只认 cookie 与 Authorization
         if token:
             auth = request.headers.get("authorization", "")
-            supplied = (request.query_params.get("token") or request.cookies.get(TOKEN_COOKIE)
+            query = request.query_params.get("token") if request.url.path == "/" else None
+            supplied = (query or request.cookies.get(TOKEN_COOKIE)
                         or (auth[7:] if auth.lower().startswith("bearer ") else ""))
             if not hmac.compare_digest(supplied.encode(), token.encode()):
                 return JSONResponse({"detail": "需要访问令牌：请用启动时打印的链接打开"}, status_code=401)
-            if request.query_params.get("token") and request.url.path == "/":
+            if query:
                 resp = RedirectResponse("/", status_code=303)   # 写入 cookie 后去掉地址栏里的令牌
                 resp.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="strict")
                 return resp
