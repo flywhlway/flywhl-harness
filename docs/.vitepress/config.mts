@@ -84,6 +84,8 @@ export default withMermaid(
     title: "flywhl harness",
     description: "从零手写 Agent Harness：原理、设计取舍与源码精读",
     cleanUrls: true,
+    // quality-audit/ 是仓库内部的审计记录：链接指向目录、测试脚本与证据文件，按 GitHub 浏览写的，不进站点
+    srcExclude: ["quality-audit/**"],
     lastUpdated: true,
     head: [["link", { rel: "icon", href: `${base}favicon.svg` }]],
     markdown: { lineNumbers: true, theme: { light: "github-light", dark: "github-dark" } },
