@@ -436,8 +436,10 @@ CREDENTIAL_SAMPLES = [
     "~/.ssh/id_ed25519", "~/keys/id_rsa", "~/keys/id_ed25519.pub", "~/.aws/credentials", "~/.aws/sso/cache/t.json",
     "~/.config/gcloud/application_default_credentials.json", "~/.azure/msal_token_cache.json", "~/.kube/config",
     "~/.docker/config.json", "~/.netrc", "~/.git-credentials", "~/.config/gh/hosts.yml", "~/.pypirc", "~/.pgpass",
-    "~/.vault-token", "~/.gnupg/private-keys-v1.d/a.key", "/etc/shadow", "/proc/1/environ",
+    "~/.vault-token", "~/.gnupg/private-keys-v1.d/a.key", "/etc/shadow", "/etc/master.passwd", "/proc/1/environ",
     ".kube/config", "deploy/.docker/config.json",       # 凭证就在工作区里：早期版本 read 在 default 模式下直接放行
+    # 大小写别名：macOS / Windows 的文件系统不区分大小写，.SSH/config 打开的就是 .ssh/config；早期版本按原样匹配，全部放行
+    ".SSH/config", "~/.Kube/config", "~/.AWS/credentials", "deploy/.DOCKER/config.json", "~/keys/ID_RSA",
 ]
 
 
@@ -478,6 +480,8 @@ def test_credential_paths_agree_across_file_tools_and_bash(tmp_path, path):
     "ps eww -p $PPID",                         # 子进程的密钥剥掉了，ps 读的却是 harness 自己的环境
     "ps -E -p 1",
     "ps axe",
+    "security find-generic-password -w -s demo",   # 钥匙串就是 macOS 的凭证库
+    "security dump-keychain -d",
 ])
 def test_bash_credential_tricks_are_denied_even_in_bypass(tmp_path, cmd):
     """字符串匹配要看 shell 去掉引号、展开花括号之后的样子；bypass 与 allow:bash 规则都放不过。"""
@@ -539,6 +543,32 @@ def test_every_sensitive_glob_is_exercised_and_known_to_bash():
         assert all(CREDENTIAL_HINTS.search(p) and SECRET_HINTS.search(p) for p in hit), g
     for p in HINT_SAMPLES:  # 两档不串：线索档的样例不能被当成凭证档硬拒绝
         assert SECRET_HINTS.search(p) and not CREDENTIAL_HINTS.search(p), p
+
+
+async def test_case_alias_of_credentials_never_reaches_the_model(ws):
+    """在不区分大小写的文件系统上真的读一遍：read、bash、grep 换个大小写，工具结果里都不能出现凭证内容。"""
+    (ws / ".ssh").mkdir()
+    (ws / ".ssh" / "config").write_text("CANARY-SSH-CONFIG\n")
+    alias = ws / ".SSH" / "config"
+    if not (alias.exists() and os.path.samefile(alias, ws / ".ssh" / "config")):
+        pytest.skip("文件系统区分大小写，没有别名可读")
+    calls = [{"name": "read", "args": {"path": ".SSH/config"}}, {"name": "bash", "args": {"command": "cat .SSH/config"}},
+             {"name": "grep", "args": {"pattern": "CANARY", "path": ".SSH"}}, {"name": "grep", "args": {"pattern": "CANARY"}}]
+    h = make_harness(ws, [{"tool_calls": [c]} for c in calls] + ["好"], on_ask="deny")
+    ends = tool_ends((await h.run("看看配置")).events)
+    assert len(ends) == len(calls)
+    assert not [e for e in ends if "CANARY-SSH-CONFIG" in e["content"]]
+
+
+async def test_secret_like_env_names_are_stripped_from_bash(ws, monkeypatch):
+    for k, v in {"MYSQL_PWD": "c-mysql", "SMTP_PASS": "c-smtp", "GITHUB_PAT": "c-pat", "SENTRY_DSN": "c-dsn",
+                 "DATABASE_URL": "postgres://app:c-dburl@db/app", "QA_PLAIN": "c-plain", "REDIS_URL": "redis://cache:6379"}.items():
+        monkeypatch.setenv(k, v)
+    cmd = 'echo "$MYSQL_PWD|$SMTP_PASS|$GITHUB_PAT|$SENTRY_DSN|$DATABASE_URL|$QA_PLAIN|$REDIS_URL|$PWD"'
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": cmd}}]}, "好"], permissions__mode="bypass")
+    out = tool_ends((await h.run("看环境")).events)[0]["content"]
+    assert "c-" in out and not [x for x in ("c-mysql", "c-smtp", "c-pat", "c-dsn", "c-dburl") if x in out], out
+    assert "c-plain" in out and "redis://cache:6379" in out and str(ws) in out   # 普通变量与 PWD 照常可见
 
 
 def test_symlink_to_credential_is_denied(tmp_path):

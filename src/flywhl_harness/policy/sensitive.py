@@ -18,6 +18,10 @@ read 工具的托管基线却只拒绝 ``.ssh``、``id_rsa``、``.aws/credential
 
 glob 用 ``fnmatch`` 匹配完整路径，``*`` 可以跨目录；权限层同时拿原始路径、解析符号链接后的绝对路径、
 相对工作区路径去匹配，所以 ``../../.kube/config`` 和指向它的软链接都会命中。
+
+匹配 **不区分大小写**：macOS（APFS 默认）和 Windows 的文件系统不区分大小写，``.SSH/config`` 打开的就是 ``.ssh/config``，
+``Path.resolve()`` 却保留调用时的写法——早期版本按原样匹配，改个大小写就绕过了硬拒绝。区分大小写的系统上多拒几个
+名字恰好只差大小写的文件，代价可以接受。
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ CREDENTIAL_GLOBS: tuple[str, ...] = (
     "*/.docker/config.json",                                   # 镜像仓库登录凭证
     "*/.netrc", "*/.git-credentials", "*/.config/gh/*",        # HTTP 基本认证、Git 与 GitHub CLI 令牌
     "*/.pypirc", "*/.pgpass", "*/.vault-token", "*/.gnupg/*",  # 发包令牌、数据库口令、Vault 令牌、GPG 私钥环
-    "*/etc/shadow", "/proc/*/environ",                         # 系统口令哈希（macOS 上 /etc 解析为 /private/etc）、进程环境变量
+    "*/etc/shadow", "*/etc/master.passwd",                     # 系统口令哈希：Linux / macOS（/etc 解析为 /private/etc）
+    "/proc/*/environ",                                         # 进程环境变量
 )
 SECRET_HINT_GLOBS: tuple[str, ...] = ("*.env", "*/.env.*", "*/.npmrc", "*_history")
 
@@ -41,8 +46,9 @@ SECRET_HINT_GLOBS: tuple[str, ...] = ("*.env", "*/.env.*", "*/.npmrc", "*_histor
 #
 # - CREDENTIAL_HINTS 对应 CREDENTIAL_GLOBS，命中即拒绝、任何模式都一样。硬拒绝没有“批准后执行”的出路，误报只能换个做法，
 #   所以只收录除了碰凭证几乎不会出现在命令里的字样：目录按完整的路径段匹配（~/.ssh、~/.ssh/x 命中，ssh_utils.py、
-#   .ssh_notes 不命中），再加上指向这些位置的环境变量（cat $KUBECONFIG）；
-# - SECRET_HINTS 是两档的并集，再加上更宽的字样（.env、credentials、shell 历史、钥匙串查询）。只判为高危要确认——
+#   .ssh_notes 不命中），再加上指向这些位置的环境变量（cat $KUBECONFIG）与导出钥匙串口令的 security 子命令
+#   （find-generic-password / find-internet-password / dump-keychain，钥匙串就是 macOS 的凭证库）；
+# - SECRET_HINTS 是两档的并集，再加上更宽的字样（.env、credentials、shell 历史）。只判为高危要确认——
 #   cp .env.example .env、pytest tests/test_credentials.py 都会命中，宽一点的代价只是多问一次。
 #
 # 两档各自要覆盖对应 glob 的每个位置，测试逐项核对，也核对线索档的样例不会落进凭证档
@@ -50,17 +56,17 @@ _SEG_START, _SEG_END = r"(?<![\w.-])", r"(?![\w.-])"   # 前后不能紧挨着�
 CREDENTIAL_HINTS = re.compile(
     rf"{_SEG_START}\.(ssh|aws|azure|kube|gnupg){_SEG_END}|\.config/(gcloud|gh){_SEG_END}"
     r"|id_rsa|id_ed25519|\.docker/config\.json|\.netrc\b|\.git-credentials|\.pypirc|\.pgpass|\.vault-token"
-    r"|/etc/shadow|/proc/[^/\s]+/environ"
+    r"|/etc/shadow|/etc/master\.passwd|/proc/[^/\s]+/environ"
+    r"|\b(find-generic-password|find-internet-password|dump-keychain)\b"
     r"|\$\{?(KUBECONFIG|GNUPGHOME|DOCKER_CONFIG|CLOUDSDK_CONFIG|GH_CONFIG_DIR|AWS_SHARED_CREDENTIALS_FILE)\b"
-    rf"|\$\{{?XDG_CONFIG_HOME\}}?/(gcloud|gh){_SEG_END}")
-SECRET_HINTS = re.compile(
-    CREDENTIAL_HINTS.pattern
-    + r"|\.env\b|credentials|\.npmrc|_history\b|find-generic-password|find-internet-password")
+    rf"|\$\{{?XDG_CONFIG_HOME\}}?/(gcloud|gh){_SEG_END}", re.I)   # 不区分大小写：cat .SSH/config 读的就是 .ssh/config
+SECRET_HINTS = re.compile(CREDENTIAL_HINTS.pattern + r"|\.env\b|credentials|\.npmrc|_history\b", re.I)
 
 
 def sensitivity(path: str | Path) -> str | None:
-    """路径落在哪一档：``"deny"`` / ``"ask"`` / ``None``。用于目录遍历时逐个文件判断（权限层只看得到遍历的根）。"""
-    s = str(path)
+    """路径落在哪一档：``"deny"`` / ``"ask"`` / ``None``。用于目录遍历时逐个文件判断（权限层只看得到遍历的根）。
+    不区分大小写，理由见模块注释。"""
+    s = str(path).lower()
     if any(fnmatch.fnmatchcase(s, g) for g in CREDENTIAL_GLOBS):
         return "deny"
     if any(fnmatch.fnmatchcase(s, g) for g in SECRET_HINT_GLOBS):

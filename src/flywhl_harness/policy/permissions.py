@@ -27,7 +27,7 @@ default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。�
 改用默认位置或 ``~/.ssh/config`` 里的 Host 别名，命令里就不必出现路径；管理凭证（``ssh-keygen``、``chmod 600 ~/.ssh/config``）——
 由用户自己执行。关掉托管基线（``baseline=False``）时这条拒绝一并关掉，退回“高危要确认”。
 
-线索档（``.env``、``credentials`` 字样、shell 历史、钥匙串查询）维持高危要确认，bypass 下不升级：
+线索档（``.env``、``credentials`` 字样、shell 历史）维持高危要确认，bypass 下不升级：
 ``cp .env.example .env``、``pytest tests/test_credentials.py`` 都会命中，硬拒绝会误伤日常命令。
 
 字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（``D=$HOME/.ku; cat ${D}be/config``、
@@ -103,7 +103,12 @@ class Rule:
             return False
         if self.pattern is None:
             return True
-        return any(fnmatch.fnmatchcase(t, self.pattern) for t in targets)
+        if self.decision == Decision.ALLOW:
+            return any(fnmatch.fnmatchcase(t, self.pattern) for t in targets)
+        # deny / ask 不区分大小写：macOS、Windows 的默认文件系统不区分大小写，deny:read(*/.ssh/*) 按原样匹配，
+        # 读 .SSH/config 就绕过去了。收紧方向的规则宁可多命中；放行方向的 allow 仍按原样匹配，不因此变宽
+        pattern = self.pattern.lower()
+        return any(fnmatch.fnmatchcase(t.lower(), pattern) for t in targets)
 
     def __str__(self) -> str:
         return f"{self.decision}:{self.tool}" + (f"({self.pattern})" if self.pattern else "")

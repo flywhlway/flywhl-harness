@@ -7,8 +7,10 @@ bash 是最强也最危险的工具。这里的工程要点：
 - **两段式终止**：先 SIGTERM 给进程优雅退出的机会，宽限期后仍未退出再 SIGKILL。
 - **流式输出**：边执行边通过 ``ctx.emit`` 推送输出，UI 能实时看到构建/测试日志。
 - **输出截断保尾**：错误与结论通常在最后，所以保留结尾；完整输出外置为 blob 句柄。
-- **密钥不可见**：默认从子进程环境中剥离名字含 KEY/TOKEN/SECRET/PASSWORD 的变量，
-  模型即使执行 ``env`` 也看不到原始凭据。
+- **密钥不可见**：默认从子进程环境中剥离看起来像凭据的变量——名字含 KEY/TOKEN/SECRET/PASSWORD 等字样，
+  或以 ``_PWD``、``_PASS``、``_PAT``、``_DSN`` 结尾（``MYSQL_PWD``、``SMTP_PASS``、``GITHUB_PAT``），
+  或值是带口令的 URL（``postgres://u:p@host/db``）。模型即使执行 ``env`` 也看不到原始凭据。
+  这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **可选的系统沙箱**：``sandbox="macos"`` 时命令跑在 sandbox-exec 里，凭证位置不可读、写操作限制在工作区与临时目录，
   见 ``tools/sandbox.py``。
@@ -29,7 +31,9 @@ from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
 from .sandbox import SANDBOX_LEVELS, sandbox_argv
 
-_SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.I)
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
+                         r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
+_URL_WITH_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@", re.I)
 OUT_LINES = 400
 OUT_BYTES = 30 * 1024
 
@@ -37,7 +41,7 @@ OUT_BYTES = 30 * 1024
 def _clean_env(strip: bool) -> dict[str, str]:
     env = dict(os.environ)
     if strip:
-        env = {k: v for k, v in env.items() if not _SECRET_ENV.search(k)}
+        env = {k: v for k, v in env.items() if not (_SECRET_ENV.search(k) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
