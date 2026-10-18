@@ -152,7 +152,9 @@ class HarnessConfig:
         - 不给 ``path`` 时从启动目录找 ``flywhl.toml`` / ``.flywhl/config.toml``。其中的高危设置只在这份文件的
           当前内容被信任过之后生效；未信任时交给 ``trust`` 回调决定（返回 True 即记入 ``trusted.json``），
           没有回调则忽略这些设置并发出 ``UntrustedConfigWarning``；
-        - 两层文件里的 ``hooks`` 与 ``permissions.rules`` 是追加而不是替换：项目配置删不掉用户配置里的守卫 hook 与 deny 规则。
+        - 两层文件里的 ``hooks`` 与 ``permissions.rules`` 是追加而不是替换：项目配置删不掉用户配置里的守卫 hook 与 deny 规则；
+        - 显式参数只给了 ``provider``（不是 auto）时，前几层的模型若自带别家供应商（``deepseek:…``、只写供应商名、
+          演示模型名）就丢掉，改用该供应商的默认模型；不带供应商的模型名照常保留。
         """
         cfg = cls()
         user_file = (flywhl_home() / "config.toml").resolve()
@@ -186,7 +188,14 @@ class HarnessConfig:
             cfg.fallback_models = [m.strip() for m in fallbacks.split(",") if m.strip()]
         if os.environ.get("FLYWHL_PERMISSION_MODE"):
             cfg.permissions.mode = os.environ["FLYWHL_PERMISSION_MODE"]
-        _merge(cfg, {k: v for k, v in overrides.items() if v is not None})
+        explicit = {k: v for k, v in overrides.items() if v is not None}
+        if explicit.get("provider", "auto") != "auto" and "model" not in explicit:
+            from .llm.profiles import pinned_provider   # 延迟导入：llm 包反过来依赖本模块
+
+            # resolve 让模型自带的供应商优先于 provider：下层留下的 deepseek:… 会把显式的 provider=mock 改走
+            if pinned_provider(cfg.model) not in (None, explicit["provider"]):
+                cfg.model = None
+        _merge(cfg, explicit)
         return cfg
 
     def data_path(self) -> Path:

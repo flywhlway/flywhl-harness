@@ -233,6 +233,58 @@ def test_env_aliases_for_model_and_fallbacks(no_keys):
     assert HarnessConfig.load(path="/nonexistent.toml").model == "kimi:kimi-k2.6"
 
 
+def test_explicit_provider_beats_model_pinned_by_lower_layers(no_keys):
+    """显式参数里的 provider 高于文件与环境：下层的模型自带别家供应商时，改用显式供应商的默认模型。"""
+    no_keys.setenv("DEEPSEEK_API_KEY", "sk-fake")
+    for k in ("FLYWHL_MODEL", "FLYWHL_PROVIDER"):
+        no_keys.delenv(k, raising=False)
+
+    def load(env_model, **overrides):
+        no_keys.setenv("LLM_PRIMARY_MODEL", env_model)
+        cfg = HarnessConfig.load(path="/nonexistent.toml", **overrides)
+        return resolve(cfg.model, cfg.provider)
+
+    assert load("deepseek:deepseek-flash", provider="mock") == (PROFILES["mock"], "flywhl-demo")
+    assert load("deepseek", provider="mock") == (PROFILES["mock"], "flywhl-demo")              # 只写供应商名同前缀
+    assert load("flywhl-demo", provider="deepseek") == (PROFILES["deepseek"], "deepseek-flash")  # 演示模型名同理
+    assert load("deepseek:deepseek-flash", provider="dashscope") == (PROFILES["dashscope"], "qwen3.8-flash")
+    assert load("mock:flywhl-demo", provider="mock") == (PROFILES["mock"], "flywhl-demo")      # 同一家：保留
+    assert load("qwen3:8b", provider="ollama") == (PROFILES["ollama"], "qwen3:8b")            # 不带供应商的模型名：保留
+    assert load("deepseek:deepseek-flash", provider="auto") == (PROFILES["deepseek"], "deepseek-flash")  # auto 不算选定
+    assert load("deepseek:deepseek-flash", provider="mock",                                   # 显式 model 照常优先
+                model="dashscope:qwen3.8-flash") == (PROFILES["dashscope"], "qwen3.8-flash")
+
+
+def test_cli_provider_beats_prefixed_model_from_dotenv(tmp_path, no_keys):
+    """启动目录 .env 的 LLM_PRIMARY_MODEL=deepseek:… 不能把命令行的 --provider mock 改走。
+
+    事故：在含真实密钥 .env 的仓库根目录跑 ``flywhl serve --provider mock`` 验收，/api/info 报 provider=deepseek，
+    演示服务产生了一次计费调用。
+    """
+    import argparse
+
+    from flywhl_harness.cli import _config, load_env
+
+    for k in ("DEEPSEEK_API_KEY", "LLM_PRIMARY_MODEL", "FLYWHL_MODEL", "FLYWHL_PROVIDER"):
+        no_keys.setenv(k, "placeholder")
+        no_keys.delenv(k)                       # 让 monkeypatch 记住“原本不存在”，load_env 写进环境的值在结束时清理
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=sk-fake\nLLM_PRIMARY_MODEL=deepseek:deepseek-flash\n")
+    no_keys.chdir(tmp_path)
+    assert load_env(None) == (["DEEPSEEK_API_KEY", "LLM_PRIMARY_MODEL"], [])
+
+    def cli(**kw):
+        args = argparse.Namespace(**{"config": None, "workspace": str(tmp_path), "provider": None, "model": None,
+                                     "mode": None, "yes": False, "trust": False, "json": True, **kw})
+        return create_provider(_config(args))
+
+    provider, model = cli()
+    assert isinstance(provider, ResilientProvider) and model == "deepseek-flash"   # 不给参数：.env 照常生效
+    provider, model = cli(provider="mock")
+    assert provider.name == "mock" and model == "flywhl-demo"
+    provider, model = cli(model="mock")
+    assert provider.name == "mock" and model == "flywhl-demo"
+
+
 async def _drain(rp):
     return [ev async for ev in rp.stream(ModelRequest(model="m", system="", messages=[]), CancelToken())]
 

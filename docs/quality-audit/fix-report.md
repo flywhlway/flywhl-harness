@@ -52,9 +52,10 @@ P0、P1 全部纳入（QA-001 至 QA-006）。P2 里属于实现缺陷的三条�
 | `ls;(rm -rf ~)`、`echo x \|& rm -rf ~` | bypass 放行 | `;(` 被 shlex 并成一个 token；`\|&` 不在分隔符里 |
 | `find ~ -exec rm -rf {} +` | bypass 放行 | `-exec` 的命令没有分析 |
 
-## 新发现、未处理
+## 新发现
 
-- **`.env` 覆盖命令行的 `--provider mock`。** CLI 加载启动目录的 `.env`，其中带前缀的 `LLM_PRIMARY_MODEL=deepseek:…` 优先级高于 `--provider mock`，演示服务会改走真实供应商。本次验收第一次在仓库根目录启动服务时踩到，产生 1 次真实调用（约 2.5K 输入 / 101 输出 token，估算 $0.0009），发现后立即停掉并改为在临时目录启动、显式 `--model mock`。建议命令行参数优先于 `.env`，或启动时打印实际供应商。
+- **`.env` 覆盖命令行的 `--provider mock`。** CLI 加载启动目录的 `.env`，其中带前缀的 `LLM_PRIMARY_MODEL=deepseek:…` 优先级高于 `--provider mock`，演示服务会改走真实供应商。本次验收第一次在仓库根目录启动服务时踩到，产生 1 次真实调用（约 2.5K 输入 / 101 输出 token，估算 $0.0009），发现后立即停掉并改为在临时目录启动、显式 `--model mock`。
+  - 后续已修复：`HarnessConfig.load` 的显式参数只给 `provider`（不是 auto）时，文件、环境变量、`.env` 留下的模型若自带别家供应商（前缀、只写供应商名、演示模型名）就丢掉，改用该供应商的默认模型；不带供应商的模型名照常保留。回归测试见 `tests/test_providers.py` 的 `test_explicit_provider_beats_model_pinned_by_lower_layers` 与 `test_cli_provider_beats_prefixed_model_from_dotenv`。
 
 ## 残余风险
 

@@ -113,6 +113,18 @@ def split_spec(spec: str) -> tuple[str | None, str]:
     return None, spec
 
 
+def pinned_provider(spec: str | None) -> str | None:
+    """spec 自带、``provider`` 配置改不了的供应商（即 ``resolve`` 的前三条）：前缀、只写供应商名、演示模型名。"""
+    from .models import MODELS
+
+    prefix, model = split_spec(spec) if spec else (None, "")
+    if prefix or model in PROFILES:
+        return prefix or model
+    if model in MODELS and MODELS[model].provider == "mock":
+        return "mock"
+    return None
+
+
 def detect_profile() -> ProviderProfile:
     for name in AUTO_ORDER:
         p = PROFILES[name]
@@ -146,4 +158,5 @@ def resolve(spec: str | None, provider: str = "auto") -> tuple[ProviderProfile, 
     return p, model or p.default_model
 
 
-__all__ = ["ProviderProfile", "PROFILES", "AUTO_ORDER", "DEFAULT_MODEL", "split_spec", "detect_profile", "resolve"]
+__all__ = ["ProviderProfile", "PROFILES", "AUTO_ORDER", "DEFAULT_MODEL", "split_spec", "pinned_provider",
+           "detect_profile", "resolve"]
