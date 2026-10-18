@@ -1,0 +1,30 @@
+# 整改后复跑（2026-10-18，macOS，darwin 25.6.0）
+
+## Python 3.12（仓库 .venv）
+$ .venv/bin/python -m pytest -q --tb=no
+322 passed, 33 deselected in 17.26s
+$ .venv/bin/python -m pytest docs/quality-audit/tests -q --tb=no
+13 passed in 0.40s
+
+## Python 3.11（uv sync --locked --all-extras 到临时环境）
+322 passed, 33 deselected in 16.79s
+13 passed in 0.56s
+
+## Python 3.13（uv sync --locked --all-extras 到临时环境）
+322 passed, 33 deselected in 17.23s
+13 passed in 0.62s
+
+## 审计套件逐项
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_newline_is_not_a_read_in_plan_mode
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_newline_rm_is_catastrophic
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_parent_env_dump_is_not_auto_allowed
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_unlisted_secret_names_do_not_reach_the_model
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_credential_case_alias_is_denied
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_destructive_forms_are_denied_in_bypass[bash -lc 'rm -rf ~']
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_destructive_forms_are_denied_in_bypass[find ~ -delete]
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_session_grant_does_not_authorize_a_different_lc_script
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_cross_site_origin_is_rejected
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_loopback_other_port_is_rejected
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_token_does_not_widen_origin
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_foreign_host_is_rejected
+PASSED docs/quality-audit/tests/test_security_invariants.py::test_model_mock_stays_on_demo_provider_when_a_key_exists

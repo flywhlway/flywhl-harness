@@ -1,0 +1,17 @@
+{
+  "server": "http://127.0.0.1:8766",
+  "env": "env -i，FLYWHL_HOME 与工作区均在 /tmp/flywhl-qa-uat，未加载仓库 .env",
+  "provider": "mock",
+  "model": "flywhl-demo",
+  "mode": "default",
+  "info_latency_ms": {"n": 30, "p50": 1.04, "p95": 1.92, "max": 30.06},
+  "csrf": {"https://evil.example": 403, "http://127.0.0.1:9999": 200, "Origin: null": 403},
+  "list_dir_run": "completed",
+  "write_approval": {"tool": "write", "risk": "medium", "preview": true, "decision": "rejected", "hello_py_created": false},
+  "ui": {
+    "list_dir": "ls . 完成，状态机 created→queued→running→completed",
+    "create_file": "出现 diff 审批卡；拒绝后 write 为已拒绝，后续 read hello.py 报错，文件未创建",
+    "mobile_390": "检查器占满视口，对话被挤出，右侧大片空白"
+  },
+  "static_and_api": "style/app/views 与 /api/info、/api/sessions、/api/approvals 均为 200；SSE /events 的 responseStatus 为 0，属未结束的流，不是 HTTP 错误页"
+}

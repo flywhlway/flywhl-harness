@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-18",
+  "server": "flywhl serve --model mock --port 8767，在临时工作区内以 env -i 启动（FLYWHL_HOME 指向临时目录，不加载仓库 .env）",
+  "qa004_real_server_post_api_sessions": {
+    "Origin: http://127.0.0.1:9999": 403,
+    "Origin: http://localhost:8768": 403,
+    "Origin: https://evil.example": 403,
+    "Origin: null": 403,
+    "Origin: http://127.0.0.1:8767（本服务自己）": 200,
+    "不带 Origin（curl / 脚本客户端）": 200,
+    "Host: evil.example": 403
+  },
+  "qa004_browser_cross_port": {
+    "attacker_page": "http://localhost:8768（第二台隔离服务的页面）",
+    "requests": "fetch POST http://localhost:8767/api/sessions，mode no-cors，text/plain 与 form-urlencoded 两种简单请求",
+    "sessions_created_on_8767": 0,
+    "same_origin_post_from_8767_page": 200
+  },
+  "qa006_example_11": {
+    "env": "DEEPSEEK_API_KEY=假值，HTTPS_PROXY/HTTP_PROXY 指向 127.0.0.1:9（任何出站都会立刻失败）",
+    "before_fix": "exit 1，Run failed，七条不变量五条失败，外部通知数 0",
+    "after_fix": "exit 0，七条不变量全部通过，running → interrupted → queued → running → completed，外部通知数 1"
+  },
+  "qa010_mobile_375x812": {
+    "before_fix": "检查器覆盖层从 top: 0 盖住整屏，页头的检查器开关被压在下面（elementFromPoint 命中 .tabs），没有遮罩、没有关闭按钮，打开后无法收起",
+    "after_fix": "覆盖层 top = 52px（页头之下），开关可点；点遮罩、按 Esc、再点开关都能收起；收起不改写桌面宽度下的偏好",
+    "desktop_1440x900": "检查器并排，position static，宽 360px，对话区 832px，遮罩不显示",
+    "screenshot": "fix-qa010-mobile-inspector.jpg"
+  },
+  "qa009_file_modes": {
+    "before_fix": "harness.db / -wal / -shm 均为 0644，数据目录 0755",
+    "after_fix": "harness.db / -wal / -shm 均为 0600，新建数据目录 0700；已有 0644 库再次打开时收紧为 0600"
+  }
+}

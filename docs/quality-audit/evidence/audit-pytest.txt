@@ -1,0 +1,58 @@
+FFFFFFFF.FF.F                                                            [100%]
+=================================== FAILURES ===================================
+E   AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+      
+      - deny
+      + allow
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:67: AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+E   AssertionError: assert (False or 'read' != 'read')
+     +  where False = CommandAnalysis(command='echo safe\nrm -rf subdir', segments=['echo safe rm -rf subdir'], level='read', reasons=['echo 只读'], catastrophic=False, catastrophic_reason='', credential=False, credential_reason='', network=False, opaque=False).catastrophic
+     +  and   'read' = CommandAnalysis(command='echo safe\nrm -rf subdir', segments=['echo safe rm -rf subdir'], level='read', reasons=['echo 只读'], catastrophic=False, catastrophic_reason='', credential=False, credential_reason='', network=False, opaque=False).level
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:75: AssertionError: assert (False or 'read' != 'read')
+E   AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+      
+      - deny
+      + allow
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:81: AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+E   AssertionError: assert 'no-mysql' in ['MYSQL', 'no-key']
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:120: AssertionError: assert 'no-mysql' in ['MYSQL', 'no-key']
+E   AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+      
+      - deny
+      + allow
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:137: AssertionError: assert <Decision.ALLOW: 'allow'> == <Decision.DENY: 'deny'>
+E   AssertionError: ['未知命令 bash，按可写处理']
+    assert False
+     +  where False = CommandAnalysis(command="bash -lc 'rm -rf ~'", segments=['bash -lc rm -rf ~'], level='write', reasons=['未知命令 bash，按可写处理'], catastrophic=False, catastrophic_reason='', credential=False, credential_reason='', network=False, opaque=False).catastrophic
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:149: AssertionError: ['未知命令 bash，按可写处理']
+E   AssertionError: ['访问工作区外路径 ~', 'find 带 -delete/-exec']
+    assert False
+     +  where False = CommandAnalysis(command='find ~ -delete', segments=['find ~ -delete'], level='external', reasons=['访问工作区外路径 ~', 'find ...xec'], catastrophic=False, catastrophic_reason='', credential=False, credential_reason='', network=False, opaque=False).catastrophic
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:149: AssertionError: ['访问工作区外路径 ~', 'find 带 -delete/-exec']
+E   assert 1 == 2
+     +  where 1 = len(["bash -lc 'echo one > grant_a.txt'"])
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:180: assert 1 == 2
+E   assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:217: assert 200 == 403
+E   assert 200 == 403
+     +  where 200 = <Response [200 OK]>.status_code
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:231: assert 200 == 403
+E   AssertionError: assert 'deepseek' == 'mock'
+      
+      - mock
+      + deepseek
+/Users/flywhl/dev/personal/flywhl-job/flywhl-harness/docs/quality-audit/tests/test_security_invariants.py:244: AssertionError: assert 'deepseek' == 'mock'
+=========================== short test summary info ============================
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_newline_is_not_a_read_in_plan_mode
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_newline_rm_is_catastrophic
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_parent_env_dump_is_not_auto_allowed
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_unlisted_secret_names_do_not_reach_the_model
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_credential_case_alias_is_denied
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_destructive_forms_are_denied_in_bypass[bash -lc 'rm -rf ~']
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_destructive_forms_are_denied_in_bypass[find ~ -delete]
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_session_grant_does_not_authorize_a_different_lc_script
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_loopback_other_port_is_rejected
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_token_does_not_widen_origin
+FAILED docs/quality-audit/tests/test_security_invariants.py::test_model_mock_stays_on_demo_provider_when_a_key_exists
+11 failed, 2 passed in 0.46s

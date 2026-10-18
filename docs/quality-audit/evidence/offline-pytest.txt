@@ -1,0 +1,5 @@
+命令：.venv/bin/python -m pytest -q --tb=no
+工作目录：仓库根
+时间：2026-10-18
+结果：268 passed, 33 deselected in 21.10s
+deselected 为 tests/live（标记 live，默认排除）。本次审计未运行 live。
