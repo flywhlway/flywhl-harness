@@ -203,6 +203,11 @@ def test_model_spec_resolution(no_keys):
     assert resolve(None, "openai")[0].name == "deepseek"                          # 兼容旧配置：只有 DeepSeek 密钥
     with pytest.raises(ValueError):
         resolve(None, "nope")
+    # 演示模型有密钥时也不发给外部服务：早期版本 resolve("mock") 交给 auto 探测，得到 deepseek
+    assert resolve("mock") == (PROFILES["mock"], "flywhl-demo")
+    assert resolve("flywhl-demo", "deepseek") == (PROFILES["mock"], "flywhl-demo")
+    assert resolve("scripted", "openai")[0].name == "mock"
+    assert resolve("dashscope") == (PROFILES["dashscope"], "qwen3.8-flash")    # 只写供应商名：用它的默认模型
 
 
 def test_create_provider_builds_cross_provider_chain(no_keys):

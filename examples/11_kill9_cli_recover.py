@@ -50,11 +50,17 @@ def cli(ws: Path, *args: str) -> list[str]:
     return [sys.executable, "-m", "flywhl_harness.cli", *args, "-w", str(ws), "-c", str(ws / "flywhl.toml")]
 
 
+# 子进程只带运行 Python 与 git 需要的变量（白名单）。早期版本只去掉 FLYWHL_* / LLM_*，供应商密钥原样带进去，
+# 配置里的 model = "mock" 又被当成普通模型名：开发者机器上这个“不需要 API Key”的示例打到了真实接口
+_ENV_KEEP = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "LANG", "TERM",
+             "SYSTEMROOT", "COMSPEC", "PATHEXT"}
+
+
 def clean_env(ws: Path) -> dict[str, str]:
-    """子进程环境：本机的 FLYWHL_* 配置、降级链与信任记录都不参与，结果只取决于这个脚本。"""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("FLYWHL_", "LLM_"))}
+    """子进程环境：供应商密钥、代理、本机的 FLYWHL_* 配置、降级链与信任记录都不参与，结果只取决于这个脚本。"""
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP or k.startswith("LC_")}
     src = str(Path(__file__).resolve().parents[1] / "src")
-    env.update(FLYWHL_HOME=str(ws / ".flywhl-home"), PYTHONPATH=os.pathsep.join(filter(None, [src, env.get("PYTHONPATH")])))
+    env.update(FLYWHL_HOME=str(ws / ".flywhl-home"), PYTHONPATH=src)
     return env
 
 

@@ -1,8 +1,11 @@
 """供应商档案：把“某家服务怎么接”收敛成一份数据，而不是散落在各处的 if/else。
 
 模型统一写成 ``<供应商>:<模型>``，例如 ``deepseek:deepseek-flash``、``dashscope:qwen3.8-flash``、
-``ollama:qwen3.5:9b-mlx``（只按第一个冒号切分，且前缀必须是已知供应商）。只写模型名时：
-模型能力表里登记过的按表里的供应商，否则沿用 ``provider`` 配置。
+``ollama:qwen3.5:9b-mlx``（只按第一个冒号切分，且前缀必须是已知供应商）。只写供应商名（``model = "mock"``）
+等同于带前缀、用它的默认模型。只写模型名时：模型能力表里登记过的按表里的供应商，否则沿用 ``provider`` 配置。
+
+内置演示模型（``mock``、``flywhl-demo``、``scripted``）任何情况下都只走演示供应商：早期版本把 ``mock`` 当成普通模型名，
+auto 探测到 ``DEEPSEEK_API_KEY`` 就把它发给了 DeepSeek——“不需要密钥、结果确定”的示例在开发者机器上打到真实接口。
 
 各家 OpenAI 兼容接口在“思考内容”上的差异（真实接口实测，录制的流见 ``tests/fixtures/sse/``）：
 
@@ -125,6 +128,10 @@ def resolve(spec: str | None, provider: str = "auto") -> tuple[ProviderProfile, 
     prefix, model = split_spec(spec) if spec else (None, "")
     if prefix:
         return PROFILES[prefix], model
+    if model in PROFILES:                                   # 只写供应商名：用它的默认模型
+        return PROFILES[model], PROFILES[model].default_model
+    if model in MODELS and MODELS[model].provider == "mock":  # 演示模型名不属于任何外部服务，不能被 provider 或探测改走
+        return PROFILES["mock"], model
     if provider != "auto":
         if provider not in PROFILES:
             raise ValueError(f"未知 provider：{provider}（可选：auto、{'、'.join(PROFILES)}）")
