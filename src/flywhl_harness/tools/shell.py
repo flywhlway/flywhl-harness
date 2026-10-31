@@ -13,19 +13,22 @@ bash 是最强也最危险的工具。这里的工程要点：
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **可选的系统沙箱**：``sandbox="macos"`` / ``"linux"`` 时命令跑在 sandbox-exec / bubblewrap 里，凭证位置不可读、
-  写操作限制在工作区与临时目录，见 ``tools/sandbox.py``；网络可以全断，macOS 上还可以只经出站代理连白名单里的主机
-  （``tools/egress.py``）。
+  写操作限制在工作区与临时目录，本机 Unix 套接字（``unix_sockets`` 列出的除外）与钥匙串用不了，见 ``tools/sandbox.py``；
+  网络可以全断，macOS 上还可以只经出站代理连白名单里的主机（``tools/egress.py``）。
   网络策略离不开沙箱：配置了 ``deny`` / ``allowlist`` 却没有开沙箱时拒绝执行，不悄悄连外网。
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import codecs
 import contextlib
 import os
 import re
+import shutil
 import signal
+import tempfile
 import time
 from typing import Any
 
@@ -66,6 +69,17 @@ def _clean_env(strip: bool) -> dict[str, str]:
         env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
     env["GIT_CONFIG_COUNT"] = str(n + len(_GIT_HARDENING))
     return env
+
+
+_PRIVATE_TMP_PREFIX = "flywhl-sandbox-tmp-"
+
+
+def _remove_private_tmp(path: str) -> None:
+    """删除前核对目标：只删 mkdtemp 在系统临时目录下建出来的那一个。"""
+    target = os.path.realpath(path)
+    if (os.path.dirname(target) == os.path.realpath(tempfile.gettempdir())
+            and os.path.basename(target).startswith(_PRIVATE_TMP_PREFIX)):
+        shutil.rmtree(target, ignore_errors=True)
 
 
 async def _reap_group(pgid: int, grace: float = 1.0) -> None:
@@ -125,18 +139,31 @@ class BashTool(Tool):
     manages_timeout = True
 
     def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off",
-                 sandbox_network: str = "allow", network_allow: list[str] | None = None):
+                 sandbox_network: str = "allow", network_allow: list[str] | None = None,
+                 unix_sockets: list[str] | None = None):
         if sandbox not in SANDBOX_LEVELS:
             raise ValueError(f"未知的沙箱档位 {sandbox!r}（可选：{' | '.join(SANDBOX_LEVELS)}）")
         if sandbox_network not in SANDBOX_NETWORK:
             raise ValueError(f"未知的沙箱网络策略 {sandbox_network!r}（可选：{' | '.join(SANDBOX_NETWORK)}）")
         if not isinstance(network_allow or [], list):
             raise ValueError(f"network_allow 必须是字符串列表，实际是 {network_allow!r}")
+        sockets = unix_sockets or []
+        if not isinstance(sockets, list) or not all(isinstance(p, str) and os.path.isabs(p) for p in sockets):
+            raise ValueError(f"unix_sockets 必须是绝对路径的列表，实际是 {unix_sockets!r}")
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
         self.sandbox = sandbox
         self.sandbox_network = sandbox_network
         self.network_allow = parse_rules(network_allow or [])   # 写法不对在启动时报错
+        self.unix_sockets = sockets
+        self._private_tmp: str | None = None
+
+    def private_tmp(self) -> str:
+        """Linux 档本会话私有的 /tmp：命令之间照样能用临时文件传东西，又看不到宿主 /tmp 里的套接字。进程退出时删除。"""
+        if self._private_tmp is None:
+            self._private_tmp = tempfile.mkdtemp(prefix=_PRIVATE_TMP_PREFIX)
+            atexit.register(_remove_private_tmp, self._private_tmp)
+        return self._private_tmp
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         level = analyze(str(args.get("command", "")), workspace).level
@@ -178,8 +205,11 @@ class BashTool(Tool):
                     spawn["env"] = {**spawn["env"], **proxy.env()}
                 try:
                     argv = (sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network,
-                                         local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else ())
-                            if self.sandbox == "macos" else bwrap_argv(command, ctx.workspace.root, network=self.sandbox_network))
+                                         local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else (),
+                                         unix_sockets=self.unix_sockets)
+                            if self.sandbox == "macos" else
+                            bwrap_argv(command, ctx.workspace.root, network=self.sandbox_network,
+                                       private_tmp=self.private_tmp(), unix_sockets=self.unix_sockets))
                 except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
                     return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
                                       details={"command": command, "sandbox": self.sandbox})

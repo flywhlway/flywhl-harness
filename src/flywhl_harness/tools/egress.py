@@ -42,7 +42,11 @@ _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_pro
 _REASONS = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
 # 基准测试网段。TUN 模式的代理软件（fake-ip）把所有域名解析到这里，它不是内网，按公网处理
 _FAKE_IP = ipaddress.ip_network("198.18.0.0/15")
-_SCOPES = {"loopback": "本机回环地址", "local": "链路本地或保留地址", "private": "内网地址"}
+# 云厂商的实例元数据服务，拿到它就拿到实例的临时凭证。阿里云的落在 CGNAT 段、AWS 的 IPv6 地址落在内网段，
+# 按内网处理的话一条精确规则就能放进来，所以单独列出、和链路本地地址一样不放行
+_METADATA = frozenset(ipaddress.ip_address(a) for a in ("169.254.169.254", "100.100.100.200", "fd00:ec2::254"))
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")   # DNS64 合成的地址：NAT64 网关按后 32 位转发到 IPv4
+_SCOPES = {"loopback": "本机回环地址", "local": "链路本地、保留或云元数据地址", "private": "内网地址"}
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
@@ -71,13 +75,21 @@ class AllowRule:
 
 
 def _scope(ip: IPAddress) -> str:
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:   # ::ffff:127.0.0.1 也是回环
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped:   # ::ffff:127.0.0.1 也是回环
+            ip = ip.ipv4_mapped
+        elif ip in _NAT64:   # 64:ff9b::a9fe:a9fe 经网关到的是 169.254.169.254
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    if ip in _METADATA:
+        return "local"
     if ip.is_loopback:
         return "loopback"
     if ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
         return "local"
-    return "private" if ip.is_private and ip not in _FAKE_IP else "public"
+    # 只有全球可达的才算公网：CGNAT（100.64.0.0/10）、文档示例段这类既不是公网、也不在 is_private 里的，按内网处理；
+    # 废弃的 IPv6 站点本地段（fec0::/10）ipaddress 判为 is_global，同样按内网
+    site_local = isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local
+    return "public" if (ip.is_global and not site_local) or ip in _FAKE_IP else "private"
 
 
 async def _getaddrinfo(host: str, port: int) -> list[IPAddress]:

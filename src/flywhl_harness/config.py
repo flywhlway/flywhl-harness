@@ -88,6 +88,7 @@ class PermissionConfig:
     sandbox: str = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：bash 的系统沙箱，原型，见 tools/sandbox.py
     sandbox_network: str = "allow"         # allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；要求开启沙箱
     network_allow: list[str] = field(default_factory=list)   # 出站白名单：pypi.org、*.github.com、registry.local:5000
+    unix_sockets: list[str] = field(default_factory=list)    # 沙箱里放行连接的 Unix 套接字（绝对路径），如本机数据库；默认只放行 DNS 与系统日志
 
 
 @dataclass
@@ -277,6 +278,7 @@ _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
     "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos", "linux"),
     # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
     "sandbox_network": ("deny",), "network_allow": ([],),
+    "unix_sockets": ([],),   # 放行的套接字可能连着 docker.sock 这类能绕开沙箱的守护进程
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 

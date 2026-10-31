@@ -286,7 +286,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "permissions": {"mode": pc.mode, "on_ask": pc.on_ask, "approval_timeout": pc.approval_timeout,
                             "rules": list(pc.rules), "baseline": len(MANAGED_BASELINE),
                             "strip_secret_env": pc.strip_secret_env},
-            "sandbox": {"level": pc.sandbox, "network": pc.sandbox_network, "allow": list(pc.network_allow)},
+            "sandbox": {"level": pc.sandbox, "network": pc.sandbox_network, "allow": list(pc.network_allow),
+                        "unix_sockets": list(pc.unix_sockets)},
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
                        "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env})} for hc in c.hooks],   # 只给变量名

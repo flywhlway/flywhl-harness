@@ -626,6 +626,6 @@ async def test_settings_overview_reports_effective_security_posture(ws):
     async with _client(create_app(h, auto_recover=False, token="s3cret"), "127.0.0.1:8765") as c:
         d = (await c.get("/api/settings", headers={"Authorization": "Bearer s3cret"})).json()
     assert d["access"] == {"token": True, "hosts": ["127.0.0.1", "::1", "localhost"], "any_host": False}
-    assert d["sandbox"] == {"level": "off", "network": "deny", "allow": []} and d["permissions"]["baseline"] > 50
+    assert d["sandbox"] == {"level": "off", "network": "deny", "allow": [], "unix_sockets": []} and d["permissions"]["baseline"] > 50
     assert d["hooks"][0]["fail_closed"] is True
     assert d["tools"] == len(h.tools) and "api_key" not in str(d)

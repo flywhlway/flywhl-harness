@@ -412,7 +412,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 ## macOS sandbox-exec 档位
 
 `permissions.sandbox = "macos"`（或 `flywhl chat --sandbox macos`）让 bash 工具的每条命令跑在 `sandbox-exec` 里（`tools/sandbox.py`）。
-它是原型：从 `(allow default)` 起步，收紧文件访问，可选断网或只放行白名单里的主机。生成的配置大致是：
+它是原型：从 `(allow default)` 起步，收紧文件访问与本机进程间通信，可选断网或只放行白名单里的主机。生成的配置大致是：
 
 ```scheme
 (version 1)
@@ -423,11 +423,18 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 (deny file-write* (require-not (require-any (subpath "<工作区>") (subpath "<临时目录>") (literal "/dev/null") ...)))
 ; harness 自己的状态与配置，与托管基线一致
 (deny file-write* (subpath "<工作区>/.flywhl") (literal "<工作区>/flywhl.toml"))
-; sandbox_network = "deny" / "allowlist" 时追加：对外 IP 连接（回环地址上的 TCP 也算）与本机 Unix 套接字一律拒绝
-(deny network-outbound (remote ip))
+; 本机 IPC：钥匙串、剪贴板、LaunchServices / Apple 事件，以及 launchd 任务
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc") ...
+                  (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\.apple\.coreservices\."))
+(deny job-creation)
+; Unix 套接字任何网络策略下都先整体拒绝
 (deny network-outbound (remote unix-socket))
-; "allowlist" 再放行本机出站代理的端口；放行必须写在两条拒绝之后，否则不生效
+; sandbox_network = "deny" / "allowlist" 时追加：对外 IP 连接（回环地址上的 TCP 也算）一律拒绝
+(deny network-outbound (remote ip))
+; 放行必须写在拒绝之后，否则不生效："allowlist" 放行本机出站代理的端口；
+; "allow" 放行 DNS（mDNSResponder）与系统日志的套接字；unix_sockets 里列出的任何档位都放行
 (allow network-outbound (remote ip "localhost:<代理端口>"))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 ```
 
 凭证清单与文件工具、命令分析共用 `policy/sensitive.py` 那一份，区别在于内核按 **真实路径** 判定，不管命令怎么写：
@@ -439,8 +446,11 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
 | 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
 | 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
-| 网络外发（`curl`、`nc`、DNS 查询、`docker.sock`） | — | 默认不限制；`deny` 时全部拒绝；`allowlist` 时只能经出站代理连白名单里的主机 |
-| 钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
+| 网络外发（`curl`、`nc`、DNS 查询） | — | 默认不限制；`deny` 时全部拒绝；`allowlist` 时只能经出站代理连白名单里的主机 |
+| 连本机守护进程（`docker.sock`、tmux、ssh-agent） | — | 拒绝，`unix_sockets` 列出的除外 |
+| 钥匙串（`security`、`git credential-osxkeychain`）、剪贴板 | 导出口令的 `security` 子命令 deny | 拒绝 |
+| 让沙箱外的进程替它执行（`open`、`osascript`、`launchctl`） | `launchctl` 判为高危 | 拒绝 |
+| 回环地址上的本机 TCP 服务、其余 Mach 服务 | — | `allow` 档**不限制** |
 | 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
 
 `tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
@@ -449,7 +459,10 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 代价与边界：
 
 - **要用凭证的命令会失败。** `ssh`、`git push`（SSH 协议）、`kubectl`、`gh`、`docker login` 读不到自己的凭证文件——
-  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。
+  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。`docker` 整个用不了：放行 `docker.sock`
+  就等于放弃沙箱。
+- **`allow` 档只管 Unix 套接字，不管回环地址上的 TCP 服务。** 没开认证的本机服务（Jupyter、数据库、调试端口）照样连得上；
+  要连这些一并拦住，用 `deny` 或 `allowlist`。
 - **写全局缓存的工具可能失败或退化。** 默认只放开工作区和临时目录，`~/.cache`、`~/Library/Caches`、`~/.npm` 写不进去；
   原型没有做可配置的白名单（`sandbox_argv()` 的 `writable` 参数留了口子）。
 - **fail-closed。** 配置了 `macos` 但 sandbox-exec 不可用（Linux、文件被删）时，命令不执行、返回错误，
@@ -457,8 +470,38 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 - **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
   非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
 - 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`；
-  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目同样要信任。
+  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目、`unix_sockets` 放行的套接字同样要信任。
 
+### 本机 IPC：沙箱外的进程替它执行
+
+文件规则只管这个进程自己读写什么。可它还能请本机别的进程代劳，那些进程不在沙箱里：
+
+- `docker.sock`：`docker run -v ~:/h alpine rm -rf /h`，删的是真实的家目录，写入边界形同虚设；
+- tmux、screen 的套接字：往一个开着的终端里敲命令；ssh-agent 的套接字：不读私钥文件也能用私钥登录；
+- LaunchServices 与 Apple 事件：`open` 拉起任意程序，`osascript` 让终端执行命令；launchd：`launchctl` 提交后台任务；
+- 钥匙串与剪贴板：`git credential-osxkeychain get` 吐出 GitHub 令牌，`pbpaste` 读到用户刚复制的口令。
+
+这些通道都在实机上做过对照实验：探针只在临时目录里 touch 一个标记文件，钥匙串只查锁定设置、不碰口令。
+
+| 通道 | 不加限制时 | 加了规则之后 |
+|---|---|---|
+| `docker.sock` | 连得上守护进程 | `permission denied` |
+| ssh-agent | 列出已加载的私钥 | `Operation not permitted` |
+| `open` 拉起探针程序 | 标记文件出现，程序在沙箱外运行 | 拉不起来；`coreservices` 下的服务单独拒绝哪一个都还有退路，只能整组拒绝 |
+| `launchctl submit` / `bootstrap` | 沙箱外执行成功 | 沙箱里本来就被 launchd 拒绝，`(deny job-creation)` 写明而不依赖它 |
+| 钥匙串、剪贴板 | 读得到 | 读不到 |
+
+规则加上之后，DNS 解析、`curl` / `git` / Python / Node 的 HTTPS、`xcrun`、`brew`、`osascript` 本地计算照常可用：
+TLS 证书校验走 `trustd`，不受影响。`tests/test_backlog.py` 核对 Unix 套接字（三种网络策略，含 `unix_sockets` 放行）与钥匙串。
+
+本机数据库常用 Unix 套接字连接（Homebrew 的 PostgreSQL 默认是 `/tmp/.s.PGSQL.5432`）。沙箱里要用的，逐个列出：
+
+```toml
+[permissions]
+unix_sockets = ["/tmp/.s.PGSQL.5432"]
+```
+
+列出的套接字任何网络策略下都放行，所以它和白名单条目一样，写在项目配置里要先信任。
 
 ### 出站白名单
 
@@ -510,28 +553,34 @@ Seatbelt 的网络规则只认 `localhost` 或 `*` 加端口，写不了主机�
 
 ```text
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-ipc --die-with-parent --new-session
-      [--unshare-net --tmpfs /run]                  # sandbox_network = "deny"
-      --bind /tmp /tmp --bind <工作区> <工作区>       # 可写：临时目录与工作区
+      --tmpfs /run                                   # docker.sock、D-Bus、XDG_RUNTIME_DIR 里的套接字都不出现
+      [--unshare-net]                                # sandbox_network = "deny"
+      --bind <本会话私有目录> /tmp                     # X11、tmux、ssh-agent 的套接字不出现；命令之间照样共用
+      --bind /var/tmp /var/tmp --bind <工作区> <工作区>  # 可写：临时目录与工作区
       --ro-bind <工作区>/.flywhl <工作区>/.flywhl     # harness 状态与项目配置再只读挂回去
-      --tmpfs ~/.ssh --ro-bind /dev/null ~/.netrc ...  # 凭证位置：目录换成空目录，文件换成空文件
-      --chdir <工作区> /bin/bash -c '<命令>'
+      --tmpfs ~/.ssh --ro-bind /dev/null <工作区>/sub/.netrc ...  # 凭证位置：目录换成空目录，文件换成空文件
+      --bind /tmp/.s.PGSQL.5432 /tmp/.s.PGSQL.5432   # unix_sockets 列出的挂回来
+      --setenv TMPDIR /tmp --chdir <工作区> /bin/bash -c '<命令>'
 ```
 
 和 macOS 档的差别都来自 bubblewrap 只能按路径挂载、不能按模式拒绝：
 
 | 方面 | macOS（Seatbelt） | Linux（bubblewrap） |
 |---|---|---|
-| 凭证位置 | 按清单正则拒绝，任何路径都算 | 清单落到家目录与工作区下的具体位置；散落在别处的私钥文件认不出 |
+| 凭证位置 | 按清单正则拒绝，任何路径都算 | 家目录按清单查，工作区逐层遍历（跳过 `node_modules`、`.venv` 等依赖目录，超过 5 万个条目拒绝执行）；散落在别处的私钥文件认不出 |
 | 其它进程的环境变量 | 清单里的 `/proc/*/environ` | 新 PID 命名空间，看不到别的进程 |
 | 新建 `flywhl.toml` | 拒绝 | 已存在的只读；还不存在的拦不住新建，新建的项目配置仍要经过信任确认 |
-| `deny` 网络 | 拒绝 IP 连接与 Unix 套接字 | 新网络命名空间；`/run` 换成空目录，遮住 docker.sock、D-Bus 等套接字 |
+| Unix 套接字 | 按连接拒绝，`unix_sockets` 列出的放行 | 只读挂载挡不住连接，只能让它们不出现：`/run` 换成空目录、`/tmp` 换成本会话私有的目录（进程退出时删除），列出的再挂回来。`allow` 档与宿主共用网络命名空间，抽象命名空间里的套接字（部分 X11、D-Bus）仍然连得上 |
+| 钥匙串、`open` 一类 | 拒绝对应的 Mach 服务 | 没有对应物；桌面会话的 D-Bus 在 `/run` 里，一并遮住 |
+| `deny` 网络 | 拒绝 IP 连接与 Unix 套接字 | 新网络命名空间，抽象套接字也隔开了 |
 | `allowlist` 网络 | 支持 | 未实现，配置了就拒绝执行 |
 
 没有 bubblewrap、或它因为用户命名空间被禁用而跑不起来时，命令同样拒绝执行。在 Docker 容器里使用要放开两处默认限制：
 seccomp 会拦下 bubblewrap 需要的 `unshare`（`--security-opt seccomp=unconfined`）；`/proc` 部分路径被遮住，挂新的 `/proc`
 会失败（`--security-opt systempaths=unconfined`），这时 bash 的输出以 `bwrap:` 开头并附上指向本节的提示。不想放开的话，
 直接把容器本身当作沙箱。
-`tests/test_backlog.py` 的 `needs_bwrap` 用例核对凭证遮蔽、`.flywhl/` 只读、写入边界与断网，它们只在有可用 bubblewrap 的 Linux 上运行。
+`tests/test_backlog.py` 的 `needs_bwrap` 用例核对凭证遮蔽（含工作区子目录）、`.flywhl/` 只读、写入边界、宿主套接字不可见与断网，
+它们只在有可用 bubblewrap 的 Linux 上运行。
 这些用例和外层 bwrap 沙箱下的全量测试在 `python:3.12-slim` 一次性容器里跑过（不挂载宿主目录，代码用 tar 流传进去，普通用户运行）。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）

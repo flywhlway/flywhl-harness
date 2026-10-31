@@ -204,6 +204,9 @@ def test_untrusted_project_cannot_open_an_allowlist():
     _, risky = split_untrusted({"permissions": {"sandbox_network": "allowlist", "network_allow": ["evil.example"]}})
     assert risky == ["permissions.sandbox_network = 'allowlist'", "permissions.network_allow = ['evil.example']"]
     assert split_untrusted({"permissions": {"network_allow": []}})[1] == []
+    # 放行的套接字可能连着 docker.sock：仓库里的配置不能自己打开
+    assert split_untrusted({"permissions": {"unix_sockets": ["/var/run/docker.sock"]}})[1] == [
+        "permissions.unix_sockets = ['/var/run/docker.sock']"]
 
 
 def test_bad_allowlist_entry_fails_at_startup(ws):
@@ -234,21 +237,52 @@ async def test_sandbox_allowlist_reaches_only_listed_hosts(ws):
 
 
 @needs_seatbelt
-@pytest.mark.parametrize("network", ["deny", "allowlist"])
-async def test_sandbox_network_policies_block_unix_sockets(ws, network):
-    """DNS 查询走 mDNSResponder 的 Unix 套接字，数据能编码进域名带出去；docker.sock 能起带网络的容器。"""
+@pytest.mark.parametrize("network", ["allow", "deny", "allowlist"])
+async def test_sandbox_blocks_unix_sockets_unless_listed(ws, network):
+    """Unix 套接字连着本机守护进程：docker.sock 能起挂载家目录的容器，tmux 能替命令在沙箱外执行。任何网络策略下都拒绝，
+    unix_sockets 列出的才放行（本机数据库这类）。deny / allowlist 下连 DNS 也不放：查询能把数据编码进域名带出去。"""
     d = tempfile.mkdtemp(prefix="fw", dir="/tmp")   # Unix 套接字路径不能超过 104 字节
-    sock = os.path.join(d, "s")
-    server = await asyncio.start_unix_server(lambda r, w: w.close(), sock)
-    cmd = f'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" {sock} 2>&1 | tail -1'
-    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": cmd}}]}, "好"],
-                     permissions__mode="bypass", permissions__sandbox="macos", permissions__sandbox_network=network)
+    hidden, listed = os.path.join(d, "h"), os.path.join(d, "l")
+    probe = 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {} 2>&1 | tail -1'
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": probe.format(p)}}]} for p in (hidden, listed)]
+                     + ["好"], permissions__mode="bypass", permissions__sandbox="macos", permissions__sandbox_network=network,
+                     permissions__unix_sockets=[listed])
+    servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p) for p in (hidden, listed)]
     try:
-        async with server:
-            out = tool_ends((await h.run("连一下")).events)[0]["content"]
+        async with servers[0], servers[1]:
+            out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    assert "PermissionError" in out, out
+    assert "PermissionError" in out[0] and "CONNECTED" in out[1], out
+
+
+def test_seatbelt_profile_closes_local_ipc():
+    """钥匙串、剪贴板、LaunchServices / Apple 事件（open、osascript）、launchd 任务：任何网络策略下都拒绝。
+    实测见文档“本机 IPC”；放行写在拒绝之后，否则不生效。"""
+    from flywhl_harness.tools.sandbox import seatbelt_profile
+
+    allow = seatbelt_profile("/ws", writable=[], env={}, unix_sockets=["/tmp/.s.PGSQL.5432"])
+    deny = seatbelt_profile("/ws", writable=[], env={}, network="deny")
+    for p in (allow, deny):
+        assert all(s in p for s in ('"com.apple.SecurityServer"', '"com.apple.securityd.xpc"', '"com.apple.pasteboard.1"',
+                                    "coreservices", "(deny job-creation)", "(deny network-outbound (remote unix-socket))"))
+    assert "mDNSResponder" in allow and "mDNSResponder" not in deny
+    assert allow.index('"/tmp/.s.PGSQL.5432"') > allow.index("(deny network-outbound (remote unix-socket))")
+
+
+@needs_seatbelt
+async def test_sandbox_blocks_keychain(ws):
+    """钥匙串是 macOS 的凭证库，git credential-osxkeychain、security 命令都经 SecurityServer 取口令。
+    这里只查系统钥匙串的锁定设置，不碰任何口令；不依赖 HOME（测试里的 HOME 是空的临时目录）。"""
+    keychain = "/Library/Keychains/System.keychain"
+    if subprocess.run(["security", "show-keychain-info", keychain], capture_output=True).returncode != 0:
+        pytest.skip("本机查不了系统钥匙串的设置")
+    # 路径用变量拼出来：字面的 Library/Keychains 在策略层就被拒了，走不到沙箱
+    cmd = "K=/Library/Key; security show-keychain-info ${K}chains/System.keychain; echo EXIT=$?"
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": cmd}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="macos")
+    out = tool_ends((await h.run("查一下")).events)[0]["content"]
+    assert "EXIT=0" not in out and "EXIT=" in out, out
 
 
 def test_cli_net_allow_turns_on_the_allowlist(tmp_path):
@@ -294,17 +328,21 @@ async def test_egress_proxy_checks_resolved_addresses():
 
     table = {"api.ok.test": ["127.0.0.1"], "meta.ok.test": ["169.254.169.254"], "intra.ok.test": ["10.0.0.5"],
              "mapped.ok.test": ["::ffff:127.0.0.1"], "cdn.ok.test": ["198.18.0.7"], "db.corp": ["10.0.0.6"],
-             "localhost": ["::1", "127.0.0.1"]}
+             "localhost": ["::1", "127.0.0.1"], "cgnat.ok.test": ["100.64.1.1"], "nat64.ok.test": ["64:ff9b::a9fe:a9fe"],
+             "aliyun-meta.corp": ["100.100.100.200"], "aws-meta6.corp": ["fd00:ec2::254"], "tailnet.corp": ["100.64.1.2"]}
 
     async def resolve(host, port):
         return [ipaddress.ip_address(a) for a in table[host]]
 
-    proxy = EgressProxy(parse_rules(["*.ok.test", "db.corp", "localhost:5432"]), resolve=resolve)
-    for host in ("api.ok.test", "meta.ok.test", "intra.ok.test", "mapped.ok.test"):
+    proxy = EgressProxy(parse_rules(["*.ok.test", "db.corp", "localhost:5432", "aliyun-meta.corp", "aws-meta6.corp",
+                                     "tailnet.corp"]), resolve=resolve)
+    for host in ("api.ok.test", "meta.ok.test", "intra.ok.test", "mapped.ok.test", "cgnat.ok.test", "nat64.ok.test",
+                 "aliyun-meta.corp", "aws-meta6.corp"):   # 云元数据地址写全名也不放：它们落在 CGNAT、内网段里
         with pytest.raises(EgressDenied, match=host):
             await proxy.vet(host, 443)
     assert await proxy.vet("cdn.ok.test", 443) == ["198.18.0.7"]    # TUN 代理的 fake-ip 网段按公网处理
     assert await proxy.vet("db.corp", 443) == ["10.0.0.6"]          # 写全名的规则可以连内网
+    assert await proxy.vet("tailnet.corp", 443) == ["100.64.1.2"]   # CGNAT 段（Tailscale 等）同样按内网
     assert await proxy.vet("localhost", 5432) == ["::1", "127.0.0.1"]
 
 
@@ -359,9 +397,14 @@ async def test_linux_sandbox_hides_credentials_and_guards_harness_state(ws):
     (home / ".ssh").mkdir(parents=True)
     (home / ".ssh" / "id_ed25519").write_text("CANARY-SSH\n")
     (home / ".netrc").write_text("CANARY-NETRC\n")
+    # 测试里 HOME 在 /tmp 下，会被私有 /tmp 整个盖住；遮蔽本身要靠工作区里各层的凭证来核对
+    (ws / "sub").mkdir()
+    (ws / "sub" / ".netrc").write_text("CANARY-WS-NETRC\n")
+    (ws / "deploy" / ".aws").mkdir(parents=True)
+    (ws / "deploy" / ".aws" / "credentials").write_text("CANARY-WS-AWS\n")
     (ws / ".flywhl").mkdir(exist_ok=True)
     # 路径与文件名都用变量拼出来：命令分析认不出（字面的 ~/.ssh、id_ed25519 在策略层就被拒了，走不到沙箱），只能靠沙箱兜住
-    cmds = ["D=$HOME/.ss; K=id_ed; N=$HOME/.ne; cat ${D}h/${K}25519 ${N}trc 2>&1; echo END",
+    cmds = ["D=$HOME/.ss; K=id_ed; N=$HOME/.ne; W=sub/.ne; A=deploy/.aw; cat ${D}h/${K}25519 ${N}trc ${W}trc ${A}s/cred* 2>&1; echo END",
             "echo hi > inside.txt && cat inside.txt",
             "touch .flywhl/planted 2>/dev/null && echo WROTE || echo READONLY"]
     h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
@@ -370,6 +413,42 @@ async def test_linux_sandbox_hides_credentials_and_guards_harness_state(ws):
     assert "CANARY" not in out[0] and "END" in out[0], out[0]
     assert out[1].startswith("hi") and out[2].startswith("READONLY"), out
     assert not (ws / ".flywhl" / "planted").exists()
+
+
+def test_workspace_credentials_walks_every_level(tmp_path, monkeypatch):
+    """Linux 档只能按路径遮蔽：工作区子目录里的凭证也要找出来（目录本身是凭证位置的整个算上）；依赖目录跳过；
+    条目多到数不完时拒绝执行，不留漏网的。"""
+    from flywhl_harness.tools import sandbox
+
+    for rel in ("deploy/.aws/credentials", "keys/id_rsa_prod", "sub/dir/.netrc", ".ssh/config", "node_modules/pkg/.netrc",
+                "src/app.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    found = {os.path.relpath(p, tmp_path) for p in sandbox.workspace_credentials(str(tmp_path))}
+    assert found == {"deploy/.aws", "keys/id_rsa_prod", "sub/dir/.netrc", ".ssh"}
+    monkeypatch.setattr(sandbox, "_WALK_LIMIT", 3)
+    with pytest.raises(RuntimeError, match="没法逐个确认"):
+        sandbox.workspace_credentials(str(tmp_path))
+
+
+@needs_bwrap
+async def test_linux_sandbox_hides_host_sockets_but_keeps_session_tmp(ws):
+    """宿主 /tmp 里的 tmux、ssh-agent、X11 套接字，只读挂载也挡不住连接：沙箱里的 /tmp 换成本会话私有的目录，
+    命令之间照样能用它传文件；unix_sockets 列出的套接字挂回来。"""
+    d = tempfile.mkdtemp(prefix="fw", dir="/tmp")
+    hidden, listed = os.path.join(d, "h"), os.path.join(d, "l")
+    probe = 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {} 2>&1 | tail -1'
+    cmds = [probe.format(hidden), probe.format(listed), "echo kept > /tmp/keep.txt", "cat /tmp/keep.txt"]
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
+                     permissions__mode="bypass", permissions__sandbox="linux", permissions__unix_sockets=[listed])
+    servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p) for p in (hidden, listed)]
+    try:
+        async with servers[0], servers[1]:
+            out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert "CONNECTED" not in out[0] and "CONNECTED" in out[1], out
+    assert out[3].startswith("kept") and not os.path.exists("/tmp/keep.txt"), out
 
 
 @needs_bwrap

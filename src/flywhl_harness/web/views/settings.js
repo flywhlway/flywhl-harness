@@ -30,7 +30,7 @@ function posture(s) {
       ? { tone: "bad", icon: "box", label: "命令沙箱", value: "未启用，bash 会被拒绝",
           why: `配置了网络策略 ${sb.network}，它要靠系统沙箱执行；没有沙箱时 bash 一律拒绝，不悄悄联网。请同时设置 permissions.sandbox` }
       : { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `${LEVEL[sb.level] || sb.level} · ${NET[sb.network]}`,
-          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos / linux 开启" : "凭证位置不可读，写入只限工作区与临时目录" },
+          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos / linux 开启" : "凭证位置与钥匙串不可读，写入只限工作区与临时目录，本机套接字只放行列出的" },
     { tone: P.strip_secret_env ? "ok" : "warn", icon: "eye", label: "密钥剥离", value: P.strip_secret_env ? "已启用" : "已关闭",
       why: P.strip_secret_env ? "bash 子进程看不到名字像密钥的环境变量，模型执行 env 也读不到" : "bash 子进程继承全部环境变量，包括 API Key" },
     { tone: s.snapshots ? "ok" : "warn", icon: "history", label: "写前快照", value: s.snapshots ? "已启用" : "已关闭",
@@ -48,7 +48,7 @@ function netLabel(sb) {
   if (sb.network === "deny") return "禁止对外连接（含 DNS 查询与本机套接字）";
   if (sb.network === "allowlist" && sb.level === "linux") return `${esc(NET.allowlist)}<div class="muted">Linux 沙箱还不支持，bash 命令会被拒绝</div>`;
   if (sb.network === "allowlist") return sb.allow.length ? `只经出站代理连接：${sb.allow.map(code).join(" ")}` : "白名单为空，等同禁止联网";
-  return "不限";
+  return "不限外网；本机 Unix 套接字除 DNS 外只放行列出的";
 }
 
 const kv = (rows) => `<dl class="kv wide">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
@@ -78,6 +78,7 @@ function render(inner, s, app) {
         `${esc(s.tools)} 个工具`)}
       ${card("terminal", "命令执行", kv([["系统沙箱", s.sandbox.level === "off" ? none("未启用") : esc(s.sandbox.level)],
         ["沙箱网络", netLabel(s.sandbox)],
+        ...(s.sandbox.level === "off" ? [] : [["放行的套接字", s.sandbox.unix_sockets.length ? s.sandbox.unix_sockets.map(code).join(" ") : none("无")]]),
         ["密钥剥离", P.strip_secret_env ? "已启用" : "已关闭"], ["写前快照", s.snapshots ? "已启用" : "已关闭"],
         ["完成验收", s.verify_command ? code(s.verify_command) : none("未配置")]]))}
       ${card("lock", "访问控制", kv([["访问令牌", s.access.token ? "已启用" : "已关闭"],

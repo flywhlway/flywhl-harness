@@ -72,7 +72,7 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 ## 配置信任
 
-启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、关闭沙箱等放宽项。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
+启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、关闭沙箱、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
 
 `.env` 同理：默认只读取各家密钥与模型选择，地址、代理、权限模式等变量被忽略；确实需要时写进环境变量，或用 `--env-file` 显式加载。
 
@@ -87,7 +87,7 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 - 文件工具经 `Workspace.resolve()` 解析路径并跟随符号链接，越出工作区即拒绝。
 - 写操作前打影子 git 快照（`.flywhl/shadow.git`，不碰你自己的 `.git`），可在 Web 的“历史”页回滚。
-- macOS 上设 `sandbox = "macos"`，bash 跑在 sandbox-exec 里：凭证位置由内核拒绝，写入限于工作区与临时目录；再设 `sandbox_network = "deny"` 可断网，设 `"allowlist"` 并在 `network_allow` 里列出主机，就只能连这些主机。它是原型级隔离，生产环境请用容器或 microVM。
+- macOS 上设 `sandbox = "macos"`（Linux 上是 `"linux"`，用 bubblewrap），bash 跑在系统沙箱里：凭证位置由内核拒绝，写入限于工作区与临时目录，docker.sock、ssh-agent、钥匙串、`open` 这类能让沙箱外的进程代劳的通道也被拒绝（本机数据库的套接字可以在 `unix_sockets` 里放行）；再设 `sandbox_network = "deny"` 可断网，macOS 上设 `"allowlist"` 并在 `network_allow` 里列出主机，就只能连这些主机。它是原型级隔离，生产环境请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。
 
 深入阅读：[16 Hooks](/governance/hooks)、[17 权限与人审](/governance/permissions-hitl)、[18 Workspace 与沙箱](/governance/workspace-sandbox)、[19 安全](/governance/security)。

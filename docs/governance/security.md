@@ -71,8 +71,8 @@ SQL 注入能被参数化查询根治，因为数据库在语法层面区分代�
 | 最小权限 | 只给完成任务所需的工具与路径 | 四种模式、规则、plan 模式、子代理可配置工具集 | MCP 工具的只读、幂等等级取自服务器自报的 annotations |
 | 关键动作人审 | 有副作用的动作由人确认 | 审批对象携带实际参数、命令分析与 diff 预览；灾难性命令与 bash 碰凭证位置不进审批、直接拒绝 | `on_ask="allow"`（`--yes`）会放行所有 ask |
 | 凭据隔离 | 模型和工具执行环境拿不到原始凭据 | 托管基线拒绝读取密钥路径，bash 命中同一档位置同样拒绝；bash 与 MCP 服务器子进程剥离密钥环境变量 | 只按变量名剥离；bash 的混淆写法认不出；命令 hook 继承完整环境 |
-| 输出过滤 | 出站内容脱敏、阻止外发 | PostToolUse 可改写结果 | 流式 `tool_update` 不经过 PostToolUse；出口只能用沙箱整体断网，没有白名单 |
-| 沙箱兜底 | 操作系统级隔离 | macOS sandbox-exec 与 Linux bubblewrap 档位（原型，`permissions.sandbox = "macos"` / `"linux"`），见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) | 只包 bash，收紧文件访问与网络；默认关闭；Linux 档按具体路径遮蔽凭证，还没有出站白名单 |
+| 输出过滤 | 出站内容脱敏、阻止外发 | PostToolUse 可改写结果 | 流式 `tool_update` 不经过 PostToolUse；出口靠沙箱：整体断网，或 macOS 上只放行白名单主机 |
+| 沙箱兜底 | 操作系统级隔离 | macOS sandbox-exec 与 Linux bubblewrap 档位（原型，`permissions.sandbox = "macos"` / `"linux"`），见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) | 只包 bash，收紧文件访问、网络与本机 IPC（docker.sock、钥匙串、`open` 一类让沙箱外进程代劳的通道）；默认关闭；Linux 档按具体路径遮蔽凭证，还没有出站白名单 |
 | 审计 | 可还原发生了什么 | 事件流、`approvals` 表、轨迹导出 | — |
 
 下面挑几处展开。
@@ -335,7 +335,7 @@ OWASP 发布了面向 Agentic 应用的 Top 10（2026 版）。下表按其中�
 | 工具滥用 | 合法工具被用于非预期目的 | 最小工具集、参数级规则、命令分析 | 规则、复合命令防搭便车、`analyze()` |
 | 身份与权限滥用 | Agent 继承或扩大了不该有的权限 | 工作负载身份、短期令牌、凭据代持 | 托管基线、环境变量剥离 |
 | 供应链 | 恶意 MCP 服务器、技能、依赖 | 准入、签名、锁版本、隔离运行 | MCP 命名空间；项目配置里的 hook / MCP 先信任再生效；其余未实现 |
-| 意外代码执行 | 模型生成并执行了危险代码 | 沙箱、命令分析、人审 | 命令分析 + 人审；灾难性命令任何模式下拒绝；可选的 macOS sandbox-exec 档位（只收紧文件访问） |
+| 意外代码执行 | 模型生成并执行了危险代码 | 沙箱、命令分析、人审 | 命令分析 + 人审；灾难性命令任何模式下拒绝；可选的 macOS / Linux 沙箱档位（文件访问、网络、本机 IPC） |
 | 记忆与上下文投毒 | 污染长期记忆、压缩摘要、项目指令 | 记忆写入审阅、来源追踪、压缩时保留来源 | `AGENTS.md` 可关闭加载；压缩摘要不保留污点信息 |
 | 不安全的 Agent 间通信 | 子代理 / 对等 Agent 之间传递被篡改或注入的消息 | 结构化契约、校验、来源标注 | 子代理回传契约校验；子代理的污点向父 Run 传播 |
 | 级联故障 | 一个 Agent 的错误在多 Agent 系统中放大 | 预算、熔断、隔离失败域 | 预算与循环守卫、模型调用熔断 |
