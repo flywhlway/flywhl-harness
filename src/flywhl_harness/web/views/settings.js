@@ -72,7 +72,8 @@ function render(inner, s, app) {
         <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
         <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div></li>`).join("")}</ul>`
         : `<p class="muted">没有配置命令 hook。</p>`, s.hooks.length ? `${s.hooks.length} 个` : "")}
-      ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
+      ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具
+        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
       ${card("gauge", "单次运行预算", kv([["最多轮次", fmt.int(B.max_turns)], ["最多工具调用", fmt.int(B.max_tool_calls)],
         ["token 上限", B.max_total_tokens ? fmt.int(B.max_total_tokens) : none("不限")], ["费用上限", B.max_cost_usd ? esc("$" + B.max_cost_usd) : none("不限")],
         ["墙钟上限", B.max_wall_seconds ? esc(fmt.dur(B.max_wall_seconds)) : none("不限")]]))}

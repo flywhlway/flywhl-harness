@@ -266,9 +266,18 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
     @app.get("/api/settings")
     async def settings() -> dict[str, Any]:
         """「环境与安全」页：当前生效的配置（只读）。改配置走 flywhl.toml 与信任确认，页面不提供写入口——
-        否则拿到控制台的人就能绕过信任机制给 Agent 放权。MCP 只给名字与工具数：启动参数里常带密钥。"""
+        否则拿到控制台的人就能绕过信任机制给 Agent 放权。MCP 只给名字、工具数与注解策略：启动参数里常带密钥。"""
         c, pc = h.config, h.config.permissions
         names = [t.name for t in h.tools]
+
+        def mcp_entry(n: str, spec: dict[str, Any]) -> dict[str, Any]:
+            prefix = f"mcp__{n}__"
+            tools = [t for t in h.tools if t.name.startswith(prefix)]
+            return {"name": n, "transport": "stdio" if spec.get("command") else "http", "tools": len(tools),
+                    "trust_annotations": spec.get("trust_annotations") is True,
+                    "read_only": [t.name.removeprefix(prefix) for t in tools if str(t.effect) == "read"],
+                    "ignored_hints": sum(1 for t in tools if getattr(t, "ignored_hints", None))}
+
         return {
             "workspace": str(h.workspace_root),
             "model": {"provider": h.provider.name, "model": h.model, "fallback": list(c.fallback_models),
@@ -281,8 +290,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
                        "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env})} for hc in c.hooks],   # 只给变量名
-            "mcp": [{"name": n, "transport": "stdio" if spec.get("command") else "http",
-                     "tools": sum(1 for x in names if x.startswith(f"mcp__{n}__"))} for n, spec in c.mcp_servers.items()],
+            "mcp": [mcp_entry(n, spec) for n, spec in c.mcp_servers.items()],
             "budget": dict(c.budget.__dict__), "snapshots": c.snapshots, "verify_command": c.verify_command,
             "tools": len(names),
         }

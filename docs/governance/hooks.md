@@ -386,7 +386,7 @@ flowchart LR
 proc = await asyncio.create_subprocess_shell(
     self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-    env={**os.environ, "FLYWHL_HOOK_EVENT": inp.event}, start_new_session=True,
+    env=self.child_env(inp.event), start_new_session=True,
 )
 try:
     out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
@@ -456,7 +456,7 @@ return res  # 决策取值由 HookBus 统一归一化（approve → allow、bloc
 | JSON 字段 | `continue`、`stopReason`、`decision`+`reason`（含 PreToolUse 里的旧写法 `approve`/`block`）、`permissionDecision`、`updatedInput`、`updatedToolOutput`、`additionalContext` | 不识别 `systemMessage`、`suppressOutput`；`permissionDecision: "defer"` 等未知值被忽略并产生 `hook_warning` |
 | hook 类型 | command | 不支持 http / mcp_tool / prompt / agent 类型 |
 | 执行方式 | — | 串行而非并行 |
-| 环境变量 | — | 子进程继承完整的 `os.environ`（包括 bash 工具会剥离的密钥变量） |
+| 环境变量 | — | 密钥类变量被剥离，规则与 bash 工具相同；脚本确实要用的，在 `env` 里写明取值或在 `pass_env` 里列出变量名 |
 
 在 `flywhl.toml` 里注册：
 
@@ -467,9 +467,14 @@ matcher = "bash"
 command = "python scripts/guard.py"
 timeout = 5
 fail_closed = true      # 拦截类 hook 一定要显式打开
+pass_env = ["SLACK_WEBHOOK_URL"]   # 可选：从当前环境原样传入的变量
+env = { GUARD_LEVEL = "strict" }   # 可选：写明取值的变量
 ```
 
 `Harness.__init__` 把每条配置包装成 `Hook(..., source="project")` 加入 HookBus，工作目录是工作区根。
+子进程的环境由 `CommandHook.child_env()` 生成：先按 bash 工具的规则剥离 `*KEY*`、`*TOKEN*`、带密码的 URL 等变量，
+再叠加 `pass_env` 与 `env`，最后设置 `FLYWHL_HOOK_EVENT`。项目配置里的 `env` 与 `pass_env` 会出现在信任确认里，
+其中 `PATH`、`BASH_ENV`、`DYLD_*` 这类能换掉实际执行程序的变量单独标出；设置页只显示变量名，不显示取值。
 
 ## Stop hook：验收与“阻止次数上限”
 
@@ -529,7 +534,7 @@ Claude Code 的 Stop hook 输入中有类似作用的 `stop_hook_active` 字段�
 
 ## hook 本身是供应链风险点
 
-hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略，`CommandHook` 还继承了完整的环境变量。
+hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，文件系统上的凭证它仍然读得到。
 这意味着：
 
 - **克隆一个仓库就可能执行它的代码。** 如果无条件加载项目配置，`flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。
@@ -539,7 +544,7 @@ hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过
 对应的治理措施：项目级 hook 首次加载或内容变化时要求人工确认——本项目对启动目录的 `flywhl.toml` 按“路径 + 内容哈希”记录信任，
 未信任时不注册其中的 hook（Claude Code 在启动时快照 hook 配置、变更需在 `/hooks` 中审阅，以官方文档为准）；
 用哈希锁定 hook 脚本内容；把 hook 脚本所在目录加入 `deny:write(...)` 规则，防止 Agent 改写自己的护栏；
-给命令 hook 一个最小化的环境，而不是 `os.environ`。更完整的供应链讨论见 [19 安全](/governance/security)。
+给命令 hook 一个最小化的环境（本项目已实现，见上文与 Claude Code 的差异表）。更完整的供应链讨论见 [19 安全](/governance/security)。
 
 ## 典型配方
 

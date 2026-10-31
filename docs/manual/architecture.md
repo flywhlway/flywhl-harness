@@ -67,7 +67,7 @@ sequenceDiagram
 | `todo_write` | READ | 外置计划，只改 harness 内部状态 |
 | `read_ref`、`search_ref` | READ | 分页读取或检索外置结果 |
 | `task` | 由子代理自身把关 | 派生隔离上下文的子代理，只回传结构化结论 |
-| MCP 工具 | 按服务器注解 | 命名为 `mcp__<服务器>__<工具>` |
+| MCP 工具 | EXTERNAL；配置点名的为 READ | 命名为 `mcp__<服务器>__<工具>`；服务器自报的注解默认不采信 |
 
 ## 扩展点
 

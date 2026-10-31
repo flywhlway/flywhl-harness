@@ -151,8 +151,9 @@ async def weather(city: Annotated[str, "城市名，如 上海"], unit: Annotate
 
 注意最后一行：**副作用等级和可中断性是两个独立的维度**。`send_notification`（`tools/demo.py`）是 `EXTERNAL`、
 不可中断、幂等并实现了 `reconcile`；一个调用外部只读 API 的工具可以是 `READ` 但请求一旦发出就不该中断。
-MCP 工具的映射就是例子：`readOnlyHint` 为真则 `READ` 且可中断，否则 `EXTERNAL` 且不可中断；`openWorldHint` 映射为
-`untrusted_output`，按 MCP 规范默认为 true（`tools/mcp.py::MCPTool.__init__`）。
+MCP 工具的映射就是例子：配置点名只读（或采信服务器的 `readOnlyHint`）则 `READ` 且可中断，否则 `EXTERNAL` 且不可中断；
+输出默认视为不可信（`untrusted_output`），只有采信注解且服务器声明 `openWorldHint: false` 时例外（`tools/mcp.py::MCPTool.__init__`）。
+注解是服务器的自我声明，默认不采信，见 [27 协议生态](/advanced/protocols)。
 
 超时与取消的处理方式看的是同一件事：**副作用发出之后，“没收到回复”不等于“没有发生”**。本地命令超时可以杀掉进程组、
 如实说“已中止”；付款、发通知这类非幂等的外部调用超时，结果只能是“未知”——执行器给出 `status=unknown`，

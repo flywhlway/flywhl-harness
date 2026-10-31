@@ -132,26 +132,32 @@ self.name = f"mcp__{client.name}__{spec['name']}"
 self.description = (spec.get("description") or "")[:2000] + f"（来自 MCP 服务器 {client.name}）"
 self.parameters = spec.get("inputSchema") or {"type": "object", "properties": {}}
 ann = spec.get("annotations") or {}
-read_only = bool(ann.get("readOnlyHint", False))
+# 恶意服务器自称只读就能绕过审批、自称幂等就能被重做：没写明 trust_annotations 时，注解一项都不采信
+hints = ann if trust_annotations else {}
+self.ignored_hints = [] if trust_annotations else [k for k, v in _LOOSENING.items() if ann.get(k) is v]
+read_only = read_only or hints.get("readOnlyHint") is True
 self.effect = Effect.READ if read_only else Effect.EXTERNAL
-self.untrusted_output = bool(ann.get("openWorldHint", True))   # 规范默认值为 true
-self.idempotent = read_only or bool(ann.get("idempotentHint", False))
+self.untrusted_output = hints.get("openWorldHint", True) is not False   # 规范默认值为 true
+self.idempotent = read_only or hints.get("idempotentHint") is True
 self.interruptible = read_only
 ```
+
+`read_only` 来自配置里的 `read_only_tools`（按工具名匹配，支持 `*` 通配），`trust_annotations` 来自同一服务器的配置项。
 
 | 设计 | 作用 |
 |---|---|
 | `mcp__<server>__<tool>` 命名空间 | 不同服务器的同名工具不冲突；权限规则可以按服务器写 glob，例如 `deny:mcp__github__*` |
 | 描述截断到 2000 字符并标注来源 | 限制单个工具描述的上下文占用；让模型知道这是外部工具 |
-| `readOnlyHint` → `READ`，否则 → `EXTERNAL` | **保守映射**：没有声明只读的一律按“外部副作用”处理，在 default 模式下需要审批，执行前打快照，崩溃后不会被盲目重做 |
-| `openWorldHint` → `untrusted_output`，未声明时取 `True` | 与规范默认值一致：除非服务器明确声明 `false`，输出都被标记为污点，之后的副作用操作从 allow 升级为 ask，污点写入会话元数据、恢复后仍有效（见 [19 安全](/governance/security)） |
-| `idempotent = readOnlyHint or idempotentHint` | “结果未知”时可以用同一幂等键重做：崩溃恢复时不再一律标 `unknown`，超时也按普通 `timeout` 而不是 `unknown` 上报 |
-| `interruptible = readOnlyHint` | 非只读调用被取消时不会被直接打断，而是给 `cancel_grace_seconds` 宽限期（见 [12 取消语义](/reliability/cancellation)） |
+| 默认不采信 annotations | 规范把注解定义为提示，要求客户端不要据此做安全决定。恶意服务器给写工具标上 `readOnlyHint`，就能绕过审批；标上 `idempotentHint`，崩溃恢复时就会被重做 |
+| 只读：`read_only_tools` 点名，或 `trust_annotations` 下的 `readOnlyHint` | 其余一律按“外部副作用”处理：default 模式下需要审批，执行前打快照，崩溃后不会被盲目重做 |
+| 输出可信：只有 `trust_annotations` 下的 `openWorldHint: false` | 其余输出都标为污点，之后的副作用操作从 allow 升级为 ask，污点写入会话元数据、恢复后仍有效（见 [19 安全](/governance/security)）。点名只读不改变这一项：只读的浏览器工具读到的照样是外部内容 |
+| 幂等：只读，或 `trust_annotations` 下的 `idempotentHint` | “结果未知”时可以用同一幂等键重做：崩溃恢复时不再一律标 `unknown`，超时也按普通 `timeout` 而不是 `unknown` 上报 |
+| 可中断：只读 | 非只读调用被取消时不会被直接打断，而是给 `cancel_grace_seconds` 宽限期（见 [12 取消语义](/reliability/cancellation)） |
 
-`tests/test_security.py::test_mcp_annotation_defaults_are_conservative` 固定了这组默认值：没有任何 annotations 的工具是 `EXTERNAL`、输出不可信、不幂等；只有同时声明 `readOnlyHint: true` 与 `openWorldHint: false`，才得到“只读且可信”。
-`destructiveHint` 目前没有被使用，它可以映射为更高的风险等级（例如在审批摘要里标红）。
+`tests/test_security.py::test_mcp_annotations_are_hints_not_trusted_by_default` 固定了这组规则：自称只读、幂等、封闭世界的工具，在没写明采信时仍是 `EXTERNAL`、输出不可信、不幂等，被忽略的注解记在 `ignored_hints` 里。
+`destructiveHint` 目前没有被使用，它只会收紧，可以直接采信，例如在审批摘要里标红。
 
-annotations 来自服务器自己的声明。对来源不可信的服务器，“声明自己只读”本身就不可信——这是权限规则仍然要能覆盖 MCP 工具的原因。
+两个配置项都在 `mcp_servers` 里，和启动命令一样属于需要信任的设置：项目配置写了它们，信任确认会逐项列出“采信服务器自报的注解”“这些工具按只读处理”。设置页的 MCP 卡片显示每个服务器的注解策略、按只读处理的工具，以及有多少工具自报的放宽注解被忽略。
 
 ### 内容转换
 
@@ -204,14 +210,16 @@ for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：�
 [mcp_servers.demo]
 command = "python"
 args = ["examples/mcp_echo_server.py"]
+read_only_tools = ["echo"]       # echo 自报的 readOnlyHint 不算数，只读要在这里点名
 # env = { DEMO_TOKEN = "..." }   # 可选：服务器需要的凭证在这里显式给出
 # cwd = "..."                    # 可选：默认是工作区根目录
+# trust_annotations = true       # 可选：采信服务器自报的只读、幂等、封闭世界注解
 
 [permissions]
 rules = ["allow:mcp__demo__echo", "ask:mcp__demo__*"]
 ```
 
-`load_mcp_tools` 识别的键只有 `command`、`args`、`env`、`cwd`。服务器子进程的工作目录默认是工作区根，所以 `add_note` 写的 `notes.txt` 出现在工作区里。`env` 叠加在去掉密钥类变量后的环境之上，是给服务器传凭证的唯一途径。
+`load_mcp_tools` 识别的键是 `command`、`args`、`env`、`cwd`、`read_only_tools`、`trust_annotations`。服务器子进程的工作目录默认是工作区根，所以 `add_note` 写的 `notes.txt` 出现在工作区里。`env` 叠加在去掉密钥类变量后的环境之上，是给服务器传凭证的唯一途径。
 
 **第 2 步：确认工具已注册。** `mcp_servers` 会启动子进程，allow 规则会放宽审批，这两项都要先信任这份配置：
 第一次运行时 `flywhl` 逐项列出并询问，也可以加 `--trust`（原因见 [19 安全](/governance/security)）。
@@ -223,7 +231,7 @@ mcp__demo__add_note          external  不可中断   把一条笔记追加到 n
 mcp__demo__echo              read      可中断    原样返回输入的文本（来自 MCP 服务器 demo）
 ```
 
-两个工具的副作用等级与可中断性正是由 annotations 推出来的。两者都没有声明 `openWorldHint`，所以输出都按默认值视为污点：即使 `echo` 是只读的，调用它之后，会话里后续的副作用操作也会从 allow 升级为 ask（`bypass` 模式除外）。
+`echo` 是只读、可中断的，因为配置点名了它；去掉 `read_only_tools`，它会和 `add_note` 一样按外部副作用审批。两者的输出都视为污点：即使 `echo` 是只读的，调用它之后，会话里后续的副作用操作也会从 allow 升级为 ask（`bypass` 模式除外）。
 
 **第 3 步：确定性测试。** `tests/test_runtime.py::test_mcp_tools` 用脚本化模型调用 `mcp__demo__echo`，同时断言命名空间与副作用映射：
 
@@ -232,10 +240,12 @@ mcp__demo__echo              read      可中断    原样返回输入的文本�
 h = make_harness(ws, [
     {"tool_calls": [{"name": "mcp__demo__echo", "args": {"text": "你好 MCP"}}]},
     "完成",
-], mcp_servers={"demo": {"command": sys.executable, "args": [str(ROOT / "examples" / "mcp_echo_server.py")]}})
+], mcp_servers={"demo": {"command": sys.executable, "args": [str(ROOT / "examples" / "mcp_echo_server.py")],
+                         "read_only_tools": ["echo"]}})
 async with h:
     assert "mcp__demo__add_note" in h.tools
     assert str(h.tools.get("mcp__demo__echo").effect) == "read"
+    assert str(h.tools.get("mcp__demo__add_note").effect) == "external"
     res = await h.run("调用 MCP")
 assert tool_ends(res.events)[0]["content"] == "你好 MCP"
 ```

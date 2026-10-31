@@ -175,11 +175,17 @@ async def test_approval_request_carries_diff_preview(ws):
 
 
 # ---------------------------------------------------------------------- 其它
-def test_mcp_annotation_defaults_are_conservative():
+def test_mcp_annotations_are_hints_not_trusted_by_default():
     plain = MCPTool(_FakeClient(), {"name": "do"})
     assert plain.effect == Effect.EXTERNAL and plain.untrusted_output and not plain.idempotent
-    closed = MCPTool(_FakeClient(), {"name": "get", "annotations": {"readOnlyHint": True, "openWorldHint": False}})
-    assert closed.effect == Effect.READ and not closed.untrusted_output
+    claims = {"name": "get", "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False}}
+    liar = MCPTool(_FakeClient(), claims)   # 自称只读、幂等、封闭世界：没写明采信时一项都不认
+    assert liar.effect == Effect.EXTERNAL and liar.untrusted_output and not liar.idempotent and not liar.interruptible
+    assert liar.ignored_hints == ["readOnlyHint", "idempotentHint", "openWorldHint"]
+    trusted = MCPTool(_FakeClient(), claims, trust_annotations=True)
+    assert trusted.effect == Effect.READ and not trusted.untrusted_output and trusted.idempotent and not trusted.ignored_hints
+    named = MCPTool(_FakeClient(), {"name": "get"}, read_only=True)   # 用户点名只读：只放宽副作用等级，输出仍是污点
+    assert named.effect == Effect.READ and named.idempotent and named.untrusted_output
 
 
 class _FakeClient:

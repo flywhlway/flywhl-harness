@@ -324,12 +324,39 @@ def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 def _describe(key: str, value: Any) -> list[str]:
     """高危设置写成一行：会执行的命令完整展示（不截断，截断处正好可以藏东西），其余展示取值。"""
     if key == "hooks" and isinstance(value, list) and value:
-        return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}"
+        return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}{_describe_env(h)}"
                 if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
     if key == "mcp_servers" and isinstance(value, dict) and value:
-        return [f"mcp_servers.{name}: 启动 {' '.join(map(str, [s.get('command'), *s.get('args', [])]))!r}"
-                if isinstance(s, dict) else f"mcp_servers.{name} = {s!r}" for name, s in value.items()]
+        return [_describe_mcp(name, s) for name, s in value.items()]
     return [f"{key} = {value!r}"]
+
+
+def _describe_env(spec: dict[str, Any]) -> str:
+    """子进程的 env / pass_env 同样要经过确认：PATH、BASH_ENV、DYLD_* 能换掉命令实际执行的程序，pass_env 会把密钥交出去。"""
+    from .policy.bash_analyzer import BENIGN_ENV   # 延迟导入，与 load() 里的 llm.profiles 同理
+    from .tools.shell import _SECRET_ENV
+
+    env = spec.get("env")
+    parts = [f"设置 {k}=" + ("<已隐藏>" if _SECRET_ENV.search(str(k)) else repr(v))
+             + ("" if BENIGN_ENV.fullmatch(str(k)) else "（可能改变实际执行的程序或加载的代码）")
+             for k, v in (env.items() if isinstance(env, dict) else [])]
+    if spec.get("pass_env"):
+        parts.append(f"从当前环境原样传入 {spec['pass_env']!r}")
+    return "".join(f"；{p}" for p in parts)
+
+
+def _describe_mcp(name: str, spec: Any) -> str:
+    if not isinstance(spec, dict):
+        return f"mcp_servers.{name} = {spec!r}"
+    line = f"mcp_servers.{name}: 启动 {' '.join(map(str, [spec.get('command'), *spec.get('args', [])]))!r}"
+    if spec.get("cwd"):
+        line += f"（目录 {spec['cwd']!r}）"
+    line += _describe_env(spec)
+    if spec.get("trust_annotations"):
+        line += "；采信服务器自报的只读、幂等、封闭世界注解"
+    if spec.get("read_only_tools"):
+        line += f"；这些工具按只读处理，调用不经审批：{spec['read_only_tools']!r}"
+    return line
 
 
 def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],

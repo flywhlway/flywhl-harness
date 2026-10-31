@@ -449,7 +449,7 @@ for j, w in enumerate(args, start=1):
 
 - **污点来源**：`Tool.untrusted_for(args)` 返回 True 的调用，或某次结果带 `ToolResult.tainted = True`。具体有三类：
   - bash：`BashTool.untrusted_for()` 取命令分析的 `network` 标记——`curl`、`wget`、`git pull`、`npm install` 取回的内容可能夹带注入；
-  - MCP 工具：`openWorldHint` 按 MCP 规范默认为 true，服务器没有声明 `openWorldHint: false` 的工具输出一律视为不可信（见 [19 安全](/governance/security)）；
+  - MCP 工具：输出一律视为不可信，只有配置写明 `trust_annotations = true` 且服务器声明 `openWorldHint: false` 时例外（见 [19 安全](/governance/security)）；
   - 子代理：子 Run 读过不可信内容，父 Run 也被标记——注入可以借子代理的回传结论进入父上下文。
 - **传播与持久化**：执行器在每次调用结束后检查，一旦命中就把 `rc.tainted` 置为 True，写入会话元数据 `meta["tainted"]`，
   并发布 `code="tainted"` 的 notice。`_build_rc` 构造 Run 时从会话元数据还原，所以暂停恢复、崩溃接管、同一会话的下一次 Run 都继承污点；
