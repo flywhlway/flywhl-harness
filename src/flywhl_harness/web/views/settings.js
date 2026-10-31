@@ -69,7 +69,8 @@ function render(inner, s, app) {
       ${card("lock", "访问控制", kv([["访问令牌", s.access.token ? "已启用" : "已关闭"],
         ["可信 Host", s.access.any_host ? "任意（依赖令牌）" : s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
       ${card("hook", "Hooks", s.hooks.length ? `<ul class="plain-list">${s.hooks.map((x) => `<li><div class="row1">${code(x.event)}<span class="muted">匹配</span>${code(x.matcher)}
-        <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div></li>`).join("")}</ul>`
+        <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
+        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div></li>`).join("")}</ul>`
         : `<p class="muted">没有配置命令 hook。</p>`, s.hooks.length ? `${s.hooks.length} 个` : "")}
       ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
       ${card("gauge", "单次运行预算", kv([["最多轮次", fmt.int(B.max_turns)], ["最多工具调用", fmt.int(B.max_tool_calls)],

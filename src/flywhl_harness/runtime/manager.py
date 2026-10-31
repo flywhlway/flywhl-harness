@@ -180,7 +180,8 @@ class Harness:
         self.tools = tools if tools is not None else default_tools(self.config, self.data_dir)
         self.hooks = hooks or HookBus()
         for hc in self.config.hooks:
-            self.hooks.add(Hook(hc.event, CommandHook(hc.command, str(self.workspace_root)), name=f"cmd:{hc.command[:30]}",
+            cmd = CommandHook(hc.command, str(self.workspace_root), env=hc.env, pass_env=hc.pass_env)
+            self.hooks.add(Hook(hc.event, cmd, name=f"cmd:{hc.command[:30]}",
                                 matcher=hc.matcher, timeout=hc.timeout, fail_closed=hc.closed, source="project"))
         self.approvals = ApprovalBroker(self.store, on_ask=self.config.permissions.on_ask,
                                         timeout=self.config.permissions.approval_timeout, resolver=approval_resolver)

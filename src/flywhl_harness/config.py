@@ -100,6 +100,9 @@ class HookConfig:
     # 脚本崩溃、超时、输出无法解析时怎么办。None = 按事件决定：pre_tool_use 是守卫，失败即拒绝（fail-closed）；
     # 其它事件只是观察或补充上下文，失败即放行并给出警告
     fail_closed: bool | None = None
+    # 子进程与 bash、MCP 一样剥离密钥类环境变量。确实要用的：env 写明取值，pass_env 列出从 harness 进程原样传入的变量名
+    env: dict[str, str] = field(default_factory=dict)
+    pass_env: list[str] = field(default_factory=list)
 
     @property
     def closed(self) -> bool:

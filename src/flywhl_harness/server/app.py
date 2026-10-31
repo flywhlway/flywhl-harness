@@ -280,7 +280,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "sandbox": {"level": pc.sandbox, "network": pc.sandbox_network},
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
-                       "fail_closed": hc.closed} for hc in c.hooks],
+                       "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env})} for hc in c.hooks],   # 只给变量名
             "mcp": [{"name": n, "transport": "stdio" if spec.get("command") else "http",
                      "tools": sum(1 for x in names if x.startswith(f"mcp__{n}__"))} for n, spec in c.mcp_servers.items()],
             "budget": dict(c.budget.__dict__), "snapshots": c.snapshots, "verify_command": c.verify_command,

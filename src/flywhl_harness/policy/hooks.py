@@ -210,16 +210,26 @@ class CommandHook:
                                 "updatedInput": {...}, "additionalContext": "..."}}
     """
 
-    def __init__(self, command: str, cwd: str | None = None):
+    def __init__(self, command: str, cwd: str | None = None, *, env: dict[str, str] | None = None,
+                 pass_env: list[str] | None = None):
         self.command = command
         self.cwd = cwd
+        self.env = dict(env or {})
+        self.pass_env = list(pass_env or [])
         self.__name__ = f"command:{command.split()[0] if command.split() else command}"
+
+    def child_env(self, event: str) -> dict[str, str]:
+        """与 bash、MCP 子进程一样剥离密钥类环境变量：hook 脚本是第三方代码，它拿到哪些变量，从配置里一眼可见。"""
+        from ..tools.shell import _clean_env   # 延迟导入：tools 依赖 policy
+
+        passed = {k: os.environ[k] for k in self.pass_env if k in os.environ}
+        return {**_clean_env(True), **passed, **self.env, "FLYWHL_HOOK_EVENT": event}
 
     async def __call__(self, inp: HookInput) -> HookOutput | None:
         proc = await asyncio.create_subprocess_shell(
             self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-            env={**os.environ, "FLYWHL_HOOK_EVENT": inp.event}, start_new_session=True,
+            env=self.child_env(inp.event), start_new_session=True,
         )
         try:
             out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
