@@ -4,8 +4,11 @@ Seatbelt 的网络过滤只认 ``localhost`` 或 ``*`` 加端口，写不了主�
 
 1. **内核层**（``tools/sandbox.py``）：对外的 IP 连接、本机 Unix 套接字一律拒绝，只放行到本机代理端口的连接。
    Unix 套接字也要拒绝：DNS 查询走 mDNSResponder 的套接字，数据可以编码进域名查询带出去；docker.sock 能起一个带网络的容器；
-2. **代理层**（本模块）：HTTPS 走 ``CONNECT 主机:端口`` 隧道，代理只看主机名和端口，不解密；纯 HTTP 按绝对 URI 转发。
-   主机不在白名单里就回 403，正文写明主机与配置项，命令输出里看得到原因。主机名由代理解析，沙箱里不需要 DNS。
+2. **代理层**（本模块）：HTTPS 走 ``CONNECT 主机:端口`` 隧道，代理只看主机名和端口，不解密；纯 HTTP 按绝对 URI 转发，
+   Host 头换成判定过的主机。主机不在白名单里就回 403，正文写明主机与配置项，命令输出里看得到原因。
+   主机名由代理解析，沙箱里不需要 DNS。解析出的地址还要再核一遍：代理在沙箱外，能连本机端口与内网，
+   被放行的域名解析到 127.0.0.1 或云元数据地址（169.254.169.254），就等于绕过了内核层。所以回环、链路本地这类地址
+   只有显式的本机规则（``localhost:5432``）才放行，私有地址不接受通配规则；连接用的就是核过的 IP，中间不再解析（防 DNS 重绑定）。
 
 每条命令一个代理实例，监听 127.0.0.1 的临时端口，命令结束就关掉：被拒的主机准确归到这条命令上，命令留在后台的进程也随之断网。
 
@@ -23,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import re
+import socket
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 from urllib.parse import urlsplit
 
 DEFAULT_PORTS = frozenset({80, 443})
@@ -35,6 +40,14 @@ _RULE = re.compile(rf"(\*\.)?{_HOST.pattern}(:(\d{{1,5}}|\*))?")
 _LOCAL = ("localhost", "127.0.0.1")
 _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 _REASONS = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
+# 基准测试网段。TUN 模式的代理软件（fake-ip）把所有域名解析到这里，它不是内网，按公网处理
+_FAKE_IP = ipaddress.ip_network("198.18.0.0/15")
+_SCOPES = {"loopback": "本机回环地址", "local": "链路本地或保留地址", "private": "内网地址"}
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+class EgressDenied(Exception):
+    """主机名在白名单里，解析出的地址却不放行。不继承 OSError：和“连不上”是两回事。"""
 
 
 @dataclass(frozen=True)
@@ -45,6 +58,31 @@ class AllowRule:
     def matches(self, host: str, port: int) -> bool:
         ok = host.endswith(self.host) if self.host.startswith(".") else host == self.host
         return ok and (self.ports is None or port in self.ports)
+
+    def reaches(self, ip: IPAddress) -> bool:
+        """这条规则放行的主机解析到 ``ip`` 时能不能连：公网都行；内网只认写全名的规则；回环只认本机规则。"""
+        scope = _scope(ip)
+        return (scope == "public" or str(ip) == self.host or (scope == "private" and not self.host.startswith("."))
+                or (scope == "loopback" and self.host in _LOCAL))
+
+    def __str__(self) -> str:
+        port = "" if self.ports == DEFAULT_PORTS else ":*" if self.ports is None else f":{min(self.ports)}"
+        return ("*" if self.host.startswith(".") else "") + self.host + port
+
+
+def _scope(ip: IPAddress) -> str:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:   # ::ffff:127.0.0.1 也是回环
+        ip = ip.ipv4_mapped
+    if ip.is_loopback:
+        return "loopback"
+    if ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+        return "local"
+    return "private" if ip.is_private and ip not in _FAKE_IP else "public"
+
+
+async def _getaddrinfo(host: str, port: int) -> list[IPAddress]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [ipaddress.ip_address(str(i[4][0]).split("%")[0]) for i in infos]
 
 
 def parse_rules(entries: Iterable[str]) -> list[AllowRule]:
@@ -88,9 +126,11 @@ def _target(method: str, target: str) -> tuple[str, int, str]:
 class EgressProxy:
     """每条命令一个：只监听 127.0.0.1 的临时端口，``async with`` 退出时关闭并断开所有连接。"""
 
-    def __init__(self, rules: list[AllowRule], *, connect_timeout: float = 30.0):
+    def __init__(self, rules: list[AllowRule], *, connect_timeout: float = 30.0,
+                 resolve: Callable[[str, int], Awaitable[list[IPAddress]]] = _getaddrinfo):
         self.rules = rules
         self.connect_timeout = connect_timeout
+        self.resolve = resolve
         self.denied: list[str] = []
         self.port = 0
         self._server: asyncio.Server | None = None
@@ -118,6 +158,17 @@ class EgressProxy:
     def allowed(self, host: str, port: int) -> bool:
         return any(r.matches(host, port) for r in self.rules)
 
+    async def vet(self, host: str, port: int) -> list[str]:
+        """主机名过了白名单，再核对解析出的地址，按顺序返回可以连的 IP；一个都没有时抛 ``EgressDenied``。"""
+        rules = [r for r in self.rules if r.matches(host, port)]
+        addrs = await self.resolve(host, port)
+        ok = [str(ip) for ip in addrs if any(r.reaches(ip) for r in rules)]
+        if ok:
+            return list(dict.fromkeys(ok))
+        seen = "、".join(dict.fromkeys(f"{ip}（{_SCOPES[_scope(ip)]}）" for ip in addrs)) or "空"
+        raise EgressDenied(f"{host} 解析到 {seen}，白名单规则 {'、'.join(map(str, rules))} 不放行这类地址"
+                           "（回环地址要写 localhost:端口，内网地址要写主机全名）")
+
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         assert task is not None
@@ -135,15 +186,26 @@ class EgressProxy:
                 self.denied.append(f"{host}:{port}")
                 return await _reply(writer, 403, f"出站白名单不包含 {host}:{port}（见 permissions.network_allow）")
             try:
-                ur, upstream = await asyncio.wait_for(asyncio.open_connection(host, port), self.connect_timeout)
+                ips = await asyncio.wait_for(self.vet(host, port), self.connect_timeout)
+            except EgressDenied as e:
+                self.denied.append(f"{host}:{port}")
+                return await _reply(writer, 403, str(e))
             except (OSError, asyncio.TimeoutError) as e:
-                return await _reply(writer, 502, f"连接 {host}:{port} 失败：{e or type(e).__name__}")
+                return await _reply(writer, 502, f"解析 {host} 失败：{e or type(e).__name__}")
+            error: BaseException | None = None
+            for ip in ips:   # 连接用的是核过的 IP，不再按名字解析一次
+                try:
+                    ur, upstream = await asyncio.wait_for(asyncio.open_connection(ip, port), self.connect_timeout)
+                    break
+                except (OSError, asyncio.TimeoutError) as e:
+                    error = e
+            else:
+                return await _reply(writer, 502, f"连接 {host}:{port} 失败：{error or '没有可用地址'}")
             if method.upper() == "CONNECT":
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:   # 每个连接只转发一个请求：同一连接上的下一个请求可能换了主机，要重新判定
-                headers = [h for h in rest.split(b"\r\n") if h and not h.lower().startswith((b"proxy-", b"connection:"))]
-                upstream.write(f"{method} {path} {version}\r\n".encode("latin-1")
-                               + b"\r\n".join([*headers, b"Connection: close"]) + b"\r\n\r\n")
+                upstream.write(f"{method} {path} {version}\r\nHost: {host if port == 80 else f'{host}:{port}'}\r\n".encode("latin-1")
+                               + b"".join(h + b"\r\n" for h in _forward_headers(rest)) + b"Connection: close\r\n\r\n")
             await asyncio.gather(_pipe(reader, upstream), _pipe(ur, writer))
         except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError):
             pass
@@ -152,6 +214,18 @@ class EgressProxy:
                 if w is not None:
                     w.close()
             self._conns.discard(task)
+
+
+def _forward_headers(raw: bytes) -> list[bytes]:
+    """转发给上游的请求头：Host 换成判定过的主机（否则同一台服务器上可以换站点），去掉代理专用头与 Connection；
+    折行续写的旧式头一律丢掉，免得续到别的头后面。"""
+    out = []
+    for line in raw.split(b"\r\n"):
+        name = line.split(b":", 1)[0].strip().lower()
+        if line and line[:1] not in (b" ", b"\t") and b":" in line and name not in (b"host", b"connection") \
+                and not name.startswith(b"proxy-"):
+            out.append(line)
+    return out
 
 
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
@@ -172,4 +246,4 @@ async def _reply(writer: asyncio.StreamWriter, code: int, text: str) -> None:
         await writer.drain()
 
 
-__all__ = ["AllowRule", "EgressProxy", "local_ports", "parse_rules"]
+__all__ = ["AllowRule", "EgressDenied", "EgressProxy", "local_ports", "parse_rules"]

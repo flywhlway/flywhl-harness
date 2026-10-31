@@ -29,8 +29,8 @@ function posture(s) {
     sb.level === "off" && sb.network !== "allow"
       ? { tone: "bad", icon: "box", label: "命令沙箱", value: "未启用，bash 会被拒绝",
           why: `配置了网络策略 ${sb.network}，它要靠系统沙箱执行；没有沙箱时 bash 一律拒绝，不悄悄联网。请同时设置 permissions.sandbox` }
-      : { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `macOS Seatbelt · ${NET[sb.network]}`,
-          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos 开启" : "凭证位置不可读，写入只限工作区与临时目录" },
+      : { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `${LEVEL[sb.level] || sb.level} · ${NET[sb.network]}`,
+          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos / linux 开启" : "凭证位置不可读，写入只限工作区与临时目录" },
     { tone: P.strip_secret_env ? "ok" : "warn", icon: "eye", label: "密钥剥离", value: P.strip_secret_env ? "已启用" : "已关闭",
       why: P.strip_secret_env ? "bash 子进程看不到名字像密钥的环境变量，模型执行 env 也读不到" : "bash 子进程继承全部环境变量，包括 API Key" },
     { tone: s.snapshots ? "ok" : "warn", icon: "history", label: "写前快照", value: s.snapshots ? "已启用" : "已关闭",
@@ -41,10 +41,12 @@ function posture(s) {
 }
 
 const NET = { allow: "网络不限", deny: "禁止联网", allowlist: "出站白名单" };
+const LEVEL = { macos: "macOS Seatbelt", linux: "Linux bubblewrap" };
 /** 沙箱网络一栏：白名单要把放行了哪些主机写出来，空白名单等于禁止联网 */
 function netLabel(sb) {
   if (sb.level === "off") return sb.network === "allow" ? none("不限（沙箱未启用）") : `${esc(NET[sb.network])}<div class="muted">未生效：沙箱未启用，bash 命令会被拒绝</div>`;
   if (sb.network === "deny") return "禁止对外连接（含 DNS 查询与本机套接字）";
+  if (sb.network === "allowlist" && sb.level === "linux") return `${esc(NET.allowlist)}<div class="muted">Linux 沙箱还不支持，bash 命令会被拒绝</div>`;
   if (sb.network === "allowlist") return sb.allow.length ? `只经出站代理连接：${sb.allow.map(code).join(" ")}` : "白名单为空，等同禁止联网";
   return "不限";
 }

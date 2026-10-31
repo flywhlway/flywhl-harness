@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -135,12 +136,13 @@ def test_hook_env_types_are_strict():
 
 
 # ---------------------------------------------------------------------- 出站白名单
-async def _upstream(body: bytes = b"HELLO"):
-    """本机的一个最小 HTTP 服务，充当“白名单里的外部主机”。"""
+async def _upstream(body: bytes = b"HELLO", *, echo: bool = False):
+    """本机的一个最小 HTTP 服务，充当“白名单里的外部主机”。``echo`` 时把收到的请求头原样返回。"""
     async def handle(reader, writer):
         with contextlib.suppress(Exception):
-            await reader.readuntil(b"\r\n\r\n")
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body))
+            head = await reader.readuntil(b"\r\n\r\n")
+            out = head if echo else body
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(out), out))
             await writer.drain()
         writer.close()
 
@@ -267,3 +269,133 @@ def test_cli_parser_builds(cmd, capsys):
     with pytest.raises(SystemExit) as e:
         main([cmd, "--help"])
     assert e.value.code == 0 and "--net-allow" in capsys.readouterr().out
+
+
+async def test_egress_proxy_rewrites_host_header():
+    """纯 HTTP 转发时 Host 头换成判定过的主机：否则连的是放行的服务器，请求的却是同一台机器上的别的站点。"""
+    from flywhl_harness.tools.egress import EgressProxy, parse_rules
+
+    server, port = await _upstream(echo=True)
+    async with server, EgressProxy(parse_rules([f"127.0.0.1:{port}"])) as proxy:
+        r, w = await asyncio.open_connection("127.0.0.1", proxy.port)
+        w.write(f"GET http://127.0.0.1:{port}/x HTTP/1.1\r\nHost: evil.example\r\nProxy-Authorization: x\r\n"
+                "X-Ok: 1\r\n folded: evil\r\n\r\n".encode())
+        seen = (await asyncio.wait_for(r.read(), 5)).split(b"\r\n\r\n", 1)[1]
+        w.close()
+    assert f"Host: 127.0.0.1:{port}".encode() in seen and b"evil" not in seen and b"Proxy-" not in seen
+    assert seen.startswith(b"GET /x HTTP/1.1") and b"X-Ok: 1" in seen
+
+
+async def test_egress_proxy_checks_resolved_addresses():
+    """名字过了白名单，解析出的地址还要再核：代理在沙箱外，解析到本机、元数据地址就等于绕过了内核层。"""
+    import ipaddress
+
+    from flywhl_harness.tools.egress import EgressDenied, EgressProxy, parse_rules
+
+    table = {"api.ok.test": ["127.0.0.1"], "meta.ok.test": ["169.254.169.254"], "intra.ok.test": ["10.0.0.5"],
+             "mapped.ok.test": ["::ffff:127.0.0.1"], "cdn.ok.test": ["198.18.0.7"], "db.corp": ["10.0.0.6"],
+             "localhost": ["::1", "127.0.0.1"]}
+
+    async def resolve(host, port):
+        return [ipaddress.ip_address(a) for a in table[host]]
+
+    proxy = EgressProxy(parse_rules(["*.ok.test", "db.corp", "localhost:5432"]), resolve=resolve)
+    for host in ("api.ok.test", "meta.ok.test", "intra.ok.test", "mapped.ok.test"):
+        with pytest.raises(EgressDenied, match=host):
+            await proxy.vet(host, 443)
+    assert await proxy.vet("cdn.ok.test", 443) == ["198.18.0.7"]    # TUN 代理的 fake-ip 网段按公网处理
+    assert await proxy.vet("db.corp", 443) == ["10.0.0.6"]          # 写全名的规则可以连内网
+    assert await proxy.vet("localhost", 5432) == ["::1", "127.0.0.1"]
+
+
+@needs_seatbelt
+async def test_sandbox_allowlist_reaps_background_processes(ws):
+    """代理随命令关闭，沙箱放行的端口号之后可能被别的服务占用：命令留在后台的进程要一并结束。"""
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "sleep 60 >/dev/null 2>&1 & echo $! > bg.pid"}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="macos", permissions__sandbox_network="allowlist")
+    await h.run("后台跑")
+    pid = int((ws / "bg.pid").read_text())
+    for _ in range(40):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("后台进程在命令结束后仍在运行")
+
+
+# ---------------------------------------------------------------------- Linux 沙箱（bubblewrap）
+def _bwrap_usable() -> bool:
+    if not sys.platform.startswith("linux") or not shutil.which("bwrap"):
+        return False
+    try:
+        return subprocess.run(["bwrap", "--ro-bind", "/", "/", "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def needs_bwrap(fn):
+    for mark in (pytest.mark.os_sandbox, pytest.mark.skipif(not _bwrap_usable(), reason="需要可用的 bubblewrap")):
+        fn = mark(fn)
+    return fn
+
+
+@pytest.mark.parametrize("network", ["allow", "allowlist"])
+async def test_linux_sandbox_fails_closed(ws, network):
+    """没有 bubblewrap（macOS、精简容器），或要求了 Linux 上还没实现的出站白名单：拒绝执行，不退回沙箱外。"""
+    if network == "allow" and _bwrap_usable():
+        pytest.skip("本机有可用的 bubblewrap")
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "touch ran.txt"}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="linux", permissions__sandbox_network=network)
+    end = tool_ends((await h.run("跑")).events)[0]
+    assert "命令未执行" in end["content"] and not (ws / "ran.txt").exists()
+
+
+@needs_bwrap
+async def test_linux_sandbox_hides_credentials_and_guards_harness_state(ws):
+    home = Path(os.environ["HOME"])
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("CANARY-SSH\n")
+    (home / ".netrc").write_text("CANARY-NETRC\n")
+    (ws / ".flywhl").mkdir(exist_ok=True)
+    # 路径与文件名都用变量拼出来：命令分析认不出（字面的 ~/.ssh、id_ed25519 在策略层就被拒了，走不到沙箱），只能靠沙箱兜住
+    cmds = ["D=$HOME/.ss; K=id_ed; N=$HOME/.ne; cat ${D}h/${K}25519 ${N}trc 2>&1; echo END",
+            "echo hi > inside.txt && cat inside.txt",
+            "touch .flywhl/planted 2>/dev/null && echo WROTE || echo READONLY"]
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
+                     permissions__mode="bypass", permissions__sandbox="linux")
+    out = [e["content"] for e in tool_ends((await h.run("看看")).events)]
+    assert "CANARY" not in out[0] and "END" in out[0], out[0]
+    assert out[1].startswith("hi") and out[2].startswith("READONLY"), out
+    assert not (ws / ".flywhl" / "planted").exists()
+
+
+@needs_bwrap
+def test_linux_sandbox_confines_writes(tmp_path):
+    from flywhl_harness.tools.sandbox import bwrap_argv
+
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    subprocess.run(bwrap_argv(f"touch {outside}/x; touch {ws}/y", ws, writable=()), capture_output=True)
+    assert not (outside / "x").exists() and (ws / "y").exists()
+
+
+@needs_bwrap
+@pytest.mark.parametrize("network,reachable", [("allow", True), ("deny", False)])
+async def test_linux_sandbox_network_deny(ws, network, reachable):
+    async def handle(reader, writer):
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    cmd = f"(exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null && echo CONNECTED || echo BLOCKED; ls -A /run | wc -l"
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": cmd}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="linux", permissions__sandbox_network=network)
+    async with server:
+        out = tool_ends((await h.run("连一下")).events)[0]["content"]
+    assert ("CONNECTED" in out) is reachable, out
+    if not reachable:   # /run 换成了空目录：docker.sock、D-Bus 的套接字都看不到
+        assert out.split("\n")[1].strip() == "0", out

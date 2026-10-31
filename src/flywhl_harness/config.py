@@ -85,7 +85,7 @@ class PermissionConfig:
     on_ask: str = "wait"                   # wait（等待人审）| allow | deny（无人值守时）
     approval_timeout: float = 600.0        # 审批超时，超时默认拒绝
     strip_secret_env: bool = True          # bash 子进程剥离 *KEY*/*TOKEN*/*SECRET* 等环境变量
-    sandbox: str = "off"                   # off | macos（bash 跑在 sandbox-exec 里，原型，见 tools/sandbox.py）
+    sandbox: str = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：bash 的系统沙箱，原型，见 tools/sandbox.py
     sandbox_network: str = "allow"         # allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；要求开启沙箱
     network_allow: list[str] = field(default_factory=list)   # 出站白名单：pypi.org、*.github.com、registry.local:5000
 
@@ -274,7 +274,7 @@ _SAFE_KEYS = frozenset({
 })
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
-    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos",),
+    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos", "linux"),
     # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
     "sandbox_network": ("deny",), "network_allow": ([],),
 }

@@ -446,7 +446,8 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
-    common.add_argument("--sandbox", choices=["off", "macos"], help="bash 的系统沙箱（macos：sandbox-exec，原型）")
+    common.add_argument("--sandbox", choices=["off", "macos", "linux"],
+                        help="bash 的系统沙箱（macos：sandbox-exec；linux：bubblewrap；原型）")
     common.add_argument("--network", choices=["allow", "deny", "allowlist"], help="沙箱里的网络策略（要求开启沙箱）")
     common.add_argument("--net-allow", action="append", metavar="HOST",
                         help="出站白名单主机，可重复，如 pypi.org、*.github.com、registry.local:5000")

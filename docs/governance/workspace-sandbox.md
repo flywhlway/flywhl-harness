@@ -446,6 +446,20 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 `tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
 沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界，`tests/test_hardening.py::test_sandbox_network_deny_blocks_outbound_connections` 核对断网。
 
+代价与边界：
+
+- **要用凭证的命令会失败。** `ssh`、`git push`（SSH 协议）、`kubectl`、`gh`、`docker login` 读不到自己的凭证文件——
+  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。
+- **写全局缓存的工具可能失败或退化。** 默认只放开工作区和临时目录，`~/.cache`、`~/Library/Caches`、`~/.npm` 写不进去；
+  原型没有做可配置的白名单（`sandbox_argv()` 的 `writable` 参数留了口子）。
+- **fail-closed。** 配置了 `macos` 但 sandbox-exec 不可用（Linux、文件被删）时，命令不执行、返回错误，
+  不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
+- **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
+  非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
+- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`；
+  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目同样要信任。
+
+
 ### 出站白名单
 
 整体断网太粗：装依赖、拉代码都要联网，于是只能整体放开，被注入的内容驱动外发时就没有最后一道防线。
@@ -465,28 +479,60 @@ Seatbelt 的网络规则只认 `localhost` 或 `*` 加端口，写不了主机�
 2. **代理层**：每条命令启动一个只监听 127.0.0.1 临时端口的代理，命令的 `HTTPS_PROXY` 等变量指向它。HTTPS 走 `CONNECT` 隧道，
    代理只看主机名和端口、不解密；主机不在白名单里就回 403，并在命令结果末尾注明被拦下的主机。主机名由代理解析，沙箱里不需要 DNS。
 
+代理跑在沙箱外，它能连到的地方比沙箱多，所以还有三条规则：
+
+- **解析出的地址再核一遍。** 被放行的域名解析到 127.0.0.1 或云元数据地址（169.254.169.254），就等于借代理绕过了内核层。
+  回环地址只认 `localhost:端口` 这类本机规则，链路本地与保留地址一律不连，内网地址只认写全名的规则（通配子域名里可能有别人控制的名字）；
+  连接用的就是核过的 IP，不再按名字解析第二次，DNS 重绑定换不了目标。TUN 模式代理软件用的 fake-ip 网段（198.18.0.0/15）按公网处理；
+- **纯 HTTP 的 Host 头换成判定过的主机。** 否则连的是放行的服务器，请求的却是同一台机器上的别的站点；
+- **命令结束时清理它的进程组。** 代理随命令关闭，沙箱放行的那个端口号之后可能被别的服务占用，留在后台的进程会连到占用者那里。
+  自己另起会话（`setsid`）的进程不在组里，管不到。
+
 白名单写法：`pypi.org` 只匹配这个主机的 80、443 端口；`*.github.com` 匹配子域名、不含 `github.com` 本身；
 `registry.local:5000`、`example.com:*` 限定或放开端口；`localhost:5432` 这类本机端口还在内核层直接放行，给不支持 HTTP 代理的客户端用。
 写法不对在启动时报错。命令行可以临时指定：`flywhl run --sandbox macos --net-allow pypi.org --net-allow files.pythonhosted.org "装依赖并跑测试"`。
 
-不走代理的连接都连不出去：SSH（包括 `git@github.com:` 和被 `insteadOf` 改写成 SSH 的地址）、`git://`、不读代理环境变量的程序。
-失败是预期的，不会绕过白名单。还有两处边界：代理不解密 TLS，只按 `CONNECT` 的主机名判定，同一 CDN 上可以借域前置访问别的站点，
-所以白名单只放必要的主机；代理自己直连目标，不经过环境里的上游 HTTP 代理，必须经企业代理出网的环境暂不支持。网络策略离不开沙箱：配置了 `deny` 或 `allowlist` 却没开沙箱时，bash 拒绝执行并说明原因，
-不会悄悄连外网；设置页同样标红。`tests/test_backlog.py` 里的出站白名单用例核对了五件事：白名单内经代理和 `CONNECT` 可达、
-白名单外回 403、绕过代理直连本机端口被拒、直连外部地址被拒、Unix 套接字被拒。
+边界：
 
-代价与边界：
+- 不走代理的连接都连不出去：SSH（包括 `git@github.com:` 和被 `insteadOf` 改写成 SSH 的地址）、`git://`、不读代理环境变量的程序。
+  失败是预期的，不会绕过白名单；
+- 代理不解密 TLS，只按 `CONNECT` 的主机名判定。同一 CDN 上可以借域前置访问别的站点（TLS 里的 Host 与外层主机名不同，
+  检查 SNI 也拦不住），所以白名单只放必要的主机；
+- 代理自己直连目标，不经过环境里的上游 HTTP 代理，必须经企业代理出网的环境暂不支持；
+- 网络策略离不开沙箱：配置了 `deny` 或 `allowlist` 却没开沙箱时，bash 拒绝执行并说明原因，不会悄悄连外网；设置页同样标红。
 
-- **要用凭证的命令会失败。** `ssh`、`git push`（SSH 协议）、`kubectl`、`gh`、`docker login` 读不到自己的凭证文件——
-  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。
-- **写全局缓存的工具可能失败或退化。** 默认只放开工作区和临时目录，`~/.cache`、`~/Library/Caches`、`~/.npm` 写不进去；
-  原型没有做可配置的白名单（`sandbox_argv()` 的 `writable` 参数留了口子）。
-- **fail-closed。** 配置了 `macos` 但 sandbox-exec 不可用（Linux、文件被删）时，命令不执行、返回错误，
-  不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
-- **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
-  非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
-- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`；
-  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目同样要信任。
+`tests/test_backlog.py` 里的出站白名单用例在真实 Seatbelt 下核对：白名单内经代理和 `CONNECT` 可达、白名单外回 403、
+绕过代理直连本机端口被拒、直连外部地址被拒、Unix 套接字被拒、命令结束后后台进程被清理；另有不经沙箱的用例核对地址复核与 Host 头重写。
+
+### Linux：bubblewrap 档位
+
+`sandbox = "linux"` 用 bubblewrap（`bwrap`）实现同样的边界，`bwrap_argv()` 生成的参数大致是：
+
+```text
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-ipc --die-with-parent --new-session
+      [--unshare-net --tmpfs /run]                  # sandbox_network = "deny"
+      --bind /tmp /tmp --bind <工作区> <工作区>       # 可写：临时目录与工作区
+      --ro-bind <工作区>/.flywhl <工作区>/.flywhl     # harness 状态与项目配置再只读挂回去
+      --tmpfs ~/.ssh --ro-bind /dev/null ~/.netrc ...  # 凭证位置：目录换成空目录，文件换成空文件
+      --chdir <工作区> /bin/bash -c '<命令>'
+```
+
+和 macOS 档的差别都来自 bubblewrap 只能按路径挂载、不能按模式拒绝：
+
+| 方面 | macOS（Seatbelt） | Linux（bubblewrap） |
+|---|---|---|
+| 凭证位置 | 按清单正则拒绝，任何路径都算 | 清单落到家目录与工作区下的具体位置；散落在别处的私钥文件认不出 |
+| 其它进程的环境变量 | 清单里的 `/proc/*/environ` | 新 PID 命名空间，看不到别的进程 |
+| 新建 `flywhl.toml` | 拒绝 | 已存在的只读；还不存在的拦不住新建，新建的项目配置仍要经过信任确认 |
+| `deny` 网络 | 拒绝 IP 连接与 Unix 套接字 | 新网络命名空间；`/run` 换成空目录，遮住 docker.sock、D-Bus 等套接字 |
+| `allowlist` 网络 | 支持 | 未实现，配置了就拒绝执行 |
+
+没有 bubblewrap、或它因为用户命名空间被禁用而跑不起来时，命令同样拒绝执行。在 Docker 容器里使用要放开两处默认限制：
+seccomp 会拦下 bubblewrap 需要的 `unshare`（`--security-opt seccomp=unconfined`）；`/proc` 部分路径被遮住，挂新的 `/proc`
+会失败（`--security-opt systempaths=unconfined`），这时 bash 的输出以 `bwrap:` 开头并附上指向本节的提示。不想放开的话，
+直接把容器本身当作沙箱。
+`tests/test_backlog.py` 的 `needs_bwrap` 用例核对凭证遮蔽、`.flywhl/` 只读、写入边界与断网，它们只在有可用 bubblewrap 的 Linux 上运行。
+这些用例和外层 bwrap 沙箱下的全量测试在 `python:3.12-slim` 一次性容器里跑过（不挂载宿主目录，代码用 tar 流传进去，普通用户运行）。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）
 
@@ -614,9 +660,9 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
-- macOS sandbox-exec 档位是本项目唯一的系统级隔离（原型）：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
-  可选整体断网（`sandbox_network = "deny"`）或出站白名单（`allowlist`，经本机代理按主机名放行，DNS 与本机套接字一并拒绝）；
+- 系统级隔离只有 macOS sandbox-exec 与 Linux bubblewrap 两个原型档位：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
+  可选整体断网（`sandbox_network = "deny"`）或出站白名单（`allowlist`，仅 macOS：经本机代理按主机名放行，DNS 与本机套接字一并拒绝）；
   “只在沙箱档位下允许 bypass”还是设计草案。
-- 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash 与 MCP 服务器共用）只是最小实现。
+- 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash、MCP 服务器、命令 hook 共用一套规则）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

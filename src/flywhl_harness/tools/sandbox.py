@@ -1,4 +1,4 @@
-"""macOS sandbox-exec 档位（原型）：bash 子进程跑在 Seatbelt 配置下，由内核兜住命令分析漏掉的部分。
+"""系统沙箱档位（原型）：bash 子进程跑在 macOS Seatbelt 或 Linux bubblewrap 里，由内核兜住命令分析漏掉的部分。
 
 命令分析只能看字符串：``D=$HOME/.ku; cat ${D}be/config`` 这种变量拼接、glob、编码过的路径它都看不到，
 bypass 模式下又没有人审，漏掉就是照读。这一档让内核按真实路径判定：
@@ -15,11 +15,23 @@ bypass 模式下又没有人审，漏掉就是照读。这一档让内核按真�
   ``"allowlist"`` 在此基础上只放行到本机出站代理的连接，代理按 ``network_allow`` 判定主机，见 ``tools/egress.py``；
 - 凭证位置读不到，``ssh``、``git push``（SSH 协议）、``kubectl``、``gh`` 这类要用凭证的命令在沙箱里会失败——这一档用能力换安全；
 - ``sandbox-exec`` 已被 Apple 标为 deprecated，但仍随系统提供。不可用时 **拒绝执行**，不悄悄退回沙箱外。
+
+Linux 档（``sandbox = "linux"``）用 bubblewrap，规则对齐 macOS，做法不同：
+
+- bubblewrap 只能按路径挂载，不能按模式拒绝。凭证清单落到家目录与工作区下的具体位置：目录换成空的 tmpfs，文件换成
+  ``/dev/null``；散落在别处的私钥文件（``*id_rsa*``）认不出。``/proc`` 是新 PID 命名空间里的，看不到别的进程的环境变量；
+- 根目录只读挂载，工作区与临时目录可写，``.flywhl/`` 与 ``flywhl.toml`` 再只读挂回去（工作区里还不存在的
+  ``flywhl.toml`` 拦不住新建，新建的项目配置仍要经过信任确认）；
+- ``deny`` 另起网络命名空间（只剩回环），并把 ``/run`` 换成空目录：docker.sock、D-Bus、systemd-resolved 的套接字都在那里，
+  网络命名空间隔不开文件系统上的 Unix 套接字；``allowlist`` 还没有实现，配置了就拒绝执行。
 """
 
 from __future__ import annotations
 
+import glob
 import os
+import pwd
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -28,7 +40,7 @@ from typing import Iterable
 from ..policy.sensitive import CREDENTIAL_GLOBS
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
-SANDBOX_LEVELS = ("off", "macos")
+SANDBOX_LEVELS = ("off", "macos", "linux")
 SANDBOX_NETWORK = ("allow", "deny", "allowlist")
 # 指向凭证位置的环境变量：值是文件的按文件拒绝，是目录的按整个目录拒绝；KUBECONFIG 可以是冒号分隔的多个文件
 _CREDENTIAL_ENV_FILES = ("KUBECONFIG", "AWS_SHARED_CREDENTIALS_FILE")
@@ -104,4 +116,49 @@ def sandbox_argv(command: str, workspace: str | Path, *, writable: Iterable[str]
     return [executable, "-p", profile, "/bin/bash", "-c", command]
 
 
-__all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "SANDBOX_NETWORK", "default_writable", "sandbox_argv", "seatbelt_profile"]
+def _credential_paths(workspace: str, env: dict[str, str]) -> list[str]:
+    """凭证清单在家目录与工作区下的具体位置（只取存在的）。真实家目录与 $HOME 不同时（容器、测试）两个都查。"""
+    bases = {os.path.realpath(os.path.expanduser("~")), os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), workspace}
+    found = set()
+    for g in CREDENTIAL_GLOBS:
+        if g.startswith("*/"):
+            rel = g[2:].removesuffix("/*")
+            found |= {p for base in bases for p in glob.glob(os.path.join(glob.escape(base), rel))}
+        elif "*" not in g and os.path.exists(g):
+            found.add(g)
+    for name in _CREDENTIAL_ENV_FILES:
+        found |= {p for p in env.get(name, "").split(os.pathsep) if p and os.path.exists(p)}
+    found |= {env[n] for n in _CREDENTIAL_ENV_DIRS if env.get(n) and os.path.exists(env[n])}
+    return sorted({os.path.realpath(p) for p in found})
+
+
+def bwrap_argv(command: str, workspace: str | Path, *, writable: Iterable[str] | None = None,
+               env: dict[str, str] | None = None, network: str = "allow", executable: str | None = None) -> list[str]:
+    """把 bash 命令包进 bubblewrap。不可用、或要求了还没实现的出站白名单时抛 ``RuntimeError``，由调用方拒绝执行。"""
+    bwrap = executable or shutil.which("bwrap")
+    if not sys.platform.startswith("linux") or not bwrap or not os.path.exists(bwrap):
+        raise RuntimeError('sandbox = "linux" 需要 Linux 上的 bubblewrap（bwrap），当前环境没有')
+    if network not in SANDBOX_NETWORK:
+        raise ValueError(f"未知的沙箱网络策略 {network!r}（可选：{' | '.join(SANDBOX_NETWORK)}）")
+    if network == "allowlist":
+        raise RuntimeError('Linux 沙箱还不支持出站白名单（sandbox_network = "allowlist"），可以改用 "deny"')
+    ws = os.path.realpath(workspace)
+    argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+            "--unshare-pid", "--unshare-ipc", "--die-with-parent", "--new-session"]
+    if network == "deny":   # 网络命名空间隔不开文件系统上的 Unix 套接字：/run 里的 docker.sock、D-Bus 一并遮住
+        argv += ["--unshare-net", "--tmpfs", "/run"]
+    # 挂载有先后：后挂的盖住先挂的。可写的上层目录先挂，工作区其次，再把 harness 状态与凭证位置盖回去
+    extra = [p for p in ("/tmp", "/var/tmp", tempfile.gettempdir())] if writable is None else list(writable)
+    for p in sorted({os.path.realpath(p) for p in extra if os.path.isdir(p)}, key=len):
+        argv += ["--bind", p, p]
+    argv += ["--bind", ws, ws]
+    for p in (os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml")):
+        if os.path.exists(p):
+            argv += ["--ro-bind", p, p]
+    for p in _credential_paths(ws, dict(os.environ) if env is None else env):
+        argv += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
+    return [*argv, "--chdir", ws, "/bin/bash", "-c", command]
+
+
+__all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "SANDBOX_NETWORK", "bwrap_argv", "default_writable", "sandbox_argv",
+           "seatbelt_profile"]

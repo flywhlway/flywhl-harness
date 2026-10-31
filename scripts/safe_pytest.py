@@ -124,7 +124,8 @@ def seatbelt_profile(root: Path, cwd: Path) -> str:
 
 def bwrap_argv(root: Path, cwd: Path) -> list[str]:
     home = real_home()
-    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    # 新的 PID 命名空间与 /proc：测试进程看不到开发者其它进程的 /proc/<pid>/environ
+    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--tmpfs", "/tmp"]
     if os.path.isdir(home):
         argv += ["--tmpfs", home]   # 家目录换成空目录；仓库与 Python 在家目录下时，下面再只读挂回来
     for p in _readable(root, cwd):
@@ -133,9 +134,10 @@ def bwrap_argv(root: Path, cwd: Path) -> list[str]:
     return [*argv, "--bind", str(root), str(root), "--die-with-parent", "--chdir", str(cwd)]
 
 
-def _bwrap_works() -> bool:
+def _bwrap_works(argv: list[str]) -> bool:
+    """用实际要用的参数试跑一次：Docker 默认遮住 /proc 的部分路径，只试 --ro-bind 会通过，挂新 /proc 时才失败。"""
     try:
-        return subprocess.run(["bwrap", "--ro-bind", "/", "/", "true"], capture_output=True, timeout=10).returncode == 0
+        return subprocess.run([*argv, "true"], capture_output=True, timeout=10).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -143,8 +145,8 @@ def _bwrap_works() -> bool:
 def outer_sandbox(root: Path, cwd: Path) -> tuple[str, list[str]]:
     if sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC):
         return "seatbelt", [SANDBOX_EXEC, "-p", seatbelt_profile(root, cwd)]
-    if sys.platform.startswith("linux") and shutil.which("bwrap") and _bwrap_works():
-        return "bwrap", bwrap_argv(root, cwd)
+    if sys.platform.startswith("linux") and shutil.which("bwrap") and _bwrap_works(argv := bwrap_argv(root, cwd)):
+        return "bwrap", argv
     return "env-only", []
 
 

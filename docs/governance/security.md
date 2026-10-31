@@ -72,7 +72,7 @@ SQL 注入能被参数化查询根治，因为数据库在语法层面区分代�
 | 关键动作人审 | 有副作用的动作由人确认 | 审批对象携带实际参数、命令分析与 diff 预览；灾难性命令与 bash 碰凭证位置不进审批、直接拒绝 | `on_ask="allow"`（`--yes`）会放行所有 ask |
 | 凭据隔离 | 模型和工具执行环境拿不到原始凭据 | 托管基线拒绝读取密钥路径，bash 命中同一档位置同样拒绝；bash 与 MCP 服务器子进程剥离密钥环境变量 | 只按变量名剥离；bash 的混淆写法认不出；命令 hook 继承完整环境 |
 | 输出过滤 | 出站内容脱敏、阻止外发 | PostToolUse 可改写结果 | 流式 `tool_update` 不经过 PostToolUse；出口只能用沙箱整体断网，没有白名单 |
-| 沙箱兜底 | 操作系统级隔离 | macOS sandbox-exec 档位（原型，`permissions.sandbox = "macos"`），见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) | 只包 bash、只收紧文件访问；默认关闭；Linux 没有对应实现 |
+| 沙箱兜底 | 操作系统级隔离 | macOS sandbox-exec 与 Linux bubblewrap 档位（原型，`permissions.sandbox = "macos"` / `"linux"`），见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) | 只包 bash，收紧文件访问与网络；默认关闭；Linux 档按具体路径遮蔽凭证，还没有出站白名单 |
 | 审计 | 可还原发生了什么 | 事件流、`approvals` 表、轨迹导出 | — |
 
 下面挑几处展开。

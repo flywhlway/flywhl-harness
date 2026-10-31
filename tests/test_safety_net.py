@@ -58,9 +58,17 @@ def test_each_test_gets_an_isolated_home_and_cwd(tmp_path):
 
 @pytest.mark.skipif(os.environ.get("FLYWHL_TEST_SANDBOX") not in ("seatbelt", "bwrap"), reason="只在外层系统沙箱里检查")
 def test_outer_sandbox_hides_the_real_home():
-    """只有内核规则真的生效时，进程才会读不到自己的家目录：环境变量说在沙箱里不算数。"""
-    with pytest.raises(OSError):
-        os.listdir(repo_conftest.REAL_HOME)
+    """只有内核规则真的生效时，进程才会看不到家目录里的东西：环境变量说在沙箱里不算数。
+
+    seatbelt 直接拒绝读取；bwrap 把家目录换成空的 tmpfs，只把仓库与 Python 所在的路径挂回来。
+    """
+    home = repo_conftest.REAL_HOME
+    try:
+        names = set(os.listdir(home))
+    except OSError:
+        names = set()
+    kept = {Path(p).relative_to(home).parts[0] for p in _runner()._readable(ROOT, ROOT) if p.startswith(home + os.sep)}
+    assert names <= kept, f"沙箱里还看得见家目录下的 {sorted(names - kept)}"
     assert (ROOT / "pyproject.toml").read_text(encoding="utf-8")   # 仓库照常可读
 
 

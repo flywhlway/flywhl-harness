@@ -12,8 +12,9 @@ bash 是最强也最危险的工具。这里的工程要点：
   或值是带口令的 URL（``postgres://u:p@host/db``）。模型即使执行 ``env`` 也看不到原始凭据。
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
-- **可选的系统沙箱**：``sandbox="macos"`` 时命令跑在 sandbox-exec 里，凭证位置不可读、写操作限制在工作区与临时目录，
-  见 ``tools/sandbox.py``；网络可以全断，或只经出站代理连白名单里的主机（``tools/egress.py``）。
+- **可选的系统沙箱**：``sandbox="macos"`` / ``"linux"`` 时命令跑在 sandbox-exec / bubblewrap 里，凭证位置不可读、
+  写操作限制在工作区与临时目录，见 ``tools/sandbox.py``；网络可以全断，macOS 上还可以只经出站代理连白名单里的主机
+  （``tools/egress.py``）。
   网络策略离不开沙箱：配置了 ``deny`` / ``allowlist`` 却没有开沙箱时拒绝执行，不悄悄连外网。
 """
 
@@ -32,7 +33,7 @@ from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
 from .egress import EgressProxy, local_ports, parse_rules
-from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, sandbox_argv
+from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, sandbox_argv
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
                          r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
@@ -65,6 +66,23 @@ def _clean_env(strip: bool) -> dict[str, str]:
         env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
     env["GIT_CONFIG_COUNT"] = str(n + len(_GIT_HARDENING))
     return env
+
+
+async def _reap_group(pgid: int, grace: float = 1.0) -> None:
+    """命令退出后，进程组里还在运行的后台进程：先 SIGTERM，宽限期后 SIGKILL。自己另起会话的进程不在组里，管不到。"""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 async def _terminate(proc: asyncio.subprocess.Process, grace: float = 2.0) -> None:
@@ -154,17 +172,19 @@ class BashTool(Tool):
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         proxy: EgressProxy | None = None
         async with contextlib.AsyncExitStack() as stack:   # 出站代理与命令同生共死
-            if self.sandbox == "macos":
-                if self.sandbox_network == "allowlist":
+            if self.sandbox != "off":
+                if self.sandbox == "macos" and self.sandbox_network == "allowlist":
                     proxy = await stack.enter_async_context(EgressProxy(self.network_allow))
                     spawn["env"] = {**spawn["env"], **proxy.env()}
                 try:
-                    argv = sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network,
-                                        local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else ())
+                    argv = (sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network,
+                                         local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else ())
+                            if self.sandbox == "macos" else bwrap_argv(command, ctx.workspace.root, network=self.sandbox_network))
                 except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
                     return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
                                       details={"command": command, "sandbox": self.sandbox})
-                # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变：取消、超时照样能整组终止
+                # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变；bwrap 是 bash 的父进程，--die-with-parent 保证它退出时
+                # 沙箱里的进程一起退出。两种情况取消、超时都能整组终止
                 proc = await asyncio.create_subprocess_exec(*argv, **spawn)
             else:
                 proc = await asyncio.create_subprocess_shell(
@@ -192,6 +212,9 @@ class BashTool(Tool):
             except asyncio.CancelledError:
                 await _terminate(proc)  # 被取消：杀掉整棵进程树后再把取消向上传播
                 raise
+            finally:
+                if proxy is not None:   # 代理随命令关闭，沙箱放行的那个端口号可能被别的服务复用：留在后台的进程一并结束
+                    await _reap_group(proc.pid)
 
         output = b"".join(chunks).decode("utf-8", errors="replace")
         body, cut, total = truncate_tail(output, OUT_LINES, OUT_BYTES)
@@ -214,5 +237,7 @@ class BashTool(Tool):
         if timed_out:
             details["timed_out"] = True  # 执行器据此判断：外部命令超时 = 结果未知
             return ToolResult(content=f"{body}\n[命令超时（{timeout:.0f}s），已终止进程组]", is_error=True, details=details)
+        if self.sandbox == "linux" and proc.returncode == 1 and output.startswith("bwrap: "):
+            body = f"[沙箱没能启动，命令未执行。容器里运行时，Docker 默认遮住了 /proc 的部分路径，见文档“Linux：bubblewrap 档位”]\n{body}"
         status = f"\n[退出码 {proc.returncode}]"
         return ToolResult(content=(body or "(无输出)") + status, is_error=proc.returncode != 0, details=details)
