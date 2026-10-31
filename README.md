@@ -34,15 +34,17 @@
 cd flywhl-harness
 uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv && pip install -e ".[dev,anthropic]"
 
-.venv/bin/flywhl serve -w playground                # 打开 http://127.0.0.1:8765
+.venv/bin/flywhl serve -w playground                # 打开终端打印的带令牌链接
 ```
+
+访问令牌默认开启：首次启动生成并保存到 `~/.flywhl/server_token`（权限 0600）。链接里的令牌在首次访问时换成 Cookie，之后用书签直接打开，重启服务也不失效。
 
 没有任何 API Key 时自动使用内置的 **flywhl-demo** 演示模型——点击开始页的演示场景即可体验审批、取消、压缩、子代理、
 循环检测等全部机制。
 
 控制台包含：会话工作区（流式对话、工具调用卡片、带 diff 预览与可编辑参数的审批卡片、暂停 / 停止 / 继续 / 重试、插话与排队）、
-检查器（运行概览与状态流转、上下文水位、事件流与断线续传演示、会话分支与快照回滚）、跨会话的运行记录、审批收件箱、工具目录，
-以及命令面板（`⌘K` / `Ctrl+K`）。不依赖任何外部字体或 CDN，离线可用；明暗主题、键盘操作与屏幕阅读器均已适配。
+检查器（运行概览与状态流转、上下文水位、事件流与断线续传演示、会话分支与快照回滚）、跨会话的运行记录、审批收件箱、工具目录、
+会话重命名 / 归档 / 导出 Markdown、「环境与安全」页，以及命令面板（`⌘K` / `Ctrl+K`）。不依赖任何外部字体或 CDN，离线可用；明暗主题、键盘操作与屏幕阅读器均已适配。
 
 接入真实模型（默认 `deepseek:deepseek-flash`）：
 
@@ -66,6 +68,7 @@ flywhl retry <run_id>            # 重试失败的运行（从历史继续，att
 flywhl recover                   # 接管崩溃的运行
 flywhl replay <run_id> [--fork-at N]   # 确定性回放 / 反事实分叉
 flywhl trace <run_id> -o t.json  # 导出轨迹与 span
+flywhl export <会话ID> -o s.md   # 会话导出为 Markdown 对话记录
 flywhl tools                     # 工具与副作用等级
 flywhl doctor [供应商:模型 ...]   # 模型接入自检
 ```
@@ -115,7 +118,7 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/11_kill9_cli_recover.py
-.venv/bin/python -m pytest -q          # 240 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python -m pytest -q          # 455 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
 
 `examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
@@ -186,7 +189,7 @@ src/flywhl_harness/
 - **SQLite 而非 PostgreSQL**：单文件、WAL、事务——足以讲清四层模型与 CAS；生产中替换为 PG + 对象存储 + outbox。
 - **串行执行 hooks**：便于参数改写的链式传递（Claude Code 选择并行执行）。
 - **默认需要审批**：与 pi 的 “YOLO + 容器” 不同，这里把权限与人审作为可学习的机制实现出来；`bypass` 模式只应在隔离环境中使用。
-- **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定）+ 跨站写请求检查；`--host 0.0.0.0` 时自动启用访问令牌。
+- **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定）+ 跨站写请求检查 + 访问令牌（默认开启，`--no-token` 只允许回环地址）+ CSP（禁止内联脚本与被嵌入）。
 - **Anthropic 模型默认开启 server-side fallback**（`fallbacks: "default"`），被安全策略拒答时服务端改用推荐的备用模型；
   只在官方端点上发送（经 OpenRouter 等网关调用时自动关闭），可通过 `AnthropicProvider(server_fallback=False)` 关闭。
 - **启动目录的 `.env` 只接受密钥与模型选择**：工作区默认就是启动目录，可能是不可信的仓库；它的 `.env` 若能设置 `*_BASE_URL`、

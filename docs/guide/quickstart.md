@@ -28,7 +28,8 @@ python -m venv .venv
 .venv/bin/flywhl serve -w playground
 ```
 
-打开 `http://127.0.0.1:8765`。`-w` 指定 **工作区**：Agent 的所有文件操作都被约束在这个目录里，
+打开终端打印的带令牌链接（`http://127.0.0.1:8765/?token=…`），之后同一浏览器直接访问 `http://127.0.0.1:8765` 即可。
+令牌默认开启，保存在 `~/.flywhl/server_token`，重启服务不变。`-w` 指定 **工作区**：Agent 的所有文件操作都被约束在这个目录里，
 数据（会话库、快照、演示用的“外部系统”）存放在 `playground/.flywhl/`。
 
 没有设置任何 API Key 时，harness 会自动使用内置的规则演示模型 **flywhl-demo**。它不“智能”，但会按固定剧本调用工具，
@@ -239,7 +240,7 @@ asyncio.run(main())
 ## 跑测试与示例
 
 ```bash
-.venv/bin/python -m pytest -q                       # 240 个离线测试，约 15 秒（不含 tests/live）
+.venv/bin/python -m pytest -q                       # 455 个离线测试，约 20 秒（不含 tests/live）
 .venv/bin/python examples/02_crash_resume.py        # 真实 kill -9 后恢复，副作用恰好一次
 .venv/bin/python examples/11_kill9_cli_recover.py   # 同一件事换成两个 CLI 进程，并打印状态迁移轨迹
 ```

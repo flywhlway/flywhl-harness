@@ -73,9 +73,10 @@
 | `schema.py` | 迷你 JSON Schema 校验器、`schema_from_signature()` |
 | `registry.py` | 顺序稳定的注册表、`subset()` |
 | `fs.py` | `read` / `write` / `edit` / `ls` / `grep`，过期读取保护、严格 UTF-8、原子写、审批 diff 预览 |
-| `shell.py` | `bash`：进程组、两段式终止、流式输出、保尾截断、密钥环境变量剥离 |
-| `sandbox.py` | macOS sandbox-exec 档位（原型）：从凭证清单生成 Seatbelt 配置、写操作限制在工作区与临时目录、不可用时拒绝执行 |
+| `shell.py` | `bash`：进程组、两段式终止、流式输出、保尾截断、密钥环境变量剥离、git 命令行级加固 |
+| `sandbox.py` | macOS sandbox-exec 档位（原型）：从凭证清单生成 Seatbelt 配置、写操作限制在工作区与临时目录、可选断网、不可用时拒绝执行 |
 | `extra.py` | `todo_write`、`read_ref`、`search_ref`、`latest_todos()` |
+| `regex_search.py` | 正则搜索放进子进程执行（`grep`、`search_ref` 共用）：超时或取消时直接杀掉，灾难性回溯不卡事件循环 |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
 | `mcp.py` | 最小 MCP stdio 客户端与 `MCPTool`（注解的保守默认值、环境隔离、`notifications/cancelled`） |
 
@@ -107,14 +108,17 @@
 | 文件 | 内容 |
 |---|---|
 | `observe/trace.py` | `export_trajectory()`、`to_otel_spans()` |
+| `observe/export.py` | `session_markdown()`：会话导出为 Markdown，`flywhl export` 与导出接口共用 |
 | `observe/replay.py` | `replay_run()`、`RecordedTool`、`HybridProvider` |
 | `observe/evals.py` | `EvalCase`、`run_eval()`、`wilson_interval()`、`mcnemar_exact()` |
-| `server/app.py` | FastAPI：会话/Run（含暂停、恢复、重试）/审批/上下文检查器/快照 REST；SSE（`Last-Event-ID`、心跳、断开检测）；lifespan 中启动周期性恢复；访问控制中间件（Host 白名单、跨站写请求检查、可选令牌） |
-| `web/app.js` | 控制台入口：路由（深链接 `#/s/<会话>`、`#/runs`、`#/approvals`、`#/tools`）、侧边栏、命令面板、全局快捷键、审批计数轮询 |
+| `server/app.py` | FastAPI：会话/Run（含暂停、恢复、重试）/审批/上下文检查器/快照 REST；SSE（`Last-Event-ID`、心跳、断开检测）；lifespan 中启动周期性恢复；访问控制中间件（Host 白名单、跨站写请求检查、默认开启的访问令牌）、安全响应头（CSP）、请求体上限；会话导出、当前生效的设置 |
+| `web/app.js` | 控制台入口：路由（深链接 `#/s/<会话>`、`#/runs`、`#/approvals`、`#/tools`、`#/settings`）、侧边栏、命令面板、全局快捷键、审批计数轮询 |
 | `web/views/session.js` | 会话工作区：SSE 订阅与按 seq 去重、断线续传、rAF 合并的流式渲染、贴底滚动、运行控制、权限模式 |
 | `web/views/timeline.js` | 时间线渲染器：消息、思考过程、工具调用卡片、审批卡片（风险、命令分析、diff 预览、可编辑参数）、压缩分隔线、运行小结 |
 | `web/views/inspector.js` | 检查器：概览（状态流转、预算、状态机）、上下文、事件、历史（分支与快照） |
 | `web/views/pages.js` | 运行记录、审批收件箱、工具目录 |
+| `web/views/settings.js` | 「环境与安全」页：当前实际生效的配置（只读）、安全体检、桌面通知等本机偏好 |
+| `web/boot.js` | 首帧设置明暗主题；必须是外链脚本，因为 CSP 不执行内联脚本 |
 | `web/lib/` | `api`（请求与错误）、`ui`（提示、对话框、菜单、命令面板，含焦点管理）、`meta`（状态与副作用的文案）、`icons`、`dom` |
 | `web/md.js` | 先转义再渲染的极简 Markdown |
 
@@ -132,5 +136,6 @@
 | `tests/test_providers.py` | 用录制的真实 SSE 与错误响应离线验证各家差异：并行工具调用拼接、三种思考来源、思考回传方式、思考开关翻译、流不完整与流中错误、错误分类、模型写法解析、跨供应商降级链、`.env` 加载 |
 | `tests/live/` | 真实模型端到端（`pytest -m live`，默认不跑）：接入层、Agent 机制、运行时与 Web API，见 `tests/live/README.md` |
 | `tests/test_security.py` | hook 决策归一化、命令 hook 超时被杀、命令分析的绕过写法、灾难性命令全模式拒绝、工作区外读取、命令替换不被 allow 规则放行、网络输出污点、伪造提醒标签、改参重跑守卫、审批预览、MCP 注解默认值、影子仓库隔离、Web 服务访问控制 |
+| `tests/test_hardening.py` | 第二轮加固：伪装成只读的执行、仓库配置驱动 git、符号链接与判定后换链接、凭证清单、正则子进程、hook 改写与失败策略、沙箱断网、Web 令牌 / CSP / 请求体、回滚参数、断线续传、终端控制序列 |
 
 示例 `examples/01`–`10` 的说明见 [02 快速上手](/guide/quickstart) 与仓库 README。

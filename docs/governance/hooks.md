@@ -303,11 +303,18 @@ if dec.edited_args:
         if again.updated_input is not None:
             args, errs = validate(tool.parameters, again.updated_input)
             # ... 校验失败同样以 invalid 结束
+            # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略
+            final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+            if final.decision == Decision.DENY:
+                return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
 ```
 
 理由是：人批准的是 **审批卡片上那一次调用**，不是“这次可以不守规矩”。审批人把路径从 `out/a.md` 改成 `feature_list.json`，
 清单守卫照样要检查；hook 的 `updated_input`（例如强制输出目录）也照样生效。第二轮只认 `deny`——`ask` 已经被人回答过了，
 不会再弹一次审批。回归测试：`tests/test_security.py::test_edited_args_rerun_pre_tool_hooks`。
+
+第二轮的 `updated_input` 还要再过一次权限策略，因为审批人没见过改写之后的参数。早期版本漏了这一步：hook 能把批准过的命令改写成
+`rm -rf ~` 并直接执行，灾难性命令的拒绝、凭证位置、deny 规则都管不到它。回归测试：`tests/test_hardening.py::test_hook_rewrite_after_approval_is_rechecked`。
 
 `stop_run` 不会打断当前这次调用——它只设置 `rc.stop_requested`，`AgentLoop` 在下一回合开始时检查并以
 `Outcome("cancelled", ..., by="hook")` 结束。想同时阻止当前调用，需要再返回 `decision="deny"`。
@@ -318,7 +325,8 @@ if dec.edited_args:
 
 ## fail-open 还是 fail-closed
 
-hook 自己会出错：脚本有 bug、依赖的服务超时、JSON 解析失败。`HookBus.run` 对异常的处理由 `Hook.fail_closed` 决定：
+hook 自己会出错：脚本有 bug、依赖的服务超时、JSON 解析失败。`HookBus.run` 对异常的处理由 `Hook.fail_closed` 决定。
+进程内注册的 hook 默认 fail-open；`flywhl.toml` 里的命令 hook 不写 `fail_closed` 时按事件取默认值：`pre_tool_use` 是守卫，默认 fail-closed，其余事件默认 fail-open。各类 hook 的建议：
 
 | 类别 | 例子 | 建议 | 理由 |
 |---|---|---|---|
@@ -671,9 +679,9 @@ asyncio.run(main())
 - hooks 把“必须发生”和“绝不能发生”的规则从提示词移到确定性代码；判断标准是能否接受“模型这次忘了”。
 - 本项目 8 个挂载点覆盖会话、输入、工具前后、结束验收、压缩和收尾；同一输出字段在不同事件里语义不同。
 - `HookBus` 串行执行：改写可链式传递、deny 短路，代价是顺序敏感——改写在前，检查在后，审计不要依赖 hook 顺序。
-- hook 只能收紧权限：改写后重新校验、重新判定，决策取最严；审批人改参后 PreToolUse 再跑一遍，人工批准绕不过 hook。
+- hook 只能收紧权限：改写后重新校验、重新判定，决策取最严；审批人改参后 PreToolUse 再跑一遍，这一遍的改写同样重新判定：人工批准绕不过 hook，hook 也绕不过策略。
 - 决策先经 `normalize_decision` 归一化：`block` 在 PreToolUse 里就是 deny，写错的取值产生告警而不是静默放行。
-- 拦截类 hook 必须 fail-closed；`to_json` 的事故说明 fail-open 会把任何 bug 变成绕过。命令 hook 超时会杀掉整个进程组。
+- 拦截类 hook 必须 fail-closed（配置文件里的 `pre_tool_use` 命令 hook 默认如此）；`to_json` 的事故说明 fail-open 会把任何 bug 变成绕过。命令 hook 超时会杀掉整个进程组。
 - Stop hook 定义“完成”，`max_stop_blocks` 保证它不会无限续跑，并以 `incomplete` 如实收尾。
 - hook 的权限比模型高，本身就是供应链风险，需要审阅、锁定和最小化环境。
 

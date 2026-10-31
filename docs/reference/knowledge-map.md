@@ -94,7 +94,7 @@
 
 | 知识点 | 章节 | 源码 | 验证 |
 |---|---|---|---|
-| Hooks 挂载点、决策组合、fail-open / fail-closed | [16](/governance/hooks) | `policy/hooks.py` | `test_hook_deny_and_rewrite`、`test_hook_fail_closed_on_timeout` |
+| Hooks 挂载点、决策组合、fail-open / fail-closed | [16](/governance/hooks) | `policy/hooks.py` | `test_hook_deny_and_rewrite`、`test_hook_fail_closed_on_timeout`、`test_command_hook_failure_policy_defaults_by_event` |
 | 决策取值归一化（`block` = deny、未知取值告警）；超时的命令 hook 必须被杀掉 | [16](/governance/hooks) | `normalize_decision()`、`CommandHook` | `test_pre_tool_block_is_deny`、`test_unknown_hook_decision_warns_instead_of_crashing`、`test_command_hook_is_killed_on_timeout` |
 | 进程外 hook 协议（与 Claude Code 兼容） | [16](/governance/hooks) | `CommandHook` | `test_command_hook_protocol` |
 | Stop hook 与“完成是产物的属性” | [08](/core/termination-budget)、[16](/governance/hooks) | `_stop_gaps()` | `test_stop_hook_blocks_then_gives_up_honestly` |
@@ -103,7 +103,7 @@
 | 危险命令识别（为什么不能只用正则）：包装命令、`sh -c` 递归、工作区边界 | [17](/governance/permissions-hitl) | `policy/bash_analyzer.py` | `test_bash_analyzer`、`test_analyzer_sees_through_wrappers`、`test_outside_read_asks_and_reason_explains` |
 | 灾难性命令在任何模式下都拒绝 | [17](/governance/permissions-hitl) | `catastrophic` | `test_catastrophic_is_denied_in_every_mode` |
 | 命令替换不能借 allow 规则搭便车 | [17](/governance/permissions-hitl) | `opaque`、`_SUBST` | `test_allow_rule_cannot_cover_command_substitution` |
-| 本地 Web 服务的访问控制（DNS 重绑定、CSRF、令牌） | [19](/governance/security) | `server/app.py` · `guard` | `test_server_rejects_dns_rebinding_and_cross_site_writes`、`test_server_token_flow` |
+| 本地 Web 服务的访问控制（DNS 重绑定、CSRF、令牌、CSP） | [19](/governance/security) | `server/app.py` · `guard` | `test_server_rejects_dns_rebinding_and_cross_site_writes`、`test_server_token_flow`、`test_server_sends_security_headers_on_every_response` |
 | 污点感知与提示注入（网络输出、跨暂停持久、子代理上传） | [17](/governance/permissions-hitl)、[19](/governance/security) | `tainted`、`untrusted_for()` | `test_taint_escalates_side_effects`、`test_network_output_taints_session_and_persists` |
 | 伪造的 system-reminder 标签 | [19](/governance/security) | `shape_tool_result()` | `test_reminder_tags_in_tool_output_are_escaped` |
 | 人审：持久化、超时、TOCTOU、变更预览、改参后重跑守卫 | [17](/governance/permissions-hitl) | `policy/approvals.py`、`Tool.preview()` | `test_approval_edit_args_revalidated`、`test_edited_args_rerun_pre_tool_hooks`、`test_approval_request_carries_diff_preview` |
@@ -114,7 +114,7 @@
 | 快照与回滚、快照技术路线对比 | [18](/governance/workspace-sandbox) | `ShadowGit` | Web UI 检查器“历史”页签、`test_shadow_repo_is_per_workspace` |
 | 多 Agent 并行改同一仓库：worktree 与合并 | [18](/governance/workspace-sandbox) | — | — |
 | 沙箱运行时选型、冷启动与预热池 | [18](/governance/workspace-sandbox) | `tools/sandbox.py`（macOS sandbox-exec 原型） | `test_sandbox_blocks_credential_reads_static_analysis_misses` |
-| 网络出口管控与凭据代持 | [18](/governance/workspace-sandbox)、[19](/governance/security) | `tools/shell.py` · `_clean_env()` | — |
+| 网络出口管控与凭据代持 | [18](/governance/workspace-sandbox)、[19](/governance/security) | `tools/shell.py` · `_clean_env()`、`tools/sandbox.py` | `test_sandbox_network_deny_blocks_outbound_connections` |
 | 浏览器自动化隔离 | [18](/governance/workspace-sandbox) | — | — |
 | 提示注入纵深防御、最小权限、供应链、OWASP Agentic Top 10、红队 | [19](/governance/security) | `policy/` | — |
 | 端云协同：大脑/双手、接管、离线队列、对账、产物交付 | [26](/advanced/edge-cloud) | `runtime/dispatch.py` | `test_dispatch_exactly_once_effect_over_flaky_network`、`test_edge_dedupes_duplicate_arriving_mid_execution` |

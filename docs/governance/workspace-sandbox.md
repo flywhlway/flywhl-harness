@@ -366,25 +366,30 @@ MCP 调用经过代理，由代理从 vault 取凭据，沙箱里的代码拿不
 本项目的最小实现是 bash 子进程剥离密钥环境变量（`src/flywhl_harness/tools/shell.py::_clean_env`）：
 
 ```python
-_SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.I)
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
+                         r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
+_URL_WITH_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@", re.I)
 
 def _clean_env(strip: bool) -> dict[str, str]:
     env = dict(os.environ)
-    if strip:
-        env = {k: v for k, v in env.items() if not _SECRET_ENV.search(k)}
+    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+        env = {k: v for k, v in env.items()
+               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
+    # …… 再用 GIT_CONFIG_* 追加命令行级配置：core.fsmonitor=false、safe.bareRepository=explicit
     return env
 ```
 
-harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `env`、`printenv` 看不到它。这是按 **变量名** 剥离，边界很清楚：
+harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `env`、`printenv` 看不到它。剥离看 **变量名**，外加一种值的形态（带密码的 URL），边界很清楚：
 
 | 情况 | 是否被剥离 |
 |---|---|
-| `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY` | 是 |
+| `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`MYSQL_PWD` | 是 |
 | `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是 bash 里的 git 无法使用 ssh-agent |
-| `DATABASE_URL=postgres://user:pass@host/db` | **否**，密码藏在值里 |
+| `DATABASE_URL=postgres://user:pass@host/db` | 是，值是带密码的 URL |
+| `PGCONN="host=db password=…"`、JSON 配置里的密码 | **否**，名字和值的形态都认不出 |
 | `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但变量拼接等混淆写法认不出，要靠下文的 sandbox-exec 档位由内核拒绝 |
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
@@ -407,7 +412,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 ## macOS sandbox-exec 档位
 
 `permissions.sandbox = "macos"`（或 `flywhl chat --sandbox macos`）让 bash 工具的每条命令跑在 `sandbox-exec` 里（`tools/sandbox.py`）。
-它是原型：从 `(allow default)` 起步，只收紧文件访问。生成的配置大致是：
+它是原型：从 `(allow default)` 起步，收紧文件访问，可选断网。生成的配置大致是：
 
 ```scheme
 (version 1)
@@ -418,6 +423,8 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 (deny file-write* (require-not (require-any (subpath "<工作区>") (subpath "<临时目录>") (literal "/dev/null") ...)))
 ; harness 自己的状态与配置，与托管基线一致
 (deny file-write* (subpath "<工作区>/.flywhl") (literal "<工作区>/flywhl.toml"))
+; sandbox_network = "deny" 时追加：禁止对外连接（回环地址上的 TCP 也算），本机 Unix 套接字不受影响
+(deny network-outbound (remote ip))
 ```
 
 凭证清单与文件工具、命令分析共用 `policy/sensitive.py` 那一份，区别在于内核按 **真实路径** 判定，不管命令怎么写：
@@ -429,11 +436,12 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
 | 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
 | 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
-| 网络外发、钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
+| 网络外发（`curl`、`nc`） | — | 默认不限制；`sandbox_network = "deny"` 时拒绝 |
+| 钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
 | 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
 
 `tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
-沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界。
+沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界，`tests/test_hardening.py::test_sandbox_network_deny_blocks_outbound_connections` 核对断网。
 
 代价与边界：
 
@@ -445,7 +453,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
   不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
 - **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
   非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
-- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。
+- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`，改回 `allow` 要先信任。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）
 
@@ -567,14 +575,14 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 ## 小结
 
 - Workspace 是代码、依赖、执行环境、元数据组成的现场；本项目实现了创建、使用、快照、恢复，分叉与归档留给生产实现。
-- 路径约束先 resolve 再比较，能识别 `../` 和符号链接逃逸；bash 只有按字面参数的近似检查，硬链接和竞态管不到——它是门，不是墙。
+- 路径约束先 resolve 再比较，能识别 `../` 和符号链接逃逸，文件工具执行前还按真实路径复查凭证清单；bash 按字面参数做近似检查（工作区里的链接按目标判定），硬链接管不到——它是门，不是墙。
 - 漂移检测用大小 + mtime 清单，在恢复时告诉模型哪些文件变了。
 - 影子 git 不碰用户的 `.git`，按工作区分仓库，每次写操作前快照，回滚时删除新增文件并留下 restore 记录；它回滚的是工作区文件，不是外部世界。
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
 - macOS sandbox-exec 档位是本项目唯一的系统级隔离（原型）：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
-  不管网络；“只在沙箱档位下允许 bypass”还是设计草案。
+  可选整体断网（`sandbox_network = "deny"`），没有出口白名单；“只在沙箱档位下允许 bypass”还是设计草案。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash 与 MCP 服务器共用）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

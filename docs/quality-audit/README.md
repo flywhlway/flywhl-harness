@@ -4,6 +4,12 @@
 
 > **整改状态（2026-10-18）：** Top10（QA-001～006、QA-009～012）已修复并验证，审计套件 13 passed，离线套件 322 passed。
 > QA-007、QA-008、QA-013 未处理，理由与核查中发现的同根因变体见 [fix-report.md](fix-report.md)。下文保留审计时的原始结论。
+>
+> **第二轮（2026-10-31）：**
+> - 修复了本轮新发现的问题，包括伪装成只读的执行、仓库配置驱动 git、hook 改写与失败策略、Web 令牌与 CSP；
+> - 关闭 QA-007 和 QA-013，QA-008 部分处理；
+> - 离线套件 455 passed，审计套件 13 passed，详见 [security-round2.md](security-round2.md)；
+> - 过程中在开发机上发生了一次事故，复盘见 [incident-2026-10-31.md](incident-2026-10-31.md)。
 
 ## 结论
 
@@ -44,13 +50,16 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
 | [evidence/](evidence/) | pytest 输出、UAT 记录、截图；`fix-*` 是整改后的复核 |
 | [tests/](tests/) | 安全不变量测试。审计时 **11 failed, 2 passed**，整改后 13 passed |
 | [fix-report.md](fix-report.md) | Top10 整改记录：选取理由、根因、修复、回归测试、残余风险 |
+| [security-round2.md](security-round2.md) | 第二轮安全加固：修复前后的行为、回归用例、仍未覆盖的缺口 |
+| [capability-backlog.md](capability-backlog.md) | 能力扩展清单：本轮已实现的能力，以及按优先级排序的后续项 |
+| [incident-2026-10-31.md](incident-2026-10-31.md) | 事故复盘：回归测试在开发机上执行了 `rm -rf ~` |
 
 ## 待验证（不是已复现缺陷）
 
 - `tests/live` 33 项未跑。需要密钥和费用，本次标 BLOCKED。
 - 没有安装覆盖率工具，不报告覆盖率百分比。
 - 没有跑依赖漏洞数据库扫描。已记录的运行版本：httpx 0.28.1、fastapi 0.143.0、starlette 1.7.0、uvicorn 0.54.0、pytest 9.1.1。
-- 恶意正则导致的 grep 拒绝服务、符号链接替换的时间窗，只看到代码路径，没有做成稳定复现。
+- 恶意正则导致的 grep 拒绝服务、符号链接替换的时间窗，只看到代码路径，没有做成稳定复现。第二轮已经复现并修复，见 [security-round2.md](security-round2.md)。
 
 ## 复现入口
 

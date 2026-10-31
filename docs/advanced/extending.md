@@ -431,7 +431,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `loop_guard.max_consecutive_errors` / `same_file_edit_warn` | `6` / `6` | 连续错误；同文件反复编辑 |
 | `permissions.mode` / `rules` / `on_ask` / `approval_timeout` | `"default"` / `[]` / `"wait"` / `600.0` | 见配方 ④ |
 | `permissions.strip_secret_env` | `True` | bash 子进程剥离 `*KEY*` / `*TOKEN*` / `*SECRET*` 等环境变量 |
-| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed` |
+| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed`（不写时 `pre_tool_use` 为 true，其余事件为 false） |
 | `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
 
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
