@@ -1152,3 +1152,95 @@ def test_list_approvals_can_take_only_the_latest():
                                           summary="", risk="low", reason="", status="pending", created_at=float(i)))
     assert [a.id for a in st.list_approvals(None, limit=2)] == ["a3", "a4"]
     assert [a.id for a in st.list_approvals(None)] == [f"a{i}" for i in range(5)]
+
+
+# ---------------------------------------------------------------------- 无人值守按规则自动批准
+def test_auto_approval_follows_rules_but_skips_risky_calls(tmp_path):
+    """无人值守时按规则自动批准；高危命令、命令替换、托管基线要确认的、读过不可信内容后的外部操作照旧拒绝。
+    这里只做判定，不执行任何命令。"""
+    from flywhl_harness.policy.permissions import PermissionPolicy
+    from flywhl_harness.runtime.workspace import Workspace
+    from flywhl_harness.tools import default_tools
+
+    tools = default_tools(HarnessConfig(enable_demo_tools=True))
+    p = PermissionPolicy("default", workspace=Workspace(tmp_path, snapshots=False), auto_approve=[
+        "bash(npm test*)", "bash(git status*)", "bash(git push*)", "bash(curl https://example.com*)", "write(src/**)",
+        "allow:write(.git/*)", "send_notification"])
+
+    def auto(tool, args, tainted=False):
+        perm = p.evaluate(tools.get(tool), args, tainted=tainted)
+        assert perm.decision == "ask"
+        rule, why = p.auto_approval(tools.get(tool), args, perm, tainted=tainted)
+        return str(rule) if rule else why
+
+    assert auto("bash", {"command": "npm test -- --watch=false"}) == "allow:bash(npm test*)"
+    assert auto("bash", {"command": "git status && npm test"}).startswith("allow:bash(")    # 每一段都有规则覆盖
+    assert auto("write", {"path": "src/app.py", "content": ""}) == "allow:write(src/**)"
+    assert auto("write", {"path": "src/app.py", "content": ""}, tainted=True) == "allow:write(src/**)"
+    assert auto("bash", {"command": "curl https://example.com"}) == "allow:bash(curl https://example.com*)"
+    assert auto("bash", {"command": "npm test && chmod -R 777 ."}) == "没有匹配的 auto_approve 规则"   # 不能搭便车
+    assert auto("write", {"path": "docs/a.md", "content": ""}) == "没有匹配的 auto_approve 规则"
+    assert auto("bash", {"command": "git push --force"}) == "高危命令不自动批准"
+    assert "不在命令文本里" in auto("bash", {"command": "npm test $(cat x)"})
+    assert "托管基线" in auto("write", {"path": ".git/config", "content": ""})
+    assert "不可信内容" in auto("bash", {"command": "curl https://example.com"}, tainted=True)
+    assert "不可信内容" in auto("send_notification", {"to": "ops", "message": "x"}, tainted=True)
+    assert PermissionPolicy("default").auto_approval(tools.get("write"), {"path": "a"}, p.evaluate(
+        tools.get("write"), {"path": "a", "content": ""})) == (None, "")                    # 没配规则：照旧拒绝
+
+
+async def test_unattended_run_approves_only_what_the_rules_cover(ws):
+    from flywhl_harness.events import E
+    from flywhl_harness.policy.hooks import Hook, HookEvent, HookOutput
+    from flywhl_harness.server.app import create_app
+
+    def write(path):
+        return {"tool_calls": [{"name": "write", "args": {"path": path, "content": "x"}}]}
+
+    def resolved(res):
+        return [(e.data["approved"], e.data["by"], e.data["reason"]) for e in res.events if e.type == E.APPROVAL_RESOLVED]
+
+    h = make_harness(ws, [write("a.txt"), write("b.txt"), "好"], on_ask="deny", permissions__auto_approve=["write(a.txt)"])
+    got = resolved(await h.run("写两个文件"))
+    assert [g[:2] for g in got] == [(True, "policy:auto_approve"), (False, "policy:auto_deny")]
+    assert "write(a.txt)" in got[0][2] and "没有匹配的 auto_approve 规则" in got[1][2]
+    assert (ws / "a.txt").exists() and not (ws / "b.txt").exists()
+    assert h.store.list_approvals(None) == []                       # 无人值守不创建审批对象
+    async with _client(create_app(h, auto_recover=False)) as c:
+        assert (await c.get("/api/settings")).json()["permissions"]["auto_approve"] == ["write(a.txt)"]
+
+    async def ask(inp):
+        return HookOutput(decision="ask", reason="守卫要人看一眼")
+
+    h = make_harness(ws, [write("c.txt"), "好"], on_ask="deny", permissions__auto_approve=["write(*)"])
+    h.hooks.add(Hook(HookEvent.PRE_TOOL_USE, ask, name="ask"))
+    got = resolved(await h.run("写文件"))
+    assert got[0][:2] == (False, "policy:auto_deny") and "hook 要求确认" in got[0][2] and not (ws / "c.txt").exists()
+
+
+def test_auto_approve_needs_trust_and_valid_rules():
+    from flywhl_harness.config import PermissionConfig, split_untrusted
+
+    assert split_untrusted({"permissions": {"auto_approve": ["bash(*)"]}})[1] == ["permissions.auto_approve = ['bash(*)']"]
+    assert split_untrusted({"permissions": {"auto_approve": []}})[1] == []
+    assert PermissionConfig(auto_approve=["allow:write(src/**)"]).auto_approve == ["allow:write(src/**)"]
+    for bad in (["deny:bash(x)"], ["bash(x"], "bash(x)"):
+        with pytest.raises(ValueError):
+            PermissionConfig(auto_approve=bad)
+
+
+def test_cli_approve_means_unattended(tmp_path):
+    import argparse
+
+    from flywhl_harness.cli import _config
+
+    def args(**kw):
+        return argparse.Namespace(**{"config": None, "workspace": str(tmp_path), "provider": None, "model": None,
+                                     "mode": None, "yes": False, "trust": False, "json": False, **kw})
+
+    cfg = _config(args(approve=["bash(npm test*)", "write(src/**)"]))
+    assert cfg.permissions.on_ask == "deny" and cfg.permissions.auto_approve == ["bash(npm test*)", "write(src/**)"]
+    with pytest.raises(SystemExit, match="--yes"):
+        _config(args(yes=True, approve=["bash(npm test*)"]))
+    with pytest.raises(SystemExit, match="无法解析"):
+        _config(args(approve=["deny:bash(x)"]))

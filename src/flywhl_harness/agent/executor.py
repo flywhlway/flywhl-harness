@@ -185,6 +185,7 @@ class ToolExecutor:
         # ---- 权限 + PreToolUse hooks ----
         perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
         decision, reason = perm.decision, perm.reason
+        hook_asked = False
         if rc.hooks.has(HookEvent.PRE_TOOL_USE):
             out = await rc.hooks.run(HookEvent.PRE_TOOL_USE, self._hook_input(HookEvent.PRE_TOOL_USE, call.name, args))
             for w in out.warnings:
@@ -197,6 +198,7 @@ class ToolExecutor:
                 perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 改写后必须重新判定
                 decision, reason = perm.decision, perm.reason
             if out.decision in ("allow", "ask", "deny"):
+                hook_asked = out.decision == "ask"      # 守卫要人确认：无人值守时也不按规则自动批准
                 # hook 只能收紧、不能放宽：hook 说 allow 也绕不过规则的 ask/deny
                 stricter = strictest(decision, out.decision)
                 if stricter != decision:
@@ -213,10 +215,15 @@ class ToolExecutor:
             grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
             fatigue = getattr(rc.approvals, "fatigue", None)
             asked = time.monotonic()
+            auto_rule, auto_why = None, ""
+            if getattr(rc.approvals, "on_ask", "wait") == "deny":   # 无人值守：auto_approve 规则命中的自动批准
+                auto_rule, auto_why = (None, "PreToolUse hook 要求确认，不自动批准") if hook_asked \
+                    else rc.permissions.auto_approval(tool, args, perm, tainted=rc.tainted)
             dec = await rc.approvals.request(
                 run_id=rc.run_id, session_id=rc.session_id, call_id=call.id, tool=tool.name, args=args,
                 summary=tool.describe_call(args), risk=perm.risk, reason=reason, cancel=rc.cancel,
                 on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview, grant, fatigue),
+                auto_rule=str(auto_rule) if auto_rule else None, auto_why=auto_why,
             )
             await self._set_status("running", "审批已处理")
             publish(E.APPROVAL_RESOLVED, {"call_id": call.id, "approved": dec.approved, "by": dec.by,

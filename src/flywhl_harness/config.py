@@ -91,6 +91,16 @@ class PermissionConfig:
     unix_sockets: list[str] = field(default_factory=list)    # 沙箱里放行连接的 Unix 套接字（绝对路径），如本机数据库；默认只放行 DNS 与系统日志
     # hook / MCP 服务器经 npx、uvx、docker run 这类命令临时拉取的包必须锁到确切版本（镜像要带 @sha256: 摘要），否则拒绝启动
     require_pinned: bool = False
+    # 无人值守（on_ask = "deny"）时自动批准的操作，写成 工具(模式)：bash(npm test*)、write(src/**)。其余需要审批的照旧拒绝；
+    # 高危命令、托管基线要求确认的、读过不可信内容后的外部操作不在此列，见 PermissionPolicy.auto_approval
+    auto_approve: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        from .policy.permissions import auto_approve_rule   # 延迟导入，与 _describe 同理
+
+        _check_str_list("permissions.auto_approve", self.auto_approve)
+        for r in self.auto_approve:
+            auto_approve_rule(r)    # 写错了在加载时就报出来，不要等到第一次审批
 
 
 @dataclass
@@ -282,6 +292,7 @@ _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
     "sandbox_network": ("deny",), "network_allow": ([],),
     "unix_sockets": ([],),   # 放行的套接字可能连着 docker.sock 这类能绕开沙箱的守护进程
     "require_pinned": (True,),
+    "auto_approve": ([],),   # 无人值守时多批准哪些操作，由仓库自己说了算就等于没有审批
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 

@@ -664,12 +664,39 @@ CI、批处理、定时任务里没有人能点“批准”。`PermissionConfig.
 | `on_ask` | 行为 | CLI 入口 |
 |---|---|---|
 | `wait`（默认） | 创建审批对象，等待人工 | `flywhl chat` / `flywhl serve` |
-| `deny` | 直接拒绝，不创建审批对象（`by="policy:auto_deny"`） | `flywhl run --json` 在未指定时自动设为 deny |
+| `deny` | 直接拒绝，不创建审批对象（`by="policy:auto_deny"`）；`auto_approve` 规则命中的自动批准 | `flywhl run --json` 在未指定时自动设为 deny；`--approve` 同时给出规则 |
 | `allow` | 直接放行（`by="policy:auto_allow"`） | `flywhl run --yes` |
 
 `on_ask="allow"` 放行的是 **所有** 判定为 ask 的调用，包括被命令分析升级的 dangerous 命令和被污点升级的副作用操作，
-剩下的防线只有 deny 规则。所以 CI 中更稳妥的组合是 `on_ask="deny"` 加上一组显式的 allow 规则（明确列出允许的测试、构建命令），
-或者 bypass 模式加上一次性沙箱——让“全放行”发生在用完即弃的环境里。
+剩下的防线只有 deny 规则。CI 里更稳妥的是 `on_ask="deny"` 加一组 **自动批准规则**，或者 bypass 模式加一次性沙箱——
+让“全放行”发生在用完即弃的环境里。
+
+### 按规则自动批准
+
+```toml
+[permissions]
+on_ask = "deny"
+auto_approve = ["bash(npm test*)", "bash(npm run build*)", "write(src/**)", "edit(src/**)"]
+```
+
+命令行等价写法是 `flywhl run "…" --json --approve 'bash(npm test*)' --approve 'write(src/**)'`（给了 `--approve` 即按
+`on_ask="deny"` 运行，不能与 `--yes` 同用）。判定为 ask 的调用，命中其中一条就自动批准（`by="policy:auto_approve"`，
+理由里写明命中的规则），否则照旧拒绝，拒绝理由写明原因，CI 日志里一眼能看到缺哪条规则。规则写法与 allow 规则相同，
+bash 复合命令同样要每一段都被覆盖。
+
+为什么不直接写 allow 规则：allow 规则在有人值守时同样生效，`allow:write(src/**)` 会让交互会话里的写入也不再询问；
+`auto_approve` 只在没人能点“批准”时才起作用。另一个区别在于它接在命令分析与污点升级 **之后**，所以要单独划出不批准的范围。
+下面几类调用规则写得再宽也不自动批准，和有人值守时一样等人，无人值守下就是拒绝：
+
+| 不自动批准的调用 | 原因 |
+|---|---|
+| 命令分析为高危（`git push --force`、`curl … \| sh`） | 与疲劳提示同一口径：高危命令在任何授权下都要人看 |
+| 实际执行的程序不在命令文本里（命令替换、仓库配置） | 规则按文本匹配，担保不了文本之外的东西 |
+| 托管基线要求确认的（密钥线索、`.git/` 内部、flywhl 配置） | 这些位置被改写的后果会延续到之后的运行 |
+| PreToolUse hook 要求确认的 | 守卫明确要人看 |
+| 读过不可信内容之后的外部副作用（网络、通知、推送） | 提示注入要把数据送出去，走的就是这条路；工作区内的写入不受影响 |
+
+项目配置里的 `auto_approve` 和放宽的 allow 规则一样要先信任：无人值守时多批准什么，不能由仓库自己说了算。
 
 ## 审批疲劳如何量化
 

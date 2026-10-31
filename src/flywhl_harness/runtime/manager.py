@@ -313,7 +313,8 @@ class Harness:
                   budget: Budget | None = None, blob_scope: str = "") -> RunContext:
         cfg = self.config
         ws = self.workspace(s)
-        policy = PermissionPolicy(s.meta.get("mode", cfg.permissions.mode), cfg.permissions.rules, workspace=ws)
+        policy = PermissionPolicy(s.meta.get("mode", cfg.permissions.mode), cfg.permissions.rules, workspace=ws,
+                                  auto_approve=cfg.permissions.auto_approve)
         grants = [Rule.parse(g, "session") for g in s.meta.get("grants", [])]
         ctxm = ContextManager(cfg.context, self.model_info)
         if tools is None:

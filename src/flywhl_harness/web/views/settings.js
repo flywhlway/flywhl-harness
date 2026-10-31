@@ -24,8 +24,11 @@ function posture(s) {
     { tone: ac.any_host ? "warn" : "ok", icon: "globe", label: "Host 校验", value: ac.any_host ? "接受任意 Host" : ac.hosts.join(" · "),
       why: ac.any_host ? "监听所有网卡：只靠访问令牌把关，建议放在反向代理与 HTTPS 之后" : "其他主机名一律拒绝，挡住 DNS 重绑定" },
     { tone: P.mode === "bypass" ? "bad" : "ok", icon: mode.icon, label: "默认权限模式", value: mode.label, why: mode.desc },
-    { tone: P.on_ask === "allow" ? "bad" : "ok", icon: "user", label: "无人值守时", value: ON_ASK[P.on_ask] || P.on_ask,
-      why: P.on_ask === "allow" ? "需要审批的操作会直接执行（--yes），只应在一次性沙箱里使用" : `无人处理的审批 ${fmt.dur(P.approval_timeout)} 后按拒绝处理` },
+    { tone: P.on_ask === "allow" ? "bad" : "ok", icon: "user", label: "无人值守时",
+      value: P.on_ask === "deny" && P.auto_approve.length ? "按规则自动批准" : ON_ASK[P.on_ask] || P.on_ask,
+      why: P.on_ask === "allow" ? "需要审批的操作会直接执行（--yes），只应在一次性沙箱里使用"
+        : P.on_ask === "deny" && P.auto_approve.length ? `${P.auto_approve.length} 条规则命中的操作自动批准，其余拒绝；高危命令、读过不可信内容后的外部操作照样拒绝`
+        : `无人处理的审批 ${fmt.dur(P.approval_timeout)} 后按拒绝处理` },
     { tone: "ok", icon: "shieldCheck", label: "托管基线", value: `${P.baseline} 条规则`,
       why: "读写凭证位置、灾难性命令在任何模式下都拒绝，完全放行也不例外" },
     sb.level === "off" && sb.network !== "allow"
@@ -80,9 +83,12 @@ function render(inner, s, app) {
       ${card("cpu", "模型", kv([["供应商", esc(s.model.provider)], ["模型", code(s.model.model)],
         ["降级链", s.model.fallback.length ? s.model.fallback.map(code).join(" → ") : none("未配置")],
         ["上下文窗口", `<span class="tnum">${fmt.int(s.model.context_window)}</span> tokens`], ["单次输出上限", `<span class="tnum">${fmt.int(s.model.max_output)}</span> tokens`]]))}
-      ${card("shield", "权限与审批", kv([["默认模式", esc(modeOf(P.mode).label)], ["无人值守时", esc(ON_ASK[P.on_ask] || P.on_ask)],
+      ${card("shield", "权限与审批", kv([["默认模式", esc(modeOf(P.mode).label)],
+        ["无人值守时", esc(P.on_ask === "deny" && P.auto_approve.length ? "按规则自动批准，其余拒绝" : ON_ASK[P.on_ask] || P.on_ask)],
         ["审批超时", esc(fmt.dur(P.approval_timeout))], ["托管基线", `${esc(P.baseline)} 条（不可关闭）`],
-        ["自定义规则", P.rules.length ? `<ul class="rule-list">${P.rules.map((r) => `<li>${code(r)}</li>`).join("")}</ul>` : none("无，使用模式默认值")]]),
+        ["自定义规则", P.rules.length ? `<ul class="rule-list">${P.rules.map((r) => `<li>${code(r)}</li>`).join("")}</ul>` : none("无，使用模式默认值")],
+        ["无人值守自动批准", P.auto_approve.length ? `<ul class="rule-list">${P.auto_approve.map((r) => `<li>${code(r)}</li>`).join("")}</ul>`
+          + (P.on_ask === "deny" ? "" : none("on_ask = deny 时生效")) : none("无")]]),
         `${esc(s.tools)} 个工具`)}
       ${card("terminal", "命令执行", kv([["系统沙箱", s.sandbox.level === "off" ? none("未启用") : esc(s.sandbox.level)],
         ["沙箱网络", netLabel(s.sandbox)],

@@ -11,6 +11,9 @@
 例外：命令分析判定为 **灾难性**（删根目录/家目录、格式化磁盘、写块设备、fork 炸弹）或 **碰到凭证位置** 时，
 在一切规则与模式之前直接 deny——bypass 模式、会话授权、allow 规则都不能放行。
 
+无人值守（``on_ask="deny"``）时，判定为 ask 的调用默认拒绝；``auto_approve`` 规则命中的改为自动批准，
+见 ``PermissionPolicy.auto_approval``。
+
 bash 与凭证位置
 ---------------
 文件工具对凭证位置（``policy/sensitive.py`` 的 ``CREDENTIAL_GLOBS``）在任何模式下都拒绝；bash 早期只把命中升为 dangerous，
@@ -144,16 +147,27 @@ class PermissionResult:
     effect: Effect = Effect.READ
     rule: str | None = None
     analysis: list[str] | None = None
+    source: str | None = None       # 命中规则的来源（managed、session……），没命中规则时为 None
+
+
+def auto_approve_rule(text: str) -> Rule:
+    """无人值守时自动批准的规则：写成 ``工具(模式)``（如 ``bash(npm test*)``、``write(src/**)``），可以带 ``allow:`` 前缀。"""
+    t = text.strip()
+    try:
+        return Rule.parse(t if t.startswith("allow:") else f"allow:{t}", "auto_approve")
+    except ValueError:
+        raise ValueError(f"无法解析自动批准规则：{text!r}（格式：工具(模式)，如 bash(npm test*)、write(src/**)）") from None
 
 
 class PermissionPolicy:
     def __init__(self, mode: str | Mode = Mode.DEFAULT, rules: Iterable[str | Rule] = (), *, workspace: Any = None,
-                 baseline: bool = True):
+                 baseline: bool = True, auto_approve: Iterable[str | Rule] = ()):
         self.mode = Mode(mode)
         self.workspace = workspace
         self.baseline = baseline
         parsed = [r if isinstance(r, Rule) else Rule.parse(r) for r in rules]
         self.rules: list[Rule] = ([Rule.parse(r, "managed") for r in MANAGED_BASELINE] if baseline else []) + parsed
+        self.auto_rules = [r if isinstance(r, Rule) else auto_approve_rule(r) for r in auto_approve]
 
     # ------------------------------------------------------------------ 目标串
     def _targets(self, tool: Tool, args: dict[str, Any]) -> list[str]:
@@ -204,21 +218,14 @@ class PermissionPolicy:
 
         # 1) 规则：deny → ask → allow，先命中者生效
         decision: Decision | None = None
-        reason, hit = "", None
+        reason, hit, source = "", None, None
         for want in (Decision.DENY, Decision.ASK, Decision.ALLOW):
-            for r in all_rules:
-                if r.decision != want:
-                    continue
-                if tool.name == "bash" and want == Decision.ALLOW and r.pattern:
-                    # 复合命令：每一段都必须被 allow 规则覆盖，防止 "git status && rm -rf x" 搭便车
-                    segs = targets[1:] or targets[:1]
-                    if not all(any(r2.decision == Decision.ALLOW and r2.matches(tool.name, [s]) for r2 in all_rules) for s in segs):
-                        continue
-                if r.matches(tool.name, targets):
-                    decision, hit = want, str(r)
-                    reason = f"命中{'托管' if r.source == 'managed' else ('会话授权' if r.source == 'session' else '')}规则 {r}"
-                    break
-            if decision:
+            same = [r for r in all_rules if r.decision == want]
+            r = self._allowed_by(tool, targets, same) if want == Decision.ALLOW \
+                else next((r for r in same if r.matches(tool.name, targets)), None)
+            if r is not None:
+                decision, hit, source = want, str(r), r.source
+                reason = f"命中{'托管' if r.source == 'managed' else ('会话授权' if r.source == 'session' else '')}规则 {r}"
                 break
 
         # 2) 模式默认姿态
@@ -240,7 +247,40 @@ class PermissionPolicy:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:
             reason = f"{reason}（{analysis.reasons[0]}）"  # 让审批人一眼看到“为什么要问”
-        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None)
+        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source)
+
+    def _allowed_by(self, tool: Tool, targets: list[str], rules: list[Rule]) -> Rule | None:
+        """放行这次调用的第一条规则。bash 复合命令每一段都要被其中某条覆盖，防止 "git status && rm -rf x" 搭便车。"""
+        segs = targets[1:] or targets[:1]
+        for r in rules:
+            if tool.name == "bash" and r.pattern and not all(any(r2.matches(tool.name, [s]) for r2 in rules) for s in segs):
+                continue
+            if r.matches(tool.name, targets):
+                return r
+        return None
+
+    def auto_approval(self, tool: Tool, args: dict[str, Any], perm: PermissionResult, *,
+                      tainted: bool = False) -> tuple[Rule | None, str]:
+        """无人值守时，这次需要确认的调用能否按 ``auto_approve`` 规则自动批准：返回 (命中的规则, "")，或者
+        (None, 不批准的原因)。规则按 allow 规则的口径匹配，但这几类调用始终不自动批准，照旧拒绝：
+
+        - 命令分析为高危的（risk = critical）；
+        - 实际执行的程序不在命令文本里的（命令替换、仓库配置）：规则按文本匹配，担保不了它们；
+        - 托管基线要求确认的（密钥线索、.git 内部、flywhl 配置）；
+        - 会话读取过不可信内容之后的外部副作用操作：提示注入要把数据送出去，走的就是这条路。
+        """
+        if not self.auto_rules:
+            return None, ""
+        if perm.risk == "critical":
+            return None, "高危命令不自动批准"
+        if tool.name == "bash" and analyze(tool.permission_target(args), self._root()).opaque:
+            return None, "命令实际执行的程序不在命令文本里，不自动批准"
+        if perm.source == "managed":
+            return None, f"托管基线要求确认（{perm.rule}），不自动批准"
+        if tainted and perm.effect == Effect.EXTERNAL:
+            return None, "会话读取过不可信内容，外部副作用操作不自动批准"
+        r = self._allowed_by(tool, self._targets(tool, args), self.auto_rules)
+        return (r, "") if r else (None, "没有匹配的 auto_approve 规则")
 
     def _mode_default(self, tool: Tool, args: dict[str, Any], effect: Effect) -> tuple[Decision, str]:
         if self.mode == Mode.BYPASS:

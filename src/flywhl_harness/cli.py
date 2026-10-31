@@ -37,6 +37,7 @@ from .config import HarnessConfig, TrustRequest, flywhl_home, load_dotenv, read_
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
+from .policy.permissions import auto_approve_rule
 from .runtime.manager import Harness
 
 C = {"dim": "\033[2m", "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m", "blue": "\033[34m",
@@ -194,6 +195,16 @@ def _config(args: argparse.Namespace) -> HarnessConfig:
         cfg.permissions.sandbox_network = "allowlist"
     if getattr(args, "network", None):
         cfg.permissions.sandbox_network = args.network
+    if getattr(args, "approve", None):
+        if cfg.permissions.on_ask == "allow":
+            raise SystemExit("--approve 不能和 --yes（或配置里的 on_ask = \"allow\"）一起用：后者已经放行所有需要审批的操作")
+        for r in args.approve:
+            try:
+                auto_approve_rule(r)
+            except ValueError as e:
+                raise SystemExit(f"--approve：{e}") from None
+        cfg.permissions.auto_approve = [*cfg.permissions.auto_approve, *args.approve]
+        cfg.permissions.on_ask = "deny"     # 给了自动批准规则就是无人值守：其余需要审批的一律拒绝
     return cfg
 
 
@@ -465,6 +476,8 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("run", parents=[common], help="一次性执行")
     sp.add_argument("prompt")
     sp.add_argument("--json", action="store_true", help="输出 JSONL 事件流")
+    sp.add_argument("--approve", action="append", metavar="规则",
+                    help="无人值守时自动批准的操作，如 'bash(npm test*)'、'write(src/**)'，可重复；其余需要审批的一律拒绝")
     sp.set_defaults(fn=cmd_run)
     sub.add_parser("sessions", parents=[common], help="列出会话").set_defaults(fn=cmd_sessions)
     sp = sub.add_parser("runs", parents=[common], help="列出运行")
