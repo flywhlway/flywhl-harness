@@ -494,14 +494,19 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 规则加上之后，DNS 解析、`curl` / `git` / Python / Node 的 HTTPS、`xcrun`、`brew`、`osascript` 本地计算照常可用：
 TLS 证书校验走 `trustd`，不受影响。`tests/test_backlog.py` 核对 Unix 套接字（三种网络策略，含 `unix_sockets` 放行）与钥匙串。
 
-本机数据库常用 Unix 套接字连接（Homebrew 的 PostgreSQL 默认是 `/tmp/.s.PGSQL.5432`）。沙箱里要用的，逐个列出：
+本机数据库常用 Unix 套接字连接。沙箱里要用的，逐个列出：
 
 ```toml
 [permissions]
-unix_sockets = ["/tmp/.s.PGSQL.5432"]
+unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]
 ```
 
-列出的套接字任何网络策略下都放行，所以它和白名单条目一样，写在项目配置里要先信任。放行位置在启动时定下（目录部分解析符号链接），之后不再解析：`/tmp` 对沙箱可写，命令可以把那个套接字换成指向 `docker.sock` 的符号链接，每条命令重新解析就会把它放进来。内核按解析后的真实路径判定连接（实测），所以放行位置上被换成的符号链接连不过去。
+列出的套接字任何网络策略下都放行，所以它和白名单条目一样，写在项目配置里要先信任。放行位置有两条限制：
+
+- **启动时定下，之后不再解析。** 目录部分解析符号链接，最后一级保留原样。每条命令都重新解析的话，命令可以先把那个位置换成指向 `docker.sock` 的符号链接。内核按解析后的真实路径判定连接（实测），放行位置上被换成的符号链接连不过去；
+- **不能在沙箱可写的目录里**（工作区、临时目录），否则拒绝执行。符号链接挡得住，硬链接挡不住：命令在那里建一个 `docker.sock` 的硬链接，或者把上层目录整个换掉，路径照样对得上，连到的却是 Docker。
+
+Homebrew 的 PostgreSQL 默认把套接字放在 `/tmp`，不能直接放行：把 `unix_socket_directories` 改到临时目录之外，或者改用本机 TCP 端口（`allowlist` 档写 `localhost:5432`）。
 
 ### 出站白名单
 
@@ -555,11 +560,12 @@ Seatbelt 的网络规则只认 `localhost` 或 `*` 加端口，写不了主机�
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-ipc --die-with-parent --new-session
       --tmpfs /run                                   # docker.sock、D-Bus、XDG_RUNTIME_DIR 里的套接字都不出现
       [--unshare-net]                                # sandbox_network = "deny"
-      --bind <本会话私有目录> /tmp                     # X11、tmux、ssh-agent 的套接字不出现；命令之间照样共用
-      --bind /var/tmp /var/tmp --bind <工作区> <工作区>  # 可写：临时目录与工作区
+      --bind <本会话私有目录> /tmp --tmpfs /var/tmp     # X11、tmux、ssh-agent 的套接字不出现；/tmp 在命令之间照样共用
+      --bind <工作区> <工作区>                          # 可写：工作区
       --ro-bind <工作区>/.flywhl <工作区>/.flywhl     # harness 状态与项目配置再只读挂回去
       --tmpfs ~/.ssh --ro-bind /dev/null <工作区>/sub/.netrc ...  # 凭证位置：目录换成空目录，文件换成空文件
-      --bind /tmp/.s.PGSQL.5432 /tmp/.s.PGSQL.5432   # unix_sockets 列出的挂回来
+      --ro-bind /dev/null ~/.docker/run/docker.sock ...  # 其余看得见的宿主套接字（来自 /proc/net/unix）
+      --bind /run/postgresql/.s.PGSQL.5432 /var/run/postgresql/.s.PGSQL.5432   # unix_sockets 列出的挂回来
       --setenv TMPDIR /tmp --chdir <工作区> /bin/bash -c '<命令>'
 ```
 
@@ -570,7 +576,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-ipc --die-wi
 | 凭证位置 | 按清单正则拒绝，任何路径都算 | 家目录按清单查，工作区逐层遍历（超过 5 万个条目拒绝执行）；`node_modules`、`.venv`、`.git` 这类依赖与缓存目录不进去——每条命令都走一遍太慢，里面也不是用户放凭证的地方，放在那里的凭证认不出。工作区与家目录之外散落的私钥文件同样认不出 |
 | 其它进程的环境变量 | 清单里的 `/proc/*/environ` | 新 PID 命名空间，看不到别的进程 |
 | 新建 `flywhl.toml` | 拒绝 | 已存在的只读；还不存在的拦不住新建，新建的项目配置仍要经过信任确认 |
-| Unix 套接字 | 按连接拒绝，`unix_sockets` 列出的放行 | 只读挂载挡不住连接，只能让它们不出现：`/run` 换成空目录、`/tmp` 换成本会话私有的目录（进程退出时删除），其余位置上的按 `/proc/net/unix` 逐个盖成 `/dev/null`；列出的再挂回来（只挂真的套接字，沙箱可写目录里的拒绝执行）。认不出的：按相对路径绑定的、命令开始之后才出现的；`allow` 档与宿主共用网络命名空间，抽象命名空间里的套接字（部分 X11、D-Bus）仍然连得上 |
+| Unix 套接字 | 按连接拒绝，`unix_sockets` 列出的放行 | 只读挂载挡不住连接，只能让它们不出现：`/run`、`/var/run`、`/var/tmp` 换成空目录，`/tmp` 换成本会话私有的目录（进程退出时删除）；其余位置上的（包括挂回 `/tmp` 下面的工作区）按 `/proc/net/unix` 逐个盖成 `/dev/null`。那里记的是绑定时的路径，绑定后改过名的按原目录找出来。列出的再挂回来，只挂真的套接字。认不出的：按相对路径绑定的、所在目录被整个挪走的、被宿主进程硬链接到别处的、命令开始之后才出现的；`allow` 档与宿主共用网络命名空间，抽象命名空间里的套接字（部分 X11、D-Bus）仍然连得上 |
 | 钥匙串、`open` 一类 | 拒绝对应的 Mach 服务 | 没有对应物；桌面会话的 D-Bus 在 `/run` 里，一并遮住 |
 | `deny` 网络 | 拒绝 IP 连接与 Unix 套接字 | 新网络命名空间，抽象套接字也隔开了 |
 | `allowlist` 网络 | 支持 | 未实现，配置了就拒绝执行 |

@@ -238,9 +238,13 @@ async def test_sandbox_allowlist_reaches_only_listed_hosts(ws):
 
 @needs_seatbelt
 @pytest.mark.parametrize("network", ["allow", "deny", "allowlist"])
-async def test_sandbox_blocks_unix_sockets_unless_listed(ws, network):
+async def test_sandbox_blocks_unix_sockets_unless_listed(ws, network, monkeypatch):
     """Unix 套接字连着本机守护进程：docker.sock 能起挂载家目录的容器，tmux 能替命令在沙箱外执行。任何网络策略下都拒绝，
     unix_sockets 列出的才放行（本机数据库这类）。deny / allowlist 下连 DNS 也不放：查询能把数据编码进域名带出去。"""
+    from flywhl_harness.tools import sandbox
+
+    # 放行的套接字不能在沙箱可写的目录里；测试只能在临时目录里建套接字，就把 /tmp 从可写目录里拿掉
+    monkeypatch.setattr(sandbox, "default_writable", lambda: [os.path.realpath(tempfile.gettempdir())])
     d = tempfile.mkdtemp(prefix="fw", dir="/tmp")   # Unix 套接字路径不能超过 104 字节
     hidden, listed, link = os.path.join(d, "h"), os.path.join(d, "l"), os.path.join(d, "k")
     os.symlink(hidden, link)   # 放行位置上是指向别处的符号链接：连接按真实路径判定，不放行
@@ -267,6 +271,17 @@ def test_unix_sockets_are_pinned_at_startup(tmp_path):
     (tmp_path / "real" / "s").symlink_to("/var/run/docker.sock")
     [(want, real)] = pin_sockets([str(tmp_path / "alias" / "s")])
     assert want == str(tmp_path / "alias" / "s") and real == os.path.join(os.path.realpath(tmp_path / "real"), "s")
+
+
+def test_listed_sockets_must_not_sit_in_writable_dirs(tmp_path):
+    """放行的套接字在沙箱可写的目录里时拒绝执行：命令能把那个位置换成 docker.sock 的硬链接（同一个 inode，路径照样对得上），
+    或者把上层目录整个换掉。目录部分按真实路径比（/tmp 与 /private/tmp）。"""
+    from flywhl_harness.tools.sandbox import seatbelt_profile
+
+    for sock, writable in ((str(tmp_path / "ws" / "s"), []), ("/tmp/.s.PGSQL.5432", ["/tmp"])):
+        with pytest.raises(RuntimeError, match="沙箱可写的目录"):
+            seatbelt_profile(tmp_path / "ws", writable=writable, env={}, unix_sockets=[sock])
+    assert "/tmp/.s.PGSQL.5432" in seatbelt_profile(tmp_path / "ws", writable=[], env={}, unix_sockets=["/tmp/.s.PGSQL.5432"])
 
 
 def test_seatbelt_profile_closes_local_ipc():
@@ -466,19 +481,21 @@ async def test_linux_sandbox_hides_host_sockets_but_keeps_session_tmp(ws):
 
 @needs_bwrap
 async def test_linux_sandbox_masks_host_sockets_outside_tmp_and_run(ws):
-    """家目录、/var/tmp 这类沙箱看得见的位置上的套接字（Docker Desktop、colima、screen……）按 /proc/net/unix 逐个盖住。"""
-    d = tempfile.mkdtemp(prefix="fw", dir="/var/tmp")
-    sock = os.path.join(d, "s")
-    probe = f'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {sock} 2>&1 | tail -1'
-    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": probe}}]}, "好"],
+    """沙箱看得见的位置上的套接字（家目录里的 Docker Desktop、colima、screen……）按 /proc/net/unix 逐个盖住：
+    工作区挂回到 /tmp 下面也一样；绑定之后改过名的（/proc/net/unix 里还是旧名字）按原来的目录找出来。
+    /var/tmp 不和宿主共用。"""
+    (ws / "a").mkdir()
+    plain, renamed = str(ws / "s"), str(ws / "a" / "s")
+    probe = 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {} 2>&1 | tail -1'
+    cmds = [probe.format(plain), probe.format(renamed), "echo x > /var/tmp/fw-probe && ls /var/tmp"]
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
                      permissions__mode="bypass", permissions__sandbox="linux")
-    server = await asyncio.start_unix_server(lambda r, w: w.close(), sock)
-    try:
-        async with server:
-            out = tool_ends((await h.run("连一下")).events)[0]["content"]
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-    assert "CONNECTED" not in out, out
+    servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p) for p in (plain, str(ws / "a" / "t"))]
+    os.rename(ws / "a" / "t", renamed)
+    async with servers[0], servers[1]:
+        out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
+    assert "CONNECTED" not in out[0] and "CONNECTED" not in out[1], out
+    assert "fw-probe" in out[2] and not os.path.exists("/var/tmp/fw-probe"), out
 
 
 @needs_bwrap

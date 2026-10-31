@@ -8,7 +8,8 @@ bypass 模式下又没有人审，漏掉就是照读。这一档让内核按真�
 - **写操作限制在工作区与临时目录**，工作区里 harness 自己的 ``.flywhl/`` 与 ``flywhl.toml`` 除外（与托管基线一致）；
 - **本机进程间通信不能绕开前两条**：docker.sock 能起一个挂载家目录的容器，tmux 能替它在沙箱外敲命令，ssh-agent 能用私钥，
   ``open`` / ``osascript`` 让沙箱外的进程替它执行，钥匙串与剪贴板里就是凭证。Unix 套接字默认只放行 DNS 与系统日志，
-  其余要在 ``unix_sockets`` 里逐个列出；钥匙串、剪贴板、LaunchServices / Apple 事件的 Mach 服务与 launchd 建任务一律拒绝。
+  其余要在 ``unix_sockets`` 里逐个列出（不能在沙箱可写的目录里）；钥匙串、剪贴板、LaunchServices / Apple 事件的 Mach 服务
+  与 launchd 建任务一律拒绝。
 
 刻意留小的范围：
 
@@ -28,8 +29,8 @@ Linux 档（``sandbox = "linux"``）用 bubblewrap，规则对齐 macOS，做法
 - 根目录只读挂载，工作区可写，``.flywhl/`` 与 ``flywhl.toml`` 再只读挂回去（工作区里还不存在的
   ``flywhl.toml`` 拦不住新建，新建的项目配置仍要经过信任确认）；
 - Unix 套接字没有按连接拒绝的规则，只读挂载也挡不住连接，只能让它们不出现在沙箱里：``/run``（docker.sock、D-Bus、
-  ``XDG_RUNTIME_DIR``）换成空目录，``/tmp``（X11、tmux、ssh-agent）换成本会话私有的目录，其余位置上的（家目录里的
-  Docker Desktop、colima……）按 ``/proc/net/unix`` 逐个盖成 ``/dev/null``；``unix_sockets`` 列出的再挂回来。
+  ``XDG_RUNTIME_DIR``）与 ``/var/tmp`` 换成空目录，``/tmp``（X11、tmux、ssh-agent）换成本会话私有的目录，其余位置上的
+  （家目录里的 Docker Desktop、colima……）按 ``/proc/net/unix`` 逐个盖成 ``/dev/null``；``unix_sockets`` 列出的再挂回来。
   ``allow`` 与宿主共用网络命名空间，抽象命名空间里的套接字（不在文件系统上，如部分 X11、D-Bus）仍然连得上；
 - ``deny`` 另起网络命名空间（只剩回环，抽象套接字也隔开了）；``allowlist`` 还没有实现，配置了就拒绝执行。
 """
@@ -71,6 +72,7 @@ _CREDENTIAL_RE = re.compile("|".join(fnmatch.translate(g) for g in CREDENTIAL_GL
 _WALK_SKIP = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
                         ".ruff_cache", ".gradle", ".next", "target"})
 _WALK_LIMIT = 50_000
+_SCAN_LIMIT = 4096   # 找改过名的套接字时，一个目录里最多看这么多条目
 
 
 def _str(path: str) -> str:
@@ -115,6 +117,7 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     ws = os.path.realpath(workspace)
     extra = default_writable() if writable is None else [os.path.realpath(p) for p in writable]
     allowed = " ".join([f"(subpath {_str(ws)})", *(f"(subpath {_str(p)})" for p in extra), *_DEVICES])
+    _refuse_writable(unix_sockets, [ws, *extra])
     lines = [
         "(version 1)",
         "(allow default)",
@@ -158,6 +161,17 @@ def pin_sockets(paths: Iterable[str]) -> list[tuple[str, str]]:
 
 def _under(path: str, base: str) -> bool:
     return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _refuse_writable(sockets: Iterable[str], writable: Iterable[str]) -> None:
+    """放行的套接字不能落在沙箱可写的目录里：命令能把那个位置换成别的套接字的硬链接（同一个 inode，路径照样对得上），
+    或者把上层目录整个换掉。符号链接挡得住（连接按真实路径判定），这两种挡不住。目录部分按真实路径再比一次。"""
+    dirs = list(writable)
+    for s in sockets:
+        real = os.path.join(os.path.realpath(os.path.dirname(s)), os.path.basename(s))
+        if any(_under(p, w) for p in (s, real) for w in dirs):
+            raise RuntimeError(f"unix_sockets 里的 {s} 在沙箱可写的目录里，命令能把它换成别的套接字；"
+                               "换个位置再放行（例如把服务的套接字目录设到临时目录之外），或者改用本机 TCP 端口")
 
 
 def host_sockets() -> list[str]:
@@ -236,9 +250,11 @@ def bwrap_argv(command: str, workspace: str | Path, *, writable: Iterable[str] |
         if resolv.startswith("/run/"):
             argv += ["--ro-bind", resolv, resolv]
     argv += ["--bind", private_tmp, "/tmp"] if private_tmp else ["--tmpfs", "/tmp"]
+    if os.path.isdir("/var/tmp") and not os.path.islink("/var/tmp"):   # 同理不和宿主共用：宿主进程放在那里的套接字看不到
+        argv += ["--tmpfs", "/var/tmp"]
     # 挂载有先后：后挂的盖住先挂的。可写的上层目录先挂，工作区其次，再把 harness 状态与凭证位置盖回去
-    extra = ["/var/tmp"] if writable is None else list(writable)
-    for p in sorted({os.path.realpath(p) for p in extra if os.path.isdir(p)}, key=len):
+    binds = sorted({os.path.realpath(p) for p in (writable or ()) if os.path.isdir(p)}, key=len)
+    for p in binds:
         argv += ["--bind", p, p]
     argv += ["--bind", ws, ws]
     for p in (os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml")):
@@ -246,17 +262,16 @@ def bwrap_argv(command: str, workspace: str | Path, *, writable: Iterable[str] |
             argv += ["--ro-bind", p, p]
     for p in _credential_paths(ws, dict(os.environ) if env is None else env):
         argv += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
-    # 宿主上其余的套接字（家目录里的 Docker Desktop、colima、screen……）逐个盖成 /dev/null；/run、/tmp 已经整体换掉了
+    # 宿主上其余的套接字（家目录里的 Docker Desktop、colima、screen……）逐个盖成 /dev/null。/run、/tmp、/var/tmp 已经整体换掉，
+    # 但挂回去的工作区与可写目录可能就在 /tmp 下面，里面的照样要盖
     pinned = {real for _, real in unix_sockets}
-    hidden = [h for h in ("/run", "/var/run", "/tmp") if not os.path.islink(h)]
-    for p in host_sockets():
-        if p not in pinned and not any(_under(p, h) for h in hidden) and _is_socket(p):
+    hidden = [h for h in ("/run", "/var/run", "/tmp", "/var/tmp") if not os.path.islink(h)]
+    for p in _visible_sockets(host_sockets(), hidden, [ws, *binds]):
+        if p not in pinned:
             argv += ["--ro-bind", "/dev/null", p]
-    # 显式放行的挂回来：只挂真的套接字；沙箱能写的目录里的不挂，命令能把它换成指向别处的符号链接
-    writable_dirs = [ws, *(os.path.realpath(p) for p in [*extra, *([private_tmp] if private_tmp else [])])]
+    # 显式放行的挂回来：只挂真的套接字；沙箱能写的目录里的不挂
+    _refuse_writable([real for _, real in unix_sockets], [ws, *binds, *([os.path.realpath(private_tmp)] if private_tmp else [])])
     for want, real in unix_sockets:
-        if any(_under(real, w) for w in writable_dirs):
-            raise RuntimeError(f"unix_sockets 里的 {want} 在沙箱可写的目录里，命令能把它换成指向别处的符号链接；换个位置再放行")
         if _is_socket(real):   # 服务没启动时不挂，连接照常失败
             argv += ["--bind", real, want]
     return [*argv, "--setenv", "TMPDIR", "/tmp", "--chdir", ws, "/bin/bash", "-c", command]
@@ -267,6 +282,31 @@ def _is_socket(path: str) -> bool:
         return stat.S_ISSOCK(os.lstat(path).st_mode)
     except OSError:
         return False
+
+
+def _visible_sockets(paths: Iterable[str], hidden: list[str], exposed: list[str]) -> list[str]:
+    """``/proc/net/unix`` 里的套接字在沙箱里看得见的那些（``hidden`` 整体换掉了，``exposed`` 是挂回去的目录）。
+    那里记的是绑定时的路径：之后改了名（先绑临时名再改名是常见写法），原路径就不存在了，这时把它所在目录里的套接字都找出来；
+    目录本身也被挪走的找不到。目录里条目多到数不完时拒绝执行。"""
+    found, scanned = set(), set()
+    for p in paths:
+        if any(_under(p, h) for h in hidden) and not any(_under(p, e) for e in exposed):
+            continue
+        if _is_socket(p):
+            found.add(p)
+            continue
+        d = os.path.dirname(p)
+        if d in scanned:
+            continue
+        scanned.add(d)
+        try:
+            names = os.listdir(d)
+        except OSError:   # 目录也不在了
+            continue
+        if len(names) > _SCAN_LIMIT:
+            raise RuntimeError(f"宿主进程在 {d} 里绑定的套接字改过名，目录里的条目超过 {_SCAN_LIMIT} 个，没法逐个确认都已遮住")
+        found.update(q for q in (os.path.join(d, n) for n in names) if _is_socket(q))
+    return sorted(found)
 
 
 __all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "SANDBOX_NETWORK", "bwrap_argv", "default_writable", "sandbox_argv",
