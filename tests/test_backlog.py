@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -760,6 +761,9 @@ def test_truncated_values_are_checked_against_the_current_directory():
     ("docker run --rm -i mcp/fetch", ["docker 镜像 mcp/fetch（没有用 @sha256: 摘要锁定）"]),
     ("docker run --rm -i mcp/fetch@sha256:" + "a" * 64, []),
     ("sh -c 'npx -y lint-hook'", ["npx 包 lint-hook"]),                 # 套一层 shell 照样认得
+    ("true&&npx -y lint-hook", ["npx 包 lint-hook"]),                  # 按 shell 的规则拆：&&、; 两边没有空格也是两条命令
+    ("echo a#b;npx -y lint-hook", ["npx 包 lint-hook"]),               # a#b 在 shell 里不是注释
+    ("pnpx some-hook", ["pnpx 包 some-hook"]),
     ("python3 scripts/guard.py", []),
 ])
 def test_unpinned_packages_are_recognized(command, loose):
@@ -788,6 +792,11 @@ def _scripts(d):
                                   encoding="utf-8")
     (d / "sub").mkdir()
     (d / "sub" / "tight.py").write_text(head + '#   "evil",\n# ]\n# ///\n', encoding="utf-8")
+    # 没有扩展名的脚本：经 shebang 里的 uv run --script 运行，同样现装内联依赖；pipx run 把存在的文件都当脚本
+    (d / "sub" / "server").write_text(head + '#   "evil",\n# ]\n# ///\n', encoding="utf-8")
+    (d / "runme").write_text(head + '#   "requests<3",\n# ]\n# ///\n', encoding="utf-8")
+    (d / "srv").mkdir()
+    (d / "srv" / "ok.py").write_text(head + '#   "requests==2.31.0",\n# ]\n# ///\n', encoding="utf-8")
 
 
 @pytest.mark.parametrize("command", [
@@ -824,6 +833,13 @@ def _scripts(d):
     "uv run --directory sub tight.py",                         # 换了目录：执行的是 sub/tight.py，不是绑定的那份
     "uv --directory=sub run tight.py",
     "uvx --directory sub --from ./pkg.tgz tool",
+    "uv run --directory sub server",                           # 换了目录，没有扩展名的脚本同样要查
+    "UV_WORKING_DIRECTORY=sub uv run tight.py",                # 换目录的环境变量
+    "env UV_PROJECT=sub uv run tight.py",
+    "sh -c 'UV_WORKING_DIRECTORY=sub uv run tight.py'",
+    "cd sub && uv run tight.py",
+    "uv run ghost.py",                                         # 找不到的脚本：uv 会去 PATH 上找同名命令
+    "pipx run runme",
 ])
 def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import unpinned_packages
@@ -852,6 +868,8 @@ def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     "pipx run tight.py",
     "uv run python loose.py",                                  # 脚本交给 python 运行时，uv 不读内联依赖
     "uv run multi.py",
+    "uv --directory srv run ok.py",                            # MCP 示例的常见写法：换过去的目录里的脚本按内容绑定
+    "cd srv && uv run ok.py",
 ])
 def test_pinned_sources_stay_pinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import referenced_files, unpinned_packages
@@ -872,6 +890,26 @@ def test_every_referenced_file_is_bound(tmp_path):
     for k in range(40):
         (tmp_path / f"f{k}.sh").write_text("", encoding="utf-8")
     assert len(referenced_files("cat " + " ".join(f"f{k}.sh" for k in range(40)), tmp_path)) == 40
+
+
+def test_paths_resolve_in_every_directory_the_command_may_switch_to(tmp_path):
+    """换目录的写法（选项、环境变量、cd，以及配置里的 env）：相对路径在每个可能的目录下都找、都绑定内容。"""
+    from flywhl_harness.policy.hooks import CommandHook
+    from flywhl_harness.policy.supply_chain import referenced_files, unpinned_in, unpinned_packages
+
+    _scripts(tmp_path)
+    ok = (tmp_path / "srv" / "ok.py").resolve()
+    for command, env in ((f"uv --directory {shlex.quote(str(tmp_path / 'srv'))} run ok.py", None),
+                         ("cd srv && uv run ok.py", None), ("uv run ok.py", {"UV_WORKING_DIRECTORY": "srv"})):
+        assert ok in referenced_files(command, tmp_path, env) and unpinned_packages(command, tmp_path, env) == []
+    server = {"command": "uv", "args": ["run", "tight.py"], "env": {"UV_WORKING_DIRECTORY": "sub"}}
+    assert unpinned_in([], {"x": server}, tmp_path) == ["MCP 服务器 x：uv run 脚本 tight.py 的内联依赖 evil"]
+    assert unpinned_in([("uv run tight.py", {"UV_WORKING_DIRECTORY": "sub"})], {}, tmp_path)
+    (tmp_path / "guard.py").write_text("", encoding="utf-8")
+    assert (tmp_path / "guard.py").resolve() in referenced_files("python3 guard.py>/dev/null", tmp_path)
+    hook = CommandHook("uv run ok.py", str(tmp_path), env={"UV_WORKING_DIRECTORY": "srv"})   # 只记录、比对，不执行
+    ok.write_text("print(2)\n", encoding="utf-8")
+    assert hook.changed_files(str(tmp_path)) == [str(ok)]
 
 
 def test_unpinned_list_hides_url_credentials():

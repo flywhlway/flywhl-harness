@@ -339,7 +339,7 @@ def _describe(key: str, value: Any, base: Path) -> list[str]:
 
     if key == "hooks" and isinstance(value, list) and value:
         return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}{_describe_env(h)}"
-                + (describe(h["command"], base) if isinstance(h.get("command"), str) else "")
+                + (describe(h["command"], base, h.get("env")) if isinstance(h.get("command"), str) else "")
                 if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
     if key == "mcp_servers" and isinstance(value, dict) and value:
         return [_describe_mcp(name, s, base) for name, s in value.items()]
@@ -375,7 +375,7 @@ def _describe_mcp(name: str, spec: Any, base: Path) -> str:
         line += "；采信服务器自报的只读、幂等、封闭世界注解"
     if spec.get("read_only_tools"):
         line += f"；这些工具按只读处理，调用不经审批：{spec['read_only_tools']!r}"
-    return line + describe(mcp_argv(spec), mcp_base(spec, base))
+    return line + describe(mcp_argv(spec), mcp_base(spec, base), spec.get("env"))
 
 
 def _run_dir(cfg: HarnessConfig, data: dict[str, Any], explicit: dict[str, Any]) -> Path:

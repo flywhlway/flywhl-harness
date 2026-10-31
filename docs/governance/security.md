@@ -229,7 +229,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 - 用户配置 `~/.flywhl/config.toml` 与 `-c` 显式指定的文件视为可信，完整加载。用户配置先加载，两层的 `hooks` 与 `permissions.rules`
   追加合并而不是替换——否则项目配置写一行 `rules = ["ask:read(*)"]` 就能冲掉你在用户配置里写的 deny 规则。
 
-信任哈希还包含 hook 命令与 MCP 启动参数里直接写出的文件（`python3 scripts/guard.py` 里的脚本，跟随符号链接，系统目录里的解释器除外），确认提示逐个列出；脚本改了，即使配置一字未动也要重新确认。相对路径按 hook 实际运行的目录（工作区）解析，不按配置文件所在目录：用 `--workspace` 或 `FLYWHL_WORKSPACE` 换个工作区启动，执行的是另一份脚本，哈希跟着变，要重新确认。引用的文件不设数量上限，`--config=x`、`-p./x.tgz` 这类写在选项里的路径也算。脚本再导入的模块、挂进容器的目录、`cd hooks && ./guard.sh`、`uv run --directory hooks guard.py` 这类先切换目录的写法、`npx` 临时拉取的包不在其中：前三者要靠审阅，最后一种靠下文的锁版本。
+信任哈希还包含 hook 命令与 MCP 启动参数里直接写出的文件（`python3 scripts/guard.py` 里的脚本，跟随符号链接，系统目录里的解释器除外），确认提示逐个列出；脚本改了，即使配置一字未动也要重新确认。相对路径按 hook 实际运行的目录（工作区）解析，不按配置文件所在目录：用 `--workspace` 或 `FLYWHL_WORKSPACE` 换个工作区启动，执行的是另一份脚本，哈希跟着变，要重新确认。引用的文件不设数量上限，`--config=x`、`-p./x.tgz` 这类写在选项里的路径也算；命令按 shell 的规则拆分，`guard.py>/dev/null` 里的脚本同样认得。命令换了目录时（`cd hooks && ./guard.sh`、`uv --directory hooks run guard.py`、命令前或配置 `env` 里的 `UV_WORKING_DIRECTORY`），相对路径在每个可能的目录下都找、都绑定。脚本再导入的模块、挂进容器的目录、经变量算出来的路径、`npx` 临时拉取的包不在其中：前三者要靠审阅，最后一种靠下文的锁版本。
 
 ### 审批界面本身也是攻击面
 
@@ -316,7 +316,7 @@ MCP 服务器、技能包、hook 脚本有一个共同点：**它们是在你机
 - MCP 服务器子进程以 `env={**_clean_env(True), **self.env}` 启动：密钥类变量被剥离，服务器需要的凭证只能在 `flywhl.toml` 的 `env` 里
   显式给出，第三方服务器拿到了什么，从配置里一眼可见；
 - 启动目录 `flywhl.toml` 里的 `mcp_servers` 要先信任这份配置才会启动；信任哈希包含启动参数里写出的脚本；
-- 经 `npx`、`bunx`、`npm exec`、`pnpm dlx`、`yarn dlx`、`uvx`、`uv run --with`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），`uv run` / `pipx run` 直接运行的远程脚本，以及脚本里 PEP 723 内联声明、没锁版本的依赖（按 uv 的读法解析；带 `[tool.uv]` 换源、换索引的算核对不到），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）。判断锁没锁要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数：认不出的选项（分不清下一个词是它的值还是包名、镜像名，`npm --registry x exec 包` 这类写在子命令前面的全局选项同样要认得）、本地目录、内容没有按引用文件绑定的本地文件、compose 文件与依赖清单里的版本，一律按没锁处理；设置页只给包名，URL 里的账号与查询串去掉；
+- 经 `npx`、`bunx`、`npm exec`、`pnpm dlx`、`yarn dlx`、`uvx`、`uv run --with`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），`uv run` / `pipx run` 直接运行的远程脚本，以及脚本里 PEP 723 内联声明、没锁版本的依赖（按 uv 的读法解析；带 `[tool.uv]` 换源、换索引的算核对不到），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）。判断锁没锁要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数：认不出的选项（分不清下一个词是它的值还是包名、镜像名，`npm --registry x exec 包` 这类写在子命令前面的全局选项同样要认得）、本地目录、内容没有按引用文件绑定的本地文件、找不到的脚本、compose 文件与依赖清单里的版本，一律按没锁处理；设置页只给包名，URL 里的账号与查询串去掉。这两项检查帮人发现疏忽和确认之后的变化，不对抗恶意配置：恶意配置大可以直接 `curl … | sh`，或经变量、eval 间接调用包管理器，信任确认时要看命令本身。还有一处核对不到：包管理器会读运行目录里的配置（`uv.toml`、`pyproject.toml` 的 `[tool.uv]`、`.npmrc`），Agent 改了它们就能换包源、换索引，锁了版本也可能拉到同名同版本的另一份。hook 与 MCP 服务器宜在工作区外的目录运行（MCP 配 `cwd`）；
 - 服务器发来的请求（MCP 允许服务器反向请求客户端）只回复 `ping`，其它一律返回 `-32601`——服务器无法借 sampling 之类的能力反过来驱动模型；
 - annotations 的缺省值取保守一侧，服务器声明的放宽默认不采信，要在配置里写明 `trust_annotations` 或 `read_only_tools`，见上文；
 - 没有签名与权限声明机制。

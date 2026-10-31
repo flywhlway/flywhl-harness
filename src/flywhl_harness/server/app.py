@@ -280,8 +280,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                     "read_only": [t.name.removeprefix(prefix) for t in tools if str(t.effect) == "read"],
                     "ignored_hints": sum(1 for t in tools if getattr(t, "ignored_hints", None)),
                     # 供应链：引用的文件只给路径，没锁版本的只给包名（URL 里的账号、查询串去掉）——完整的启动参数里常带密钥
-                    "files": [str(f) for f in referenced_files(argv, mcp_base(spec, h.workspace_root))],
-                    "unpinned": unpinned_packages(argv, mcp_base(spec, h.workspace_root))}
+                    "files": [str(f) for f in referenced_files(argv, mcp_base(spec, h.workspace_root), spec.get("env"))],
+                    "unpinned": unpinned_packages(argv, mcp_base(spec, h.workspace_root), spec.get("env"))}
 
         return {
             "workspace": str(h.workspace_root),
@@ -296,8 +296,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
                        "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env}),   # 只给变量名
-                       "files": [str(f) for f in referenced_files(hc.command, h.workspace_root)],
-                       "unpinned": unpinned_packages(hc.command, h.workspace_root)} for hc in c.hooks],
+                       "files": [str(f) for f in referenced_files(hc.command, h.workspace_root, hc.env)],
+                       "unpinned": unpinned_packages(hc.command, h.workspace_root, hc.env)} for hc in c.hooks],
             "mcp": [mcp_entry(n, spec) for n, spec in c.mcp_servers.items()],
             "budget": dict(c.budget.__dict__), "snapshots": c.snapshots, "verify_command": c.verify_command,
             "tools": len(names),

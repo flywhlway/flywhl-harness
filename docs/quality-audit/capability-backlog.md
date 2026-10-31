@@ -36,7 +36,7 @@
 | Linux 沙箱 | `sandbox = "linux"`（bubblewrap） | 写操作限制在工作区与临时目录，`.flywhl/`、`flywhl.toml` 只读，凭证位置按具体路径遮蔽；`/tmp` 换成本会话私有目录，宿主的 Unix 套接字遮住；`deny` 档另起网络命名空间 |
 | 沙箱限制 Mach 服务与本机 IPC | macOS 档默认生效 | 钥匙串、剪贴板、`open` / launchd、Unix 套接字都连不上；`unix_sockets` 列出的除外，它们启动时定下位置，不能放在沙箱可写的目录里 |
 | 识别整条路径放在变量里的写法 | 命令分析（`policy/bash_analyzer.py`） | 命令里赋过值的变量按取值展开，`cd` 之后的相对路径按切换后的目录判断；变量可能为空时按为空再判，`rm -rf $DIR/*` 任何模式都拒绝并提示改用 `${DIR:?}`；值要到运行时才知道的按越界处理 |
-| hook 与 MCP 的供应链检查 | 信任确认、`permissions.require_pinned`、「环境与安全」页 | 命令里写出的脚本一并算进信任哈希，命令 hook 每次执行前再核对，改过就拒绝执行；`npx`、`uvx`、`docker run` 这类临时拉取的包没锁到确切版本时标出，打开 `require_pinned` 后拒绝启动。脚本再导入的模块核对不到，hook 脚本宜放在工作区外 |
+| hook 与 MCP 的供应链检查 | 信任确认、`permissions.require_pinned`、「环境与安全」页 | 命令里写出的脚本一并算进信任哈希，命令 hook 每次执行前再核对，改过就拒绝执行；`npx`、`uvx`、`docker run` 这类临时拉取的包没锁到确切版本时标出，打开 `require_pinned` 后拒绝启动。认不出的选项、本地目录、找不到的脚本、脚本的内联依赖这类拿不准的一律算没锁；换了目录的写法在每个可能的目录下都找。脚本再导入的模块、经变量算出的路径、运行目录里的包管理器配置（`uv.toml`、`.npmrc`）核对不到，hook 与 MCP 宜在工作区外运行 |
 
 ## 后续
 

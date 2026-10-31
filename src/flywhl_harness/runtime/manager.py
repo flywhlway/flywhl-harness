@@ -179,7 +179,7 @@ class Harness:
         self.model = model or self.config.model or "flywhl-demo"
         self.model_info = provider.model_info(self.model)
         self.tools = tools if tools is not None else default_tools(self.config, self.data_dir)
-        loose = unpinned_in([hc.command for hc in self.config.hooks], self.config.mcp_servers,
+        loose = unpinned_in([(hc.command, hc.env) for hc in self.config.hooks], self.config.mcp_servers,
                             self.workspace_root)
         if loose and self.config.permissions.require_pinned:
             raise ValueError("permissions.require_pinned 已开启，以下 hook / MCP 服务器临时拉取的包没有锁定确切版本"

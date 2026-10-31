@@ -4,15 +4,20 @@
 
 1. **引用的文件按内容绑定。** ``python3 scripts/guard.py`` 真正执行的是 ``scripts/guard.py``。项目配置的信任哈希
    把这些文件的内容一起算进去，脚本改了就要重新确认；命令 hook 每次执行前再核对一遍——Agent 能改工作区里的文件，
-   改过的脚本会在沙箱外、以 harness 的身份运行。只认命令行里直接写出的文件：``python -m 包``、脚本再导入的模块、
-   ``cd hooks && ./guard.sh`` 这类要先切换目录的写法都核对不到。
+   改过的脚本会在沙箱外、以 harness 的身份运行。只认命令行里直接写出的文件；换了目录的（``cd hooks && ./guard.sh``、
+   ``uv --directory srv run server.py``、``UV_WORKING_DIRECTORY=srv``）在每个可能的目录下都找。``python -m 包``、
+   脚本再导入的模块、整个目录形式的项目都核对不到。
 2. **包管理器临时拉取的代码要锁版本。** ``npx -y some-mcp-server`` 每次启动都可能拉到新发布的版本，包被接管、
    维护者账号被盗都会这样投毒。没锁到确切版本的在信任确认、设置页里标出来；``permissions.require_pinned``
    打开时拒绝启动。认得 npx / bunx / ``pnpm dlx`` / ``yarn dlx`` / ``npm exec``、uvx / ``uv tool run`` /
    ``uv run --with`` / ``pipx run``、docker / podman / nerdctl 的 ``run``（镜像要带 ``@sha256:`` 摘要）。
 
    判断“锁没锁”要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数。这里拿不准时一律按没锁处理：
-   认不出的选项（分不清下一个词是它的值还是包名）、本地目录与没按内容绑定的本地文件、compose 文件和依赖清单里的版本。
+   认不出的选项（分不清下一个词是它的值还是包名）、本地目录与没按内容绑定的本地文件、找不到的脚本、
+   compose 文件和依赖清单里的版本。
+
+这两项帮人发现疏忽、发现确认之后的变化，不对抗恶意配置：恶意配置大可以直接 ``curl … | sh``，或者经变量、eval、
+另一个脚本间接调用包管理器。信任确认时要看命令本身。
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ import os
 import re
 import shlex
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -36,11 +41,15 @@ _SCRIPT_LIMIT = 1 << 20
 
 
 def argv_of(command: str | Iterable[str]) -> list[str]:
+    """命令拆成参数。字符串按 shell 的规则拆（hook 经 shell 执行）：``true&&npx x``、``a;npx x`` 里的 npx 一样会运行。
+    ``#`` 不当注释：``a#b`` 在 shell 里不是注释，当成注释去掉反而会漏看后面的命令。列表（MCP 的 command 加 args）原样用。"""
     if isinstance(command, str):
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split, lex.commenters = True, ""
         try:
-            return shlex.split(command)
+            return list(lex)
         except ValueError:
-            return command.split()
+            return re.findall(r"[^\s;&|()<>]+", command)
     return [str(x) for x in command]
 
 
@@ -49,27 +58,62 @@ def _without_scheme(tok: str) -> str:
     return tok.removeprefix("file://") if tok.startswith("file://") else tok.removeprefix("file:")
 
 
-def referenced_files(command: str | Iterable[str], base: str | Path, _depth: int = 0) -> list[Path]:
+def referenced_files(command: str | Iterable[str], base: str | Path, env: Mapping[str, str] | None = None,
+                     _depth: int = 0, _dirs: tuple[Path, ...] = ()) -> list[Path]:
     """命令里指向现有普通文件的参数（相对路径按 base 解析，跟随符号链接）。PATH 上的命令名不是文件，不算；
-    带空白的参数（``sh -c 'python3 guard.py'``）再拆开找一层。不设数量上限：漏掉一个，它的内容就没人核对。"""
+    带空白的参数（``sh -c 'python3 guard.py'``）再拆开找一层。不设数量上限：漏掉一个，它的内容就没人核对。
+
+    命令换了解析相对路径的目录时（``uv --directory srv run server.py``、``UV_WORKING_DIRECTORY=srv``，见
+    ``_run_dirs``），相对路径在每个候选目录下都找一遍。env 是配置里给子进程设的环境变量。"""
+    argv = argv_of(command)
+    dirs = _bases(Path(base), argv, env, _dirs)
     out: dict[Path, None] = {}
-    for tok in argv_of(command):
+    for tok in argv:
         if any(c.isspace() for c in tok):
             if _depth < 3:
-                out.update(dict.fromkeys(referenced_files(tok, base, _depth + 1)))
+                out.update(dict.fromkeys(referenced_files(tok, base, None, _depth + 1, dirs)))
             continue
         for cand in _path_parts(tok):
             p = Path(os.path.expanduser(cand))
-            p = p if p.is_absolute() else Path(base) / p
-            try:
-                if not p.is_file():
+            for q in [p] if p.is_absolute() else [d / p for d in dirs]:
+                try:
+                    if not q.is_file():
+                        continue
+                    real = q.resolve()
+                except OSError:
                     continue
-                real = p.resolve()
-            except OSError:
-                continue
-            if not str(real).startswith(_SYSTEM_DIRS):
-                out[real] = None
+                if not str(real).startswith(_SYSTEM_DIRS):
+                    out[real] = None
     return list(out)
+
+
+# 会改变“相对路径按哪个目录解析”的写法：uv 的 --directory / --project、pnpm 的 -C / --dir、yarn 的 --cwd、npm 的
+# --prefix、env 的 -C / --chdir、shell 的 cd / pushd，以及 uv 的环境变量。不管选项属于哪个程序都算上：多按几个目录找、
+# 多绑定几个文件无妨
+_DIR_OPTS = ("--directory", "--project", "--dir", "--cwd", "--prefix", "--chdir")
+_DIR_VARS = ("UV_WORKING_DIRECTORY", "UV_PROJECT")
+
+
+def _run_dirs(argv: list[str], env: Mapping[str, str] | None) -> list[str]:
+    # 子进程的环境是 harness 自己的（去掉密钥类变量）再叠上配置里的 env
+    inherited = {**os.environ, **(env if isinstance(env, Mapping) else {})}
+    out = [str(v) for k in _DIR_VARS if (v := inherited.get(k))]
+    for i, tok in enumerate(argv):
+        name, eq, val = tok.partition("=")
+        nxt = argv[i + 1] if i + 1 < len(argv) else ""
+        if name in _DIR_OPTS or name in _DIR_VARS and eq:     # 后者是命令前的 VAR=值、env VAR=值
+            out.append(val if eq else nxt)
+        elif tok.startswith("-C"):
+            out.append(tok[2:].removeprefix("=") or nxt)
+        elif tok in ("cd", "pushd"):
+            out.append(nxt)
+    return [d for d in out if d]
+
+
+def _bases(base: Path, argv: list[str], env: Mapping[str, str] | None, inherited: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+    """相对路径可能按哪些目录解析：命令运行的目录，加上命令（或外层命令、配置里的 env）换过去的目录。"""
+    moved = (base / os.path.expanduser(d) for d in _run_dirs(argv, env))
+    return tuple(dict.fromkeys((base, *inherited, *moved)))
 
 
 def _path_parts(tok: str) -> list[str]:
@@ -107,27 +151,27 @@ def changed_files(pins: dict[str, str]) -> list[str]:
 
 # ---------------------------------------------------------------------- 锁版本
 class _Where(NamedTuple):
-    base: Path                  # 命令运行的目录，本地路径写法（./pkg.tgz）按它找文件
+    base: Path                  # 命令运行的目录
     bound: frozenset[Path]      # 内容已经按引用文件绑定的文件
-    moved: str = ""             # uv 的 --directory / --project：相对路径改按那个目录解析，绑定的不一定是它用的文件
+    bases: tuple[Path, ...]     # 相对路径可能按哪些目录解析（见 _bases）
 
 
-def _moved(opts: list[tuple[str, str]], where: _Where) -> _Where:
-    d = next((v for o, v in opts if o in ("--directory", "--project")), None)
-    return where._replace(moved=d or ".") if d is not None and not where.moved else where
+def unpinned_packages(command: str | Iterable[str], base: str | Path = ".",
+                      env: Mapping[str, str] | None = None) -> list[str]:
+    """命令里经包管理器临时拉取、又没锁到确切版本的包，每项一句说明。带空白的参数（``sh -c 'npx x'``）再拆开找一层。
+    env 是配置里给子进程设的环境变量。"""
+    argv, root = argv_of(command), Path(base)
+    where = _Where(root, frozenset(referenced_files(argv, root, env)), _bases(root, argv, env))
+    return list(dict.fromkeys(_unpinned(argv, where, 0)))
 
 
-def unpinned_packages(command: str | Iterable[str], base: str | Path = ".") -> list[str]:
-    """命令里经包管理器临时拉取、又没锁到确切版本的包，每项一句说明。带空白的参数（``sh -c 'npx x'``）再拆开找一层。"""
-    return list(dict.fromkeys(_unpinned(command, _Where(Path(base), frozenset(referenced_files(command, base))), 0)))
-
-
-def _unpinned(command: str | Iterable[str], where: _Where, depth: int) -> list[str]:
-    argv = argv_of(command)
+def _unpinned(argv: list[str], where: _Where, depth: int) -> list[str]:
     found: list[str] = []
     for i, tok in enumerate(argv):
         if any(c.isspace() for c in tok):
-            found += _unpinned(tok, where, depth + 1) if depth < 3 else []
+            if depth < 3:
+                inner = argv_of(tok)
+                found += _unpinned(inner, where._replace(bases=_bases(where.base, inner, None, where.bases)), depth + 1)
         else:
             found += _runner(tok.rsplit("/", 1)[-1], argv[i + 1:], where)
     return found
@@ -184,7 +228,7 @@ _RUN_FLAGS = frozenset({"-d", "--detach", "--disable-content-trust", "--init", "
 
 
 def _runner(name: str, rest: list[str], where: _Where) -> list[str]:
-    if name in ("npx", "bunx"):
+    if name in ("npx", "bunx", "pnpx"):
         return _npm(name, rest, where, _NPM_VALUES, _NPM_FLAGS)
     if name in ("npm", "yarn", "pnpm"):
         values, flags = (_PNPM_VALUES, _PNPM_FLAGS) if name == "pnpm" else (_NPM_VALUES, _NPM_FLAGS)
@@ -193,7 +237,6 @@ def _runner(name: str, rest: list[str], where: _Where) -> list[str]:
     if name == "uvx":
         return _python(name, rest, where, _UV_VALUES, _UV_FLAGS, _UV_SPECS)
     if name == "uv":
-        where = _moved(_scan(rest, _UV_VALUES, _UV_FLAGS)[0], where)    # 子命令前面的 --directory
         i = _subcommand(name, rest, _UV_VALUES, _UV_FLAGS, ("tool", "run"))
         if isinstance(i, list):
             return i
@@ -288,12 +331,12 @@ def _python(runner: str, args: list[str], where: _Where, values: frozenset[str],
     opts, i, unknown = _scan(args, values, flags)
     if unknown:
         return [_unknown(runner, unknown)]
-    where = _moved(opts, where)
     specs = [v for o, v in opts if o in spec_opts]
     target = args[i] if i < len(args) else ""
-    # uv run 的操作数是命令或脚本；pipx run 只把存在的本地文件与 URL 当脚本，其余是包名
-    script = bool(scripts and target and (_URL.match(target) or _bound(target, where) or not operand and (
-        target.endswith((".py", ".pyw")) or any(a in ("-s", "--script") for a in args[:i]))))
+    # pipx run 把 URL 与存在的本地文件当脚本，其余是包名；uv run 的操作数是命令或脚本，.py、--script、存在的路径
+    # 都按脚本查（没有扩展名的文件经 shebang 里的 uv run --script 运行，同样会现装内联依赖）
+    script = bool(scripts and target and (_URL.match(target) or any(map(_exists, _candidates(target, where))) or not operand
+                                          and (target.endswith((".py", ".pyw")) or any(a in ("-s", "--script") for a in args[:i]))))
     if operand and target and not script and not any(o in ("--from", "--spec") for o, _ in opts):
         specs.append(target)
     out = [f"{runner} 依赖清单 {_shown(v)}（里面的版本这里核对不到）" for o, v in opts if o == "--with-requirements"]
@@ -302,33 +345,47 @@ def _python(runner: str, args: list[str], where: _Where, values: frozenset[str],
     return out + [d for s in specs if s and (d := _check(runner, s, where, npm=False))]
 
 
-def _bound(target: str, where: _Where) -> Path | None:
-    """target 指向内容已按引用文件绑定的本地文件时，返回它的真实路径。"""
-    p = Path(os.path.expanduser(_without_scheme(target)))
-    if where.moved and not p.is_absolute():
-        return None
+def _candidates(spec: str, where: _Where) -> list[Path]:
+    """本地路径可能指向的文件：绝对路径就是它自己，相对路径在每个候选目录下各算一个。"""
+    p = Path(os.path.expanduser(_without_scheme(spec)))
+    return [p] if p.is_absolute() else [d / p for d in where.bases]
+
+
+def _exists(path: Path) -> bool:
+    """没权限查看时按存在处理：接下来会读不了，按核对不到报出来。"""
     try:
-        real = (p if p.is_absolute() else where.base / p).resolve()
+        return path.exists()
     except OSError:
-        return None
-    return real if real in where.bound else None
+        return True
+
+
+def _content_bound(path: Path, where: _Where) -> bool:
+    real = path.resolve()
+    return real in where.bound or str(real).startswith(_SYSTEM_DIRS)
 
 
 def _script(runner: str, target: str, where: _Where) -> list[str]:
     """直接运行的脚本：远程 URL 每次都可能拿到不同的内容；本地脚本的内容按引用文件绑定，但 PEP 723 内联依赖
-    （``# /// script`` 块里的 dependencies）会在运行前现装，同样要锁版本。"""
+    （``# /// script`` 块里的 dependencies）会在运行前现装，同样要锁版本。换过目录时每个候选位置都查。"""
     if _URL.match(target):
         return [f"{runner} 远程脚本 {_shown(target)}（每次运行都可能拿到不同的内容）"]
-    if where.moved and not Path(os.path.expanduser(target)).is_absolute():
-        return [f"{runner} 用 --directory / --project 换了目录，脚本 {target} 按那个目录找，内容与内联依赖这里核对不到"]
-    real = _bound(target, where)
-    try:
-        if real is None or real.stat().st_size > _SCRIPT_LIMIT:
-            return [] if real is None else [f"{runner} 脚本 {target} 太大，内联依赖这里核对不到"]
-        text = real.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return [f"{runner} 脚本 {target} 读不了，内联依赖这里核对不到"]
-    return _inline_deps(runner, target, text)
+    found = [c for c in _candidates(target, where) if _exists(c)]
+    if not found:     # uv 会去 PATH 上找同名命令；先 cd 到别处再运行的也是这样
+        return [f"{runner} 脚本 {target} 在运行目录里找不到，内联依赖这里核对不到"]
+    out: list[str] = []
+    for c in found:
+        try:
+            if c.is_dir():
+                out.append(f"{runner} 运行目录 {target}：目录里的代码没有按内容绑定")
+            elif not _content_bound(c, where):
+                out.append(f"{runner} 脚本 {target} 没有按内容绑定，内联依赖这里核对不到")
+            elif c.stat().st_size > _SCRIPT_LIMIT:
+                out.append(f"{runner} 脚本 {target} 太大，内联依赖这里核对不到")
+            else:
+                out += _inline_deps(runner, target, c.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            out.append(f"{runner} 脚本 {target} 读不了，内联依赖这里核对不到")
+    return list(dict.fromkeys(out))
 
 
 def _inline_deps(runner: str, target: str, text: str) -> list[str]:
@@ -383,9 +440,7 @@ def _check(runner: str, spec: str, where: _Where, *, npm: bool) -> str:
     """没锁住时返回一句说明，锁住了返回空串。"""
     local = _local(spec, where)
     if local is not None:
-        why = "用 --directory / --project 换了目录，相对路径按那个目录找" if where.moved and not _absolute(spec) \
-            else "本地目录或不存在的路径"
-        return "" if local else f"{runner} 包 {_shown(spec)}（{why}，内容没有按内容绑定；打包成文件再引用）"
+        return "" if local else f"{runner} 包 {_shown(spec)}（本地目录、不存在的路径或没按内容绑定的文件；打包成文件再引用）"
     return "" if _version_pinned(spec, npm=npm) else f"{runner} 包 {_shown(spec)}"
 
 
@@ -400,23 +455,16 @@ def _version_pinned(spec: str, *, npm: bool) -> bool:
 
 
 def _local(spec: str, where: _Where) -> bool | None:
-    """本地路径写法：内容已按引用文件绑定（或在系统目录里）时算锁住；是目录、不存在、或者没被绑定时不算。
-    不是本地路径返回 None。直接查绑定集合，而不是重新判断“是不是文件”：两处解析方式稍有出入，就会出现
-    算作锁住、内容却没人核对的文件。"""
+    """本地路径写法：每个可能的位置上存在的都是内容已绑定的文件（或在系统目录里）时算锁住；有目录、有没绑定的文件、
+    或者哪里都不存在时不算。不是本地路径返回 None。直接查绑定集合，而不是重新判断“是不是文件”：两处解析方式
+    稍有出入，就会出现算作锁住、内容却没人核对的文件。"""
     if not spec.startswith(("file:", ".", "/", "~")):
         return None
-    if where.moved and not _absolute(spec):
-        return False
-    p = Path(os.path.expanduser(_without_scheme(spec)))
     try:
-        real = (p if p.is_absolute() else where.base / p).resolve()
-        return real in where.bound or (str(real).startswith(_SYSTEM_DIRS) and real.is_file())
+        found = [c for c in _candidates(spec, where) if _exists(c)]
+        return bool(found) and all(c.is_file() and _content_bound(c, where) for c in found)
     except OSError:
         return False
-
-
-def _absolute(spec: str) -> bool:
-    return Path(os.path.expanduser(_without_scheme(spec))).is_absolute()
 
 
 def _shown(spec: str) -> str:
@@ -441,29 +489,29 @@ def config_files(data: dict, base: str | Path) -> list[Path]:
     out: set[Path] = set()
     for h in data.get("hooks") or []:
         if isinstance(h, dict) and isinstance(h.get("command"), str):
-            out.update(referenced_files(h["command"], base))
+            out.update(referenced_files(h["command"], base, h.get("env")))
     servers = data.get("mcp_servers")
     for spec in servers.values() if isinstance(servers, dict) else ():
         if isinstance(spec, dict) and isinstance(spec.get("command"), str):
-            out.update(referenced_files(mcp_argv(spec), mcp_base(spec, base)))
+            out.update(referenced_files(mcp_argv(spec), mcp_base(spec, base), spec.get("env")))
     return sorted(out)
 
 
-def describe(command: str | Iterable[str], base: str | Path) -> str:
+def describe(command: str | Iterable[str], base: str | Path, env: Mapping[str, str] | None = None) -> str:
     """信任确认里补充的说明：引用了哪些文件（内容一并确认）、哪些包没锁版本。"""
     parts = []
-    files = referenced_files(command, base)
+    files = referenced_files(command, base, env)
     if files:
         parts.append(f"引用 {'、'.join(map(str, files))}（文件内容一并确认，改了要重新信任）")
-    loose = unpinned_packages(command, base)
+    loose = unpinned_packages(command, base, env)
     if loose:
         parts.append(f"没锁版本：{'；'.join(loose)}")
     return "".join(f"；{p}" for p in parts)
 
 
-def unpinned_in(hook_commands: Iterable[str], mcp_servers: dict, base: str | Path) -> list[str]:
-    """所有 hook 与 MCP 服务器里没锁版本的包，``permissions.require_pinned`` 打开时据此拒绝启动。"""
-    out = [f"hook {c!r}：{p}" for c in hook_commands for p in unpinned_packages(c, base)]
+def unpinned_in(hooks: Iterable[tuple[str, Mapping[str, str]]], mcp_servers: dict, base: str | Path) -> list[str]:
+    """所有 hook（命令与 env）与 MCP 服务器里没锁版本的包，``permissions.require_pinned`` 打开时据此拒绝启动。"""
+    out = [f"hook {c!r}：{p}" for c, env in hooks for p in unpinned_packages(c, base, env)]
     out += [f"MCP 服务器 {n}：{p}" for n, s in mcp_servers.items() if isinstance(s, dict)
-            for p in unpinned_packages(mcp_argv(s), mcp_base(s, base))]
+            for p in unpinned_packages(mcp_argv(s), mcp_base(s, base), s.get("env"))]
     return out

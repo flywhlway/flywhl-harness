@@ -227,7 +227,7 @@ class CommandHook:
         Agent 能改工作区里的文件，改过的 hook 脚本会在系统沙箱外、以 harness 的身份运行。"""
         from .supply_chain import pin_files, referenced_files
 
-        now = pin_files(referenced_files(self.command, base))
+        now = pin_files(referenced_files(self.command, base, self.env))
         before = self._pins.setdefault(base, now)
         return sorted(p for p in before.keys() | now.keys() if before.get(p) != now.get(p))
 
