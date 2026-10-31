@@ -286,10 +286,13 @@ def _is_socket(path: str) -> bool:
 
 def _visible_sockets(paths: Iterable[str], hidden: list[str], exposed: list[str]) -> list[str]:
     """``/proc/net/unix`` 里的套接字在沙箱里看得见的那些（``hidden`` 整体换掉了，``exposed`` 是挂回去的目录）。
-    那里记的是绑定时的路径：之后改了名（先绑临时名再改名是常见写法），原路径就不存在了，这时把它所在目录里的套接字都找出来；
-    目录本身也被挪走的找不到。目录里条目多到数不完时拒绝执行。"""
+    那里记的是绑定时写的路径，不一定是文件现在的位置：
+    - 路径经过符号链接（``/tmp/x`` 指向家目录里的某处）时，按目录部分解析后的真实位置判断、遮住；
+    - 之后改了名（先绑临时名再改名是常见写法），原路径就不存在了，这时把它所在目录里的套接字都找出来；
+      目录本身也被挪走的找不到。目录里条目多到数不完时拒绝执行。"""
     found, scanned = set(), set()
     for p in paths:
+        p = os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))
         if any(_under(p, h) for h in hidden) and not any(_under(p, e) for e in exposed):
             continue
         if _is_socket(p):

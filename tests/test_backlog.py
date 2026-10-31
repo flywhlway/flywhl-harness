@@ -482,20 +482,27 @@ async def test_linux_sandbox_hides_host_sockets_but_keeps_session_tmp(ws):
 @needs_bwrap
 async def test_linux_sandbox_masks_host_sockets_outside_tmp_and_run(ws):
     """沙箱看得见的位置上的套接字（家目录里的 Docker Desktop、colima、screen……）按 /proc/net/unix 逐个盖住：
-    工作区挂回到 /tmp 下面也一样；绑定之后改过名的（/proc/net/unix 里还是旧名字）按原来的目录找出来。
-    /var/tmp 不和宿主共用。"""
+    工作区挂回到 /tmp 下面也一样；绑定之后改过名的（/proc/net/unix 里还是旧名字）按原来的目录找出来；
+    经 /tmp 里的符号链接绑定的（记下的路径在 /tmp 下，文件却在工作区里）按真实位置遮住。/var/tmp 不和宿主共用。"""
     (ws / "a").mkdir()
-    plain, renamed = str(ws / "s"), str(ws / "a" / "s")
+    (ws / "b").mkdir()
+    link = os.path.join(tempfile.mkdtemp(prefix="fw", dir="/tmp"), "l")
+    os.symlink(ws / "b", link)
+    plain, renamed, linked = str(ws / "s"), str(ws / "a" / "s"), str(ws / "b" / "s")
     probe = 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {} 2>&1 | tail -1'
-    cmds = [probe.format(plain), probe.format(renamed), "echo x > /var/tmp/fw-probe && ls /var/tmp"]
+    cmds = [*(probe.format(p) for p in (plain, renamed, linked)), "echo x > /var/tmp/fw-probe && ls /var/tmp"]
     h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
                      permissions__mode="bypass", permissions__sandbox="linux")
-    servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p) for p in (plain, str(ws / "a" / "t"))]
+    servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p)
+               for p in (plain, str(ws / "a" / "t"), os.path.join(link, "s"))]
     os.rename(ws / "a" / "t", renamed)
-    async with servers[0], servers[1]:
-        out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
-    assert "CONNECTED" not in out[0] and "CONNECTED" not in out[1], out
-    assert "fw-probe" in out[2] and not os.path.exists("/var/tmp/fw-probe"), out
+    try:
+        async with servers[0], servers[1], servers[2]:
+            out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
+    finally:
+        shutil.rmtree(os.path.dirname(link), ignore_errors=True)
+    assert not any("CONNECTED" in o for o in out[:3]), out
+    assert "fw-probe" in out[3] and not os.path.exists("/var/tmp/fw-probe"), out
 
 
 @needs_bwrap
