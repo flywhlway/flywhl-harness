@@ -643,14 +643,23 @@ def _seatbelt_usable() -> bool:
     exe = "/usr/bin/sandbox-exec"
     if sys.platform != "darwin" or not os.path.exists(exe):
         return False
-    return subprocess.run([exe, "-p", "(version 1)(allow default)", "/usr/bin/true"]).returncode == 0
+    # 用一份真有限制的配置探测：外层已有沙箱时内层会被拒绝，只放行一切的配置却照样成功
+    probe = '(version 1)(allow default)(deny file-write* (literal "/nonexistent/flywhl-probe"))'
+    return subprocess.run([exe, "-p", probe, "/usr/bin/true"], capture_output=True).returncode == 0
 
 
-needs_seatbelt = pytest.mark.skipif(not _seatbelt_usable(), reason="需要可用的 macOS sandbox-exec")
+# os_sandbox：系统沙箱不能嵌套，scripts/safe_pytest.py 把这些用例放到第二段、在外层沙箱之外运行
+SEATBELT = [pytest.mark.os_sandbox, pytest.mark.skipif(not _seatbelt_usable(), reason="需要可用的 macOS sandbox-exec")]
+
+
+def needs_seatbelt(fn):
+    for mark in SEATBELT:
+        fn = mark(fn)
+    return fn
 SPLICED = "D=$HOME/.ku; cat ${D}be/config"   # 变量拼出来的路径：命令串里没有 .kube 字样
 
 
-@pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=needs_seatbelt)])
+@pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=SEATBELT)])
 async def test_sandbox_blocks_credential_reads_static_analysis_misses(ws, tmp_path, monkeypatch, sandbox, leaked):
     """命令分析看不出 ${D}be/config 是凭证，只按“工作区外路径”处理，bypass 下照样执行；沙箱按真实路径拒绝。"""
     home = tmp_path / "home"
