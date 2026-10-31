@@ -662,6 +662,8 @@ def test_truncated_value_combinations_fail_closed_on_risky_values():
     "alias ls='rm -rf ~'; ls",
     "source env.sh; D=a:/; rm -rf $D",            # 脚本可能改了 IFS：按标点拆出根目录
     "source env.sh; C=rm:-rf:/; $C",
+    "source env.sh; C=rm.-rf./; $C",              # 每个标点都可能单独当 IFS
+    "source env.sh; D='x:/usr;y'; rm -rf $D",     # 拆出 /usr 要的是 : 与 ; 这一对分隔符
 ])
 def test_hidden_variable_changes_are_not_trusted(cmd):
     a = analyze(cmd)
@@ -672,7 +674,7 @@ def test_source_does_not_make_every_expansion_fatal():
     """source 之后 IFS 可能被改过，但只补按标点拆的几种：之后的变量展开照常可用，字母当 IFS 属于刻意混淆。"""
     for cmd in ("source .venv/bin/activate && echo $VIRTUAL_ENV && pytest $ARGS",
                 "source a.sh; source b.sh; X=1; echo $X",
-                "source env.sh; D=/tmp/build; rm -rf $D"):
+                "source env.sh; D=/tmp/build; rm -rf $D", "source env.sh; D=build/out; rm -rf $D"):
         a = analyze(cmd)
         assert not a.catastrophic, (cmd, a.catastrophic_reason)
 
@@ -687,6 +689,13 @@ def test_source_does_not_make_every_expansion_fatal():
     'f() ( rm -rf "$1" ); f ~',
     "eval 'g() { rm -rf \"$@\"; }'; g ~",
     'f() { g "$@"; }; g() { rm -rf "$@"; }; f ~',
+    'f() { rm -rf "$@"; }; f ~; f() { echo hi; }',                      # 调用之后才改掉的定义
+    'if x; then f() { rm -rf "$@"; }; else f() { echo; }; fi; f ~',      # 分支里的两种定义都算
+    'f() { shift; rm -rf "$1"; }; f build ~',                           # shift 之后 $1 是后面的参数
+    'f() { set -- ~; rm -rf "$1"; }; f build',
+    'f() { rm -rf "${@:2}"; }; f build ~',
+    'f() { rm -rf "${1:-/}"; }; f',
+    "; ".join(f"g{i}() {{ g{i + 1} \"$@\"; }}" for i in range(4)) + '; g4() { rm -rf "$@"; }; g0 ~',   # 不占 sh -c 的递归深度
 ])
 def test_aliases_and_functions_are_checked_where_they_are_called(cmd):
     """定义处只看得到 rm -rf 和位置参数，删什么要到调用处才知道：接上这次的参数再分析一遍。"""
@@ -696,9 +705,17 @@ def test_aliases_and_functions_are_checked_where_they_are_called(cmd):
 
 def test_harmless_aliases_and_functions_stay_harmless():
     for cmd in ("alias ll='ls -l'; ll", "alias ls='ls -F'; ls", 'f() { rm -rf "$@"; }; f build', "f() { f; }; f",
-                "f() { echo hi; }; f > out.txt"):
+                "f() { echo hi; }; f > out.txt", 'f() { shift; rm -rf "$1"; }; f a b', "f() { g; }; g() { f; }; f",
+                "echo function f { echo hi; }; f ~"):
         a = analyze(cmd)
         assert not a.catastrophic, (cmd, a.catastrophic_reason)
+
+
+def test_deep_alias_and_function_chains_fail_closed():
+    """层层调用超过 8 层就不再展开：截断处可能正是 rm -rf，任何模式都拒绝。"""
+    chain = "; ".join(f"f{i}() {{ f{i + 1} \"$@\"; }}" for i in range(9)) + '; f9() { echo "$@"; }; f0 x'
+    a = analyze(chain)
+    assert a.catastrophic and "超过 8 层" in a.catastrophic_reason, a.reasons
 
 
 def test_truncated_values_are_checked_against_the_current_directory():
