@@ -786,6 +786,13 @@ _DIGEST = "@sha256:" + "a" * 64
     "uvx --with-editable ./pkgdir tool==1.0.0",
     "uvx --with-requirements req.txt tool==1.0.0",             # 依赖清单里的版本核对不到
     "pipx run --sp evil black==24.1.0",                        # argparse 认缩写，这里不猜
+    "npm --registry https://r.example exec lint-hook",         # 子命令前面的全局选项
+    "npm --frobnicate exec lint@1.0.0",
+    "pnpm --silent dlx some-hook",
+    "uv --quiet tool run ruff",
+    "uv run --with mcp[cli] mcp run server.py",                # uv run 只拉取 --with 给出的包
+    "pipx --verbose run black",
+    "docker --frobnicate run x",
 ])
 def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import unpinned_packages
@@ -804,6 +811,10 @@ def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     "npx -y file:pkg.tgz",
     "uvx --python 3.12 --with dep==2.0 tool==1.0.0 --tool-flag",
     "uvx --from ./dist/tool-1.0-py3-none-any.whl tool",
+    "npx -p./pkg.tgz bin",                                     # 合写在短选项后面的本地文件同样按内容绑定
+    "uv run --with mcp==1.2.0 mcp run server.py",
+    "pnpm -w dlx some@1.0.0",
+    "npm --frobnicate test",                                   # 不拉取代码的子命令，认不出的选项无关紧要
 ])
 def test_pinned_sources_stay_pinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import referenced_files, unpinned_packages
@@ -814,6 +825,15 @@ def test_pinned_sources_stay_pinned(command, tmp_path):
     assert unpinned_packages(command, tmp_path) == []
     if "pkg.tgz" in command or ".whl" in command:      # 本地文件算锁住，前提是它的内容按引用文件绑定了
         assert referenced_files(command, tmp_path)
+
+
+def test_every_referenced_file_is_bound(tmp_path):
+    """引用的文件不设数量上限：截断之后的文件内容就没人核对了。"""
+    from flywhl_harness.policy.supply_chain import referenced_files
+
+    for k in range(40):
+        (tmp_path / f"f{k}.sh").write_text("", encoding="utf-8")
+    assert len(referenced_files("cat " + " ".join(f"f{k}.sh" for k in range(40)), tmp_path)) == 40
 
 
 def test_unpinned_list_hides_url_credentials():

@@ -8,11 +8,11 @@
    ``cd hooks && ./guard.sh`` 这类要先切换目录的写法都核对不到。
 2. **包管理器临时拉取的代码要锁版本。** ``npx -y some-mcp-server`` 每次启动都可能拉到新发布的版本，包被接管、
    维护者账号被盗都会这样投毒。没锁到确切版本的在信任确认、设置页里标出来；``permissions.require_pinned``
-   打开时拒绝启动。认得 npx / bunx / ``pnpm dlx`` / ``yarn dlx`` / ``npm exec``、uvx / ``uv tool run`` / ``pipx run``、
-   docker / podman / nerdctl 的 ``run``（镜像要带 ``@sha256:`` 摘要）。
+   打开时拒绝启动。认得 npx / bunx / ``pnpm dlx`` / ``yarn dlx`` / ``npm exec``、uvx / ``uv tool run`` /
+   ``uv run --with`` / ``pipx run``、docker / podman / nerdctl 的 ``run``（镜像要带 ``@sha256:`` 摘要）。
 
    判断“锁没锁”要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数。这里拿不准时一律按没锁处理：
-   认不出的选项（分不清下一个词是它的值还是包名）、本地目录（内容没人核对）、compose 文件和依赖清单里的版本。
+   认不出的选项（分不清下一个词是它的值还是包名）、本地目录与没按内容绑定的本地文件、compose 文件和依赖清单里的版本。
 """
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ import re
 import shlex
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 # 系统目录里的程序（解释器、包管理器本身）随系统升级变化，Agent 也改不了，不按内容绑定
 _SYSTEM_DIRS = ("/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/opt/", "/nix/")
-_FILE_LIMIT = 32
 _SEMVER = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _COMMIT = re.compile(r"[#@][0-9a-f]{40}$")
 _DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
@@ -48,31 +48,37 @@ def _without_scheme(tok: str) -> str:
 
 def referenced_files(command: str | Iterable[str], base: str | Path, _depth: int = 0) -> list[Path]:
     """命令里指向现有普通文件的参数（相对路径按 base 解析，跟随符号链接）。PATH 上的命令名不是文件，不算；
-    带空白的参数（``sh -c 'python3 guard.py'``）再拆开找一层。"""
-    out: list[Path] = []
+    带空白的参数（``sh -c 'python3 guard.py'``）再拆开找一层。不设数量上限：漏掉一个，它的内容就没人核对。"""
+    out: dict[Path, None] = {}
     for tok in argv_of(command):
-        if tok.startswith("-") and "=" in tok:   # --config=hooks/rules.json
-            tok = tok.split("=", 1)[1]
-        tok = _without_scheme(tok)
-        if not tok or tok.startswith("-") or "\0" in tok:
-            continue
         if any(c.isspace() for c in tok):
             if _depth < 3:
-                out += [f for f in referenced_files(tok, base, _depth + 1) if f not in out]
+                out.update(dict.fromkeys(referenced_files(tok, base, _depth + 1)))
             continue
-        p = Path(os.path.expanduser(tok))
-        p = p if p.is_absolute() else Path(base) / p
-        try:
-            if not p.is_file():
+        for cand in _path_parts(tok):
+            p = Path(os.path.expanduser(cand))
+            p = p if p.is_absolute() else Path(base) / p
+            try:
+                if not p.is_file():
+                    continue
+                real = p.resolve()
+            except OSError:
                 continue
-            real = p.resolve()
-        except OSError:
-            continue
-        if not str(real).startswith(_SYSTEM_DIRS) and real not in out:
-            out.append(real)
-        if len(out) >= _FILE_LIMIT:
-            break
-    return out
+            if not str(real).startswith(_SYSTEM_DIRS):
+                out[real] = None
+    return list(out)
+
+
+def _path_parts(tok: str) -> list[str]:
+    """一个参数里可能指向文件的部分：参数本身；``--config=x`` 的值；``-p./x.tgz``、``-itv./x`` 这类合写短选项
+    后面直接跟着的值（不知道哪几个字母是选项，每个位置都试，多绑定几个文件无妨）。"""
+    if not tok or "\0" in tok:
+        return []
+    if tok.startswith("--"):
+        return [_without_scheme(tok.split("=", 1)[1])] if "=" in tok else []
+    if tok.startswith("-"):
+        return [_without_scheme(tok[k:].removeprefix("=")) for k in range(2, len(tok))]
+    return [_without_scheme(tok)]
 
 
 def file_digest(path: str | Path) -> str:
@@ -97,33 +103,49 @@ def changed_files(pins: dict[str, str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------- 锁版本
-def unpinned_packages(command: str | Iterable[str], base: str | Path = ".", _depth: int = 0) -> list[str]:
-    """命令里经包管理器临时拉取、又没锁到确切版本的包，每项一句说明。带空白的参数（``sh -c 'npx x'``）再拆开找一层。
-    base 是命令运行的目录，本地路径写法（``./pkg.tgz``）按它找文件。"""
+class _Where(NamedTuple):
+    base: Path                  # 命令运行的目录，本地路径写法（./pkg.tgz）按它找文件
+    bound: frozenset[Path]      # 内容已经按引用文件绑定的文件
+
+
+def unpinned_packages(command: str | Iterable[str], base: str | Path = ".") -> list[str]:
+    """命令里经包管理器临时拉取、又没锁到确切版本的包，每项一句说明。带空白的参数（``sh -c 'npx x'``）再拆开找一层。"""
+    return list(dict.fromkeys(_unpinned(command, _Where(Path(base), frozenset(referenced_files(command, base))), 0)))
+
+
+def _unpinned(command: str | Iterable[str], where: _Where, depth: int) -> list[str]:
     argv = argv_of(command)
     found: list[str] = []
     for i, tok in enumerate(argv):
         if any(c.isspace() for c in tok):
-            found += unpinned_packages(tok, base, _depth + 1) if _depth < 3 else []
+            found += _unpinned(tok, where, depth + 1) if depth < 3 else []
         else:
-            found += _runner(tok.rsplit("/", 1)[-1], argv[i + 1:], Path(base))
-    return list(dict.fromkeys(found))
+            found += _runner(tok.rsplit("/", 1)[-1], argv[i + 1:], where)
+    return found
 
 
 # 各家的选项表：带值的、不带值的。只收常用的——表里没有的选项写成 --选项=值 也认得出，单独写就按没锁处理
 _NPM_VALUES = frozenset({"-p", "--package", "-c", "--call", "--registry", "--cache", "--userconfig", "--prefix",
-                         "--loglevel", "-w", "--workspace", "--node-options", "--script-shell", "--tag", "--before"})
+                         "--loglevel", "-w", "--workspace", "--node-options", "--script-shell", "--tag", "--before",
+                         "--cwd"})
 _NPM_FLAGS = frozenset({"-y", "--yes", "--no", "-q", "--quiet", "-s", "--silent", "--prefer-offline", "--prefer-online",
                         "--offline", "--ignore-scripts", "--legacy-peer-deps", "--verbose", "--bun"})
+_PNPM_VALUES = frozenset({"-C", "--dir", "--filter", "-F", "--reporter", "--loglevel", "--package", "--allow-build"})
+_PNPM_FLAGS = frozenset({"-w", "--workspace-root", "-r", "--recursive", "-s", "--silent", "--aggregate-output",
+                         "--stream", "--color", "--no-color", "-c", "--shell-mode"})   # pnpm 的 -c 是 --shell-mode，不带值
 _UV_VALUES = frozenset({"--from", "--with", "--with-editable", "--with-requirements", "-p", "--python", "--index",
                         "--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links", "-c",
                         "--constraints", "--overrides", "--cache-dir", "--directory", "--project", "--config-file",
                         "--env-file", "--python-platform", "--resolution", "--prerelease", "--exclude-newer",
-                        "--index-strategy", "--keyring-provider", "--link-mode", "--color", "--allow-insecure-host"})
+                        "--index-strategy", "--keyring-provider", "--link-mode", "--color", "--allow-insecure-host",
+                        "--python-preference", "--package", "--extra", "--group", "--only-group", "--no-group"})
 _UV_FLAGS = frozenset({"-q", "--quiet", "-v", "--verbose", "-n", "--no-cache", "--offline", "--isolated", "--native-tls",
                        "--no-config", "--no-progress", "-U", "--upgrade", "--refresh", "--reinstall",
                        "--compile-bytecode", "--no-build", "--no-binary", "--no-sources", "--no-index",
-                       "--managed-python", "--no-managed-python", "--no-python-downloads", "--no-env-file"})
+                       "--managed-python", "--no-managed-python", "--no-python-downloads", "--no-env-file",
+                       "--all-extras", "--no-dev", "--frozen", "--locked", "--no-project", "-s", "--script", "-m",
+                       "--module", "--no-sync", "--active", "--exact", "--all-packages"})
+_UV_SPECS = ("--from", "--with", "--with-editable")
 _PIPX_VALUES = frozenset({"--spec", "--python", "-i", "--index-url", "--pip-args"})
 _PIPX_FLAGS = frozenset({"--no-cache", "--pypackages", "--path", "--system-site-packages", "-e", "--editable",
                          "--fetch-missing-python", "-q", "--quiet", "-v", "--verbose"})
@@ -152,24 +174,44 @@ _RUN_FLAGS = frozenset({"-d", "--detach", "--disable-content-trust", "--init", "
                         "--quiet", "--read-only", "--rm", "--sig-proxy", "-t", "--tty"})
 
 
-def _runner(name: str, rest: list[str], base: Path) -> list[str]:
+def _runner(name: str, rest: list[str], where: _Where) -> list[str]:
     if name in ("npx", "bunx"):
-        return _npm(name, rest, base, _NPM_VALUES, _NPM_FLAGS)
-    if (name, rest[:1]) in (("npm", ["exec"]), ("npm", ["x"]), ("yarn", ["dlx"])):
-        return _npm(f"{name} {rest[0]}", rest[1:], base, _NPM_VALUES, _NPM_FLAGS)
-    if (name, rest[:1]) == ("pnpm", ["dlx"]):   # pnpm 的 -c 是 --shell-mode，不带值
-        return _npm("pnpm dlx", rest[1:], base, _NPM_VALUES - {"-c", "--call"}, _NPM_FLAGS | {"-c", "--shell-mode"})
+        return _npm(name, rest, where, _NPM_VALUES, _NPM_FLAGS)
+    if name in ("npm", "yarn", "pnpm"):
+        values, flags = (_PNPM_VALUES, _PNPM_FLAGS) if name == "pnpm" else (_NPM_VALUES, _NPM_FLAGS)
+        i = _subcommand(name, rest, values, flags, ("exec", "x") if name == "npm" else ("dlx",))
+        return i if isinstance(i, list) else _npm(f"{name} {rest[i]}", rest[i + 1:], where, values, flags)
     if name == "uvx":
-        return _python(name, rest, base, _UV_VALUES, _UV_FLAGS, ("--from", "--with", "--with-editable"))
-    if name == "uv" and rest[:2] == ["tool", "run"]:
-        return _python("uv tool run", rest[2:], base, _UV_VALUES, _UV_FLAGS, ("--from", "--with", "--with-editable"))
-    if name == "pipx" and rest[:1] == ["run"]:
-        return _python("pipx run", rest[1:], base, _PIPX_VALUES, _PIPX_FLAGS, ("--spec",))
+        return _python(name, rest, where, _UV_VALUES, _UV_FLAGS, _UV_SPECS)
+    if name == "uv":
+        i = _subcommand(name, rest, _UV_VALUES, _UV_FLAGS, ("tool", "run"))
+        if isinstance(i, list):
+            return i
+        if rest[i:i + 2] == ["tool", "run"]:
+            return _python("uv tool run", rest[i + 2:], where, _UV_VALUES, _UV_FLAGS, _UV_SPECS)
+        if rest[i] == "run":    # uv run --with x 命令：操作数是要运行的命令，拉取的只有 --with 给出的包
+            return _python("uv run", rest[i + 1:], where, _UV_VALUES, _UV_FLAGS, _UV_SPECS, operand=False)
+        return []
+    if name == "pipx":
+        i = _subcommand(name, rest, _PIPX_VALUES, _PIPX_FLAGS, ("run",))
+        return i if isinstance(i, list) else _python("pipx run", rest[i + 1:], where, _PIPX_VALUES, _PIPX_FLAGS,
+                                                     ("--spec",))
     if name in ("docker", "podman", "nerdctl"):
         return _container(name, rest)
     if name in ("docker-compose", "podman-compose"):
         return [f"{name}（镜像写在 compose 文件里，这里核对不到摘要）"]
     return []
+
+
+def _subcommand(name: str, rest: list[str], values: frozenset[str], flags: frozenset[str],
+                subs: tuple[str, ...], what: str = "包") -> int | list[str]:
+    """跳过前端程序（npm、uv、pipx、docker…）子命令之前的全局选项（``npm --registry x exec 包``），返回子命令的下标；
+    不是会拉取代码的子命令时返回空列表。全局选项认不出、后面又出现了这类子命令时，分不清那个词是不是选项的值，
+    返回一句“认不出”。"""
+    _, i, unknown = _scan(rest, values, flags)
+    if unknown:
+        return [_unknown(name, unknown, what)] if any(w in subs for w in rest) else []
+    return i if i < len(rest) and rest[i] in subs else []
 
 
 def _scan(args: list[str], values: frozenset[str], flags: frozenset[str]) -> tuple[list[tuple[str, str]], int, str]:
@@ -217,7 +259,7 @@ def _unknown(runner: str, opt: str, what: str = "包") -> str:
     return f"{runner} 的选项 {shown} 认不出，分不清要拉取的是哪个{what}（带值的长选项写成 --选项=值）"
 
 
-def _npm(runner: str, args: list[str], base: Path, values: frozenset[str], flags: frozenset[str]) -> list[str]:
+def _npm(runner: str, args: list[str], where: _Where, values: frozenset[str], flags: frozenset[str]) -> list[str]:
     """要拉取的包：``-p`` / ``--package`` 指定的，没有时是第一个操作数（``-c`` 只在本地依赖里执行命令）。"""
     opts, i, unknown = _scan(args, values, flags)
     if unknown:
@@ -225,30 +267,28 @@ def _npm(runner: str, args: list[str], base: Path, values: frozenset[str], flags
     specs = [v for o, v in opts if o in ("-p", "--package")]
     if not specs and i < len(args) and not any(o in ("-c", "--call") for o, _ in opts):
         specs = [args[i]]
-    return [d for s in specs if (d := _check(runner, s, base, npm=True))]
+    return [d for s in specs if (d := _check(runner, s, where, npm=True))]
 
 
-def _python(runner: str, args: list[str], base: Path, values: frozenset[str], flags: frozenset[str],
-            spec_opts: tuple[str, ...]) -> list[str]:
+def _python(runner: str, args: list[str], where: _Where, values: frozenset[str], flags: frozenset[str],
+            spec_opts: tuple[str, ...], *, operand: bool = True) -> list[str]:
     """要装的包：spec_opts 给出的，再加上没被 ``--from`` / ``--spec`` 顶替的第一个操作数。"""
     opts, i, unknown = _scan(args, values, flags)
     if unknown:
         return [_unknown(runner, unknown)]
     specs = [v for o, v in opts if o in spec_opts]
-    if i < len(args) and not any(o in ("--from", "--spec") for o, _ in opts):
+    if operand and i < len(args) and not any(o in ("--from", "--spec") for o, _ in opts):
         specs.append(args[i])
     out = [f"{runner} 依赖清单 {_shown(v)}（里面的版本这里核对不到）" for o, v in opts if o == "--with-requirements"]
-    return out + [d for s in specs if s and (d := _check(runner, s, base, npm=False))]
+    return out + [d for s in specs if s and (d := _check(runner, s, where, npm=False))]
 
 
 def _container(name: str, args: list[str]) -> list[str]:
-    _, i, unknown = _scan(args, _CTR_VALUES, _CTR_FLAGS)
-    if unknown:
-        return [_unknown(name, unknown, "镜像")]
-    words = args[i:]
-    if words[:1] == ["container"]:
-        words = words[1:]
-    if words[:1] == ["compose"]:
+    i = _subcommand(name, args, _CTR_VALUES, _CTR_FLAGS, ("run", "container", "compose"), "镜像")
+    if isinstance(i, list):
+        return i
+    words = args[i + 1:] if args[i] == "container" else args[i:]
+    if args[i] == "compose":
         return [f"{name} compose（镜像写在 compose 文件里，这里核对不到摘要）"]
     if words[:1] != ["run"]:
         return []
@@ -261,9 +301,9 @@ def _container(name: str, args: list[str]) -> list[str]:
     return [f"{name} 镜像 {image}（没有用 @sha256: 摘要锁定）"]
 
 
-def _check(runner: str, spec: str, base: Path, *, npm: bool) -> str:
+def _check(runner: str, spec: str, where: _Where, *, npm: bool) -> str:
     """没锁住时返回一句说明，锁住了返回空串。"""
-    local = _local(spec, base)
+    local = _local(spec, where)
     if local is not None:
         return "" if local else f"{runner} 包 {_shown(spec)}（本地目录或不存在的路径，内容没有按内容绑定；打包成文件再引用）"
     if _COMMIT.search(spec):
@@ -277,14 +317,16 @@ def _check(runner: str, spec: str, base: Path, *, npm: bool) -> str:
     return "" if ok else f"{runner} 包 {_shown(spec)}"
 
 
-def _local(spec: str, base: Path) -> bool | None:
-    """本地路径写法：是普通文件时内容由引用文件的哈希管（True）；是目录或不存在时没人核对内容（False）。
-    不是本地路径返回 None。"""
+def _local(spec: str, where: _Where) -> bool | None:
+    """本地路径写法：内容已按引用文件绑定（或在系统目录里）时算锁住；是目录、不存在、或者没被绑定时不算。
+    不是本地路径返回 None。直接查绑定集合，而不是重新判断“是不是文件”：两处解析方式稍有出入，就会出现
+    算作锁住、内容却没人核对的文件。"""
     if not spec.startswith(("file:", ".", "/", "~")):
         return None
     p = Path(os.path.expanduser(_without_scheme(spec)))
     try:
-        return (p if p.is_absolute() else base / p).is_file()
+        real = (p if p.is_absolute() else where.base / p).resolve()
+        return real in where.bound or (str(real).startswith(_SYSTEM_DIRS) and real.is_file())
     except OSError:
         return False
 
