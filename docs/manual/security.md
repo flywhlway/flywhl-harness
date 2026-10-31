@@ -62,6 +62,8 @@ flowchart TD
 - `&>>`、`>&` 重定向算写入；`trap`、`watch` 的参数递归分析；
 - 路径先解析符号链接：指向凭证位置直接拒绝，指向工作区外需审批。
 
+变量与当前目录同样参与判断：命令里赋过值的变量按每种取值各分析一遍（`C=rm; $C -rf ~` 照样拒绝），`cd` 之后的相对路径按切换后的目录拼起来（`cd ~ && rm -rf *` 拒绝）。变量可能为空时，`rm -rf`、`find -delete`、`chmod -R` 的目标按“为空”再判一次：`rm -rf $DIR/*` 就是 `rm -rf /*`，任何模式都拒绝，并提示改写成 `${DIR:?}`。
+
 bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secret_env`）；经 `GIT_CONFIG_COUNT` 强制 `core.fsmonitor=false` 与 `safe.bareRepository=explicit`，并设 `GIT_OPTIONAL_LOCKS=0`，仓库里的 git 配置无法借机执行代码。`grep` 与 `search_ref` 的正则在可强杀的子进程里限时运行，灾难性回溯拖不垮服务。
 
 ## 污点与 Hooks

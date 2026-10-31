@@ -188,10 +188,10 @@
 
 ## 仍未覆盖
 
-- **整条路径放在变量里：** 比如 `F=/etc/passwd; cat $F`，仍然判为 read。这是静态分析看不到的已知缺口，见[第 19 章](../governance/security.md)。
-- **沙箱：** 只有 macOS 原型，而且默认关闭；不限制 Mach 服务；没有出口白名单。
-- **其他通道：**
-  - 命令 hook 的子进程会继承全部环境变量；
-  - MCP 工具注解里的 `readOnlyHint`、`idempotentHint` 会被直接采信。
+本轮结束时还有下面几项没覆盖，之后都在[能力清单](capability-backlog.md)的“第二批已实现”里补上了：
+
+- **整条路径放在变量里：** `F=/etc/passwd; cat $F` 当时判为 read。现在命令里赋过值的变量按取值展开；值要到运行时才知道的（`F=$(…)`）仍只能按无法静态分析处理，见[第 19 章](../governance/security.md)。
+- **沙箱：** 当时只有 macOS 原型，不限制 Mach 服务，没有出口白名单。现在有了 Linux 档、出口白名单（仅 macOS 档）和本机 IPC 限制，默认仍关闭。
+- **其他通道：** 命令 hook 的子进程当时继承全部环境变量，MCP 工具注解里的 `readOnlyHint`、`idempotentHint` 会被直接采信。两项都已修复。
 
 这些问题的优先级排序见 [capability-backlog.md](capability-backlog.md)。

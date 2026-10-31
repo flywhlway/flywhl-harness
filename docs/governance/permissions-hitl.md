@@ -196,7 +196,8 @@ shlex 已经去掉引号与反斜杠，花括号再按 bash 的规则展开：
 | `cat ~/.kube/config`、`tar czf k.tgz ~/.ssh`、`sh -c 'cat ~/.aws/credentials'` | deny |
 | `cat ~/.k''ube/config`、`cat ~/.ku\be/config`、`cat ~/.ku{be,}/config`、`eval "cat ~/.do""cker/config.json"` | deny（去引号、展开之后再匹配） |
 | `cat $KUBECONFIG`、`cat $XDG_CONFIG_HOME/gh/hosts.yml` | deny（指向凭证位置的环境变量） |
-| `D=$HOME/.ku; cat ${D}be/config`、`cat ~/.kub?/config`、`cat $(printf '\x7e/.kube/config')` | **认不出是凭证**：前两条按工作区外路径、第三条按命令替换，default 下要确认，bypass 下放行 |
+| `D=$HOME/.ku; cat ${D}be/config` | deny（命令里赋过值的变量按取值展开之后再匹配） |
+| `D=$(echo $HOME/.ku); cat ${D}be/config`、`cat ~/.kub?/config`、`cat $(printf '\x7e/.kube/config')` | **认不出是凭证**：第二条按工作区外路径，另两条按命令替换，default 下要确认，bypass 下放行 |
 
 最后一行是字符串匹配的上限：它挡得住顺手的读取和简单变形，挡不住刻意混淆。被注入之后的对抗场景要靠系统沙箱，
 见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) 的 sandbox-exec 档位。
@@ -420,24 +421,26 @@ for j, w in enumerate(args, start=1):
 | `sort -o /etc/x a.txt`、`git diff --output=/tmp/x` | read，**allow** | external，ask |
 | `cat /etc/passwd`、`cat ~/.bashrc` | read，**allow** | external，ask（plan 下 deny） |
 | `bash -c 'git status'`、`git -C sub status` | ask | read，allow |
-| `cat {a,../../etc/passwd}`、`D=/etc; cat $D/passwd` | read，**allow** | external，ask |
+| `cat {a,../../etc/passwd}`、`D=/etc; cat $D/passwd`、`F=/etc/passwd; cat $F` | read，**allow** | external，ask |
 | `rm -rf {~,build}` | write，ask，**bypass 放行** | catastrophic，所有模式 deny |
-| `cat ~/.kube/config` | dangerous，ask，**bypass 放行** | credential，所有模式 deny |
+| `D=~; rm -rf $D`、`cd ~ && rm -rf *`、`rm -rf $DIR/*`（DIR 没赋值） | write / dangerous，ask，**bypass 放行** | catastrophic，所有模式 deny |
+| `cat ~/.kube/config`、`D=$HOME/.ku; cat ${D}be/config` | dangerous / external，ask，**bypass 放行** | credential，所有模式 deny |
 | `cat $XDG_CONFIG_HOME/gh/hosts.yml` | read，**allow** | credential，所有模式 deny |
 
-剩下的缺口有一个共同点：判断它们需要 shell **运行时** 的状态（当前目录、变量的值、脚本文件的内容），静态分析拿不到。
+剩下的缺口有一个共同点：判断它们需要只有 **运行时** 才知道的东西（命令替换的输出、读进来的输入、脚本文件的内容），静态分析拿不到。
 
 | 命令 | 分析结果 | 判定 | 问题所在 |
 |---|---|---|---|
-| `F=/etc/passwd; cat $F` | read | **allow** | 整个路径都在变量里；只有“以变量开头、又带 `/`”的词才按越界处理（否则 `echo $PATH` 也要确认） |
-| `D=$HOME/.ku; cat ${D}be/config` | external | ask，**bypass 放行** | 变量拼出来的凭证路径，字符串里没有凭证字样 |
+| `D=$(echo $HOME/.ku); cat ${D}be/config` | external | ask，**bypass 放行** | 值要到运行时才知道，只能按位置未知处理，认不出是凭证 |
 | `python3 script.py` | write | ask | 脚本内容不可见，能做的事和 `python -c` 一样多 |
 | `rm -fr ~/.cache/pip` | dangerous | ask，**bypass 放行** | 家目录下的深层路径不算 catastrophic，基线 glob 又只认 `rm -rf ~*` |
 
 相对路径用 `..` 爬出工作区（`cat ../../etc/passwd`）现在会被识别：命令在工作区根目录执行，`_is_outside()` 对含 `..` 的相对路径做
 `os.path.normpath`，结果以 `..` 开头即视为越界（`a/../b.txt` 仍在工作区内，`tests/test_security.py::test_analyzer_edge_cases`）。
 花括号先按 bash 的规则展开再判断（结果超过 64 个按无法分析处理）；以变量开头、又带 `/` 的词落在哪里取决于变量的值，
-按越界处理，`$PWD` 除外（它就是工作区根目录）。
+按越界处理，`$PWD` 除外（没有 `cd` 过时它就是工作区根目录）。
+
+**变量与当前目录。** 命令里赋过值的变量按每种可能的取值各分析一遍（`D=~; rm -rf $D`、`C=rm; $C -rf ~`），`cd` 之后的相对路径按可能的当前目录拼起来（`cd ~ && rm -rf *`）。哪些变量“一定赋过值”按 bash 的语义跟踪：`||` 之后、`if` 分支里、管道与子 shell 里的赋值不算数，没导出的变量在 `sh -c` 里是空的。变量可能为空时，`rm -rf`、`find -delete`、`chmod -R` 的目标再按“为空”判一次：`rm -rf $DIR/*` 在 DIR 为空时就是 `rm -rf /*`，任何模式都拒绝，原因里提示改写成 `${DIR:?}`（为空时 bash 报错退出，不执行删除）。这一条宁可多拒：`if` 的两个分支都赋了值，出了 `if` 仍按可能为空处理。值要到运行时才知道的变量（`$(...)`、`read`）落在哪里都按越界处理；取值组合超过 16 种、连同递归超过 1024 段时不再逐个分析，同样按无法静态分析处理。
 但像变量、脚本内容这样的运行时状态，静态分析 shell 本质上做不完。这正是本章末尾“与 pi 的对照”一节中 pi 立场的出发点，
 也是本项目在 [18 章](/governance/workspace-sandbox) 讨论沙箱的原因。
 分析器的真正价值是 **降低审批疲劳**：让 `ls`、`git status` 这类高频只读命令不用问，把审批留给真正值得看的动作。

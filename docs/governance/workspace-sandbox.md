@@ -78,8 +78,9 @@ def resolve(self, path: str, *, allow_outside: bool = False) -> Path:
 
 - **bash 不经过它。** 命令分析器对 bash 做了一层近似：参数里出现工作区外的绝对路径、`~`、`$HOME` 时，即使是 `cat /etc/hosts` 这样的只读命令
   也判为 external，default 模式下要确认、plan 模式下拒绝（见 [17 权限与人审](/governance/permissions-hitl)）；用 `..` 爬出工作区的相对路径
-  （`cat ../../etc/hosts`）按 `normpath` 识别，花括号先展开再判断，以变量开头的路径（`D=/etc; cat $D/hosts`）按越界处理。
-  但它只看字符串，整个路径都放在变量里（`F=/etc/hosts; cat $F`）、符号链接都识别不到、直接放行，
+  （`cat ../../etc/hosts`）按 `normpath` 识别，花括号先展开再判断，以变量开头的路径（`D=/etc; cat $D/hosts`）按越界处理，
+  命令里赋过值的变量按取值展开（`F=/etc/hosts; cat $F`），参数按真实路径再查一次凭证清单。
+  但它终究只看命令文本：值要到运行时才知道的路径（`F=$(cat list.txt)`）、脚本与解释器里拼出来的路径都认不出，
   和 `resolve()` 的“先解析再比较”不是一个强度。
 - **硬链接。** 工作区内一个指向外部文件的硬链接，`resolve()` 看到的就是工作区内路径。`read` 会读到外部文件的内容；
   `write` / `edit` 因为走原子写（见下文），替换的是工作区里的目录项，外部文件不受影响——但 bash 里的 `echo >> link` 仍会改到它。
@@ -390,7 +391,7 @@ harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `e
 | `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是 bash 里的 git 无法使用 ssh-agent |
 | `DATABASE_URL=postgres://user:pass@host/db` | 是，值是带密码的 URL |
 | `PGCONN="host=db password=…"`、JSON 配置里的密码 | **否**，名字和值的形态都认不出 |
-| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但变量拼接等混淆写法认不出，要靠下文的 sandbox-exec 档位由内核拒绝 |
+| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但运行时才拼出来的路径等混淆写法认不出，要靠下文的沙箱档位由内核拒绝 |
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
 需要的凭证必须在 `flywhl.toml` 该服务器的 `env` 里显式给出——第三方 MCP 服务器拿到什么，从配置里一眼可见。
@@ -442,7 +443,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 动作 | 命令分析（字符串） | sandbox-exec（内核） |
 |---|---|---|
 | `cat ~/.kube/config` | deny | 拒绝 |
-| `D=$HOME/.ku; cat ${D}be/config`、glob、编码过的路径 | 认不出，bypass 下放行 | 拒绝 |
+| `D=$(echo $HOME/.ku); cat ${D}be/config`（运行时才拼出来）、glob、编码过的路径 | 认不出，bypass 下放行 | 拒绝 |
 | 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
 | 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
 | 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
@@ -453,7 +454,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 回环地址上的本机 TCP 服务、其余 Mach 服务 | — | `allow` 档**不限制** |
 | 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
 
-`tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
+`tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条运行时拼出凭证路径的命令跑两遍：
 沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界，`tests/test_hardening.py::test_sandbox_network_deny_blocks_outbound_connections` 核对断网。
 
 代价与边界：

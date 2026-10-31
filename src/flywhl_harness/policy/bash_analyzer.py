@@ -21,7 +21,11 @@
 7. **符号链接**：传入 workspace 时，参数按真实路径再判一次（glob 按 bash 规则展开）——工作区里的 ``notes.txt``
    可能是指向 ``~/.ssh/id_rsa`` 的链接；
 8. **劫持执行的写法**：“只读”命令的执行型 / 写入型选项（``rg --pre``、``awk -f``、``uniq 输入 输出``）、
-   改变后续命令实际执行什么的环境变量（``PATH=.``、``LD_PRELOAD=``、``HOME=``、``GIT_*``）都不按只读放行。
+   改变后续命令实际执行什么的环境变量（``PATH=.``、``LD_PRELOAD=``、``HOME=``、``GIT_*``）都不按只读放行；
+9. **变量与当前目录**：命令里赋过值的变量按每种取值各分析一遍（``D=~; rm -rf $D``、``C=rm; $C -rf ~``），
+   值要到运行时才知道的（``$(...)``、``read``）按位置未知处理；变量可能为空时，递归删除的目标按“为空”再判一次
+   （``rm -rf $DIR/*`` 就是 ``rm -rf /*``）。``cd`` 之后的相对路径、git 读取的仓库配置按可能的当前目录判断。
+   哪些变量“一定赋过值”按 bash 的语义跟踪：``||`` 之后、分支里、管道与子 shell 里的赋值不算数（见 ``_Flow``）。
 
 这仍然不是安全边界——真正的兜底是沙箱。它的价值是让“默认放行”的范围尽量精确，降低审批疲劳。
 """
@@ -31,7 +35,9 @@ from __future__ import annotations
 import functools
 import glob
 import itertools
+import math
 import os
+import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -92,13 +98,30 @@ SAFE_ABS = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/zero"
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", "<>", ">&"}
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*")
 _GLOB_CHARS = re.compile(r"[*?\[]")
-_GLOB_LIMIT = 64
+_GLOB_LIMIT = 1024    # glob 匹配超过这么多个就不逐个确认真实位置，按工作区外处理
+_GLOB_DEPTH = 3       # 含通配符的路径段超过这么多层同样不展开：*/*/*/*/x 会把整个仓库走一遍
 _DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
 _HOME = ("~", "$HOME", "${HOME}")
 # $( ... )（允许一层嵌套括号）、反引号、<( ... ) / >( ... )
 _SUBST = re.compile(r"\$\(((?:[^()]|\([^()]*\))*)\)|`([^`]*)`|[<>]\(((?:[^()]|\([^()]*\))*)\)")
 _BLOCK_DEV = re.compile(r"/dev/(r?disk|sd|nvme|hd|xvd|mmcblk|vd|md|dm-|mapper/)")
-_VAR_HEAD = re.compile(r"\$(?:\{(\w+)\}|(\w+))")       # 以变量开头的词：$D/passwd、${D}x/passwd
+_VAR_HEAD = re.compile(r"\$(?:\{[^{}]*\}|\w+|[@*#?$!-])")   # 以变量开头的词：$D/passwd、${D}x/passwd、${D:-/etc}/x
+# 词里的变量引用：$NAME、${...}、特殊参数（$1、$@、$?……）。${...} 的内容再按 _PARAM 拆成名字、运算符与默认值
+_VAR_REF = re.compile(r"\$(?:\{([^{}]*)\}|([A-Za-z_]\w*|[0-9@*#?$!-]))")
+_PARAM = re.compile(r"([A-Za-z_]\w*|[0-9]+|[@*#?$!-])(?:(:?[-=?+])(.*))?", re.S)
+_NEVER_EMPTY = {"HOME", "PWD", "?", "$", "#", "-", "0"}   # 不会为空的变量
+_SAFE_SPECIAL = {"?", "$", "#", "-", "0", "!"}            # 退出码、进程号这类：不是路径
+_VARIANT_LIMIT = 16   # 一段命令按变量取值最多展开成几份
+_VALUE_LIMIT = 8      # 一个变量最多记几种取值，再多就记成“值未知”
+_CWD_LIMIT = 8
+# 一条命令连同 sh -c / eval 的递归最多逐个分析这么多段：取值里再引用变量、层层 bash -c 时组合数是 16 的三次方，
+# 不设上限会把权限判定拖上几十秒
+_WORK_LIMIT = 1024
+_OVER_BUDGET = "命令里的变量取值与嵌套组合太多，无法逐个分析"
+_HOME_MARK = "/\0home"   # 路径运算时，家目录记成根下的一个占位目录
+# shell 不展开的 $（单引号里、\$、$'...' 解出来的）：shlex 去掉引号之后就分不出来了，_bash_lines 先换成这个字符，
+# 变量代入时跳过它；交给 sh -c / eval 递归分析时、写进原因与分段时换回 $
+_LIT = ""
 _BRACE_RANGE = re.compile(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])")
 _BRACE_LIMIT = 64                                      # 展开结果的上限：{a,b}{a,b}…… 会指数膨胀
 
@@ -144,9 +167,21 @@ class CommandAnalysis:
     inline: bool = False
     workspace: str | None = field(default=None, repr=False)
     depth: int = field(default=0, repr=False)   # sh -c / eval 的递归深度
+    # 按段的先后跟踪的 shell 状态：赋过的值（None 是运行时才知道的值）、执行到当前这段时一定赋过值的变量、
+    # 导出的变量、可能的当前目录（"" 是工作区根目录，"~" 开头是家目录，None 是不知道在哪）
+    vars: dict[str, list[str | None]] = field(default_factory=dict, repr=False)
+    sure: set[str] = field(default_factory=set, repr=False)
+    exported: set[str] = field(default_factory=set, repr=False)
+    cwds: list[str | None] = field(default_factory=lambda: [""], repr=False)
+    assigned: set[str] = field(default_factory=set, repr=False)   # 当前这段在本 shell 里赋了值的变量
+    cache: dict = field(default_factory=dict, repr=False)          # glob 展开与真实路径
+    budget: list = field(default_factory=lambda: [_WORK_LIMIT], repr=False)   # 还能逐个分析几段（取值组合也算）
+    prefix: dict = field(default_factory=dict, repr=False)        # 当前这条命令的前置赋值（FOO=bar cmd）
+    traps: list = field(default_factory=list, repr=False)          # trap 的命令与设下时一定赋过值的变量
 
     def bump(self, level: str, reason: str) -> None:
         """提升风险等级。决定最终等级的原因排在最前面（reasons[0] 就是“为什么这么判”）。"""
+        reason = reason.replace(_LIT, "$")
         if reason in self.reasons:
             return
         if _RANK[level] > _RANK[self.level] or not self.reasons:
@@ -158,21 +193,25 @@ class CommandAnalysis:
     def flag_catastrophic(self, reason: str) -> None:
         self.bump("dangerous", reason)
         if not self.catastrophic:
-            self.catastrophic, self.catastrophic_reason = True, reason
+            self.catastrophic, self.catastrophic_reason = True, reason.replace(_LIT, "$")
 
     def flag_credential(self, reason: str) -> None:
         self.bump("dangerous", reason)
         if not self.credential:
-            self.credential, self.credential_reason = True, reason
+            self.credential, self.credential_reason = True, reason.replace(_LIT, "$")
 
     @property
     def rank(self) -> int:
         return _RANK[self.level]
 
 
-def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> CommandAnalysis:
-    """分析命令风险。传入 workspace 时，指向工作区内部的绝对路径按工作区内路径处理。"""
+def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _scope: tuple | None = None) -> CommandAnalysis:
+    """分析命令风险。传入 workspace 时，指向工作区内部的绝对路径按工作区内路径处理。
+    ``_scope`` 是递归分析时从外层带进来的 (变量取值, 一定赋过的, 导出的, 当前目录, 路径缓存, 分析预算)，后两样整棵递归共用。"""
     a = CommandAnalysis(command=command, workspace=workspace, depth=_depth)
+    if _scope:
+        values, sure, exported, cwds, a.cache, a.budget = _scope
+        a.vars, a.sure, a.exported, a.cwds = {k: list(v) for k, v in values.items()}, set(sure), set(exported), list(cwds)
     if workspace:
         # 工作区根目录本身（ls /ws）和它下面的路径（cat /ws/app.py、>/ws/out、@/ws/body.json）都换成相对写法。
         # 前后都用白名单：后面只能是 / 、空白、命令分隔符或结尾——/ws*、/ws{,-other}、"/ws"-other、/ws$X 经 shell 展开后
@@ -192,7 +231,7 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
     for inner in _SUBST.findall(command):
         body = next((x for x in inner if x), "")   # 空的替换（`` 或 $()）展开为空串：没有要分析的命令
         if body.strip():
-            _recurse(body, a, "命令替换")
+            _recurse(body, a, "命令替换", mode="sub")
     _check_secrets(command, a)
     if re.search(r":\(\)\s*\{", command):
         a.flag_catastrophic("疑似 fork 炸弹")
@@ -208,18 +247,141 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
         a.bump("external", f"命令无法解析：{e}")
         return a
 
+    flow = _Flow(a)
     segment: list[str] = []
     for tok in _split_operators(tokens) + [";"]:
         if tok in SEPARATORS:
             if segment:
-                a.segments.append(" ".join(segment))
+                a.segments.append(" ".join(segment).replace(_LIT, "$"))
+                flow.start(segment)
                 _classify(segment, a)
+                flow.assigned(a.assigned)
                 segment = []
+            flow.separator(tok)
             if tok == "&":
                 a.bump("write", "后台执行（&）")
             continue
         segment.append(tok)
+    # trap 的命令在之后某个时刻执行：变量取值算上整条命令赋过的，“一定赋过值”只认设 trap 时与结束时都一定赋过的
+    final = set(flow.stmt)
+    for body, sure in a.traps:
+        a.sure = sure & final
+        _recurse(body, a, "trap", mode="sub")
+    a.sure = final   # eval 在当前 shell 里执行：外层据此知道哪些变量一定赋过值
     return a
+
+
+class _Flow:
+    """执行到每一段时，哪些变量一定赋过值（写进 ``a.sure``；变量可能为空时，``rm -rf $D/*`` 就是 ``rm -rf /*``）。
+
+    按 bash 的语义合并：``a && b`` 里 b 执行时 a 一定成功了，``a || b`` 里 b 执行时 a 一定失败了；
+    管道、后台与子 shell 里的赋值留不到后面；if / while / case 分支里的赋值出了复合命令就不算（分支可能没走），
+    ``{ ...; }`` 里的照常算；for 的循环变量只在循环体里算。"""
+
+    def __init__(self, a: CommandAnalysis):
+        self.a = a
+        self.stack: list[tuple] = []        # 进入的复合命令：(种类, 进入时一定赋过的, 循环变量, 外层的状态)
+        self.stmt: set[str] = set(a.sure)   # 一条语句开始时一定赋过的
+        self.ok: set[str] | None = None     # 与或列表到目前为止成功 / 失败时一定赋过的
+        self.fail: set[str] | None = None
+        self.op: str | None = None          # 当前元素前面的 && 或 ||
+        self.pipe: set[str] | None = None   # 管道开始时一定赋过的：管道里每一段都在子 shell 里
+        self.cur: tuple | None = None       # 刚执行完、还没并进与或列表的元素：(执行时一定赋过的, 它赋值的)
+
+    def _run(self) -> set[str]:
+        if self.pipe is not None:
+            return self.pipe
+        if self.op == "&&" and self.ok is not None:
+            return self.ok
+        if self.op == "||" and self.fail is not None:
+            return self.fail
+        return self.stmt
+
+    def start(self, words: list[str]) -> None:
+        """一段开始：段首的保留字进出复合命令，之后还有命令时，它是与或列表里的一个元素。"""
+        self.a.assigned = set()
+        i, closed = 0, False
+        while i < len(words):
+            w = words[i]
+            if w in ("if", "while", "until", "{", "case", "for", "select"):
+                self._open(w, words[i + 1] if w in ("for", "select") and i + 1 < len(words) else None)
+                if w in ("case", "for", "select"):   # 后面是 case 的对象或循环的取值，不是命令
+                    self.a.sure = set(self.stmt)
+                    return
+            elif w in ("then", "else", "elif", "do"):
+                self._branch(loop=w == "do")
+            elif w in ("fi", "done", "esac", "}"):
+                self._close()
+                closed = True
+            elif w == "function":
+                i += 1
+            elif w != "!":
+                break
+            i += 1
+        if i == len(words) or closed:   # 整段都是保留字，或者复合命令结尾的重定向（done < list、} > out）
+            self.a.sure = set(self.stmt)
+            return
+        run = set(self._run())
+        self.a.sure, self.cur = set(run), (run, set())
+
+    def assigned(self, names: set[str]) -> None:
+        if self.cur is not None:   # 并上：复合命令收尾时 _close 已经记下了 { ...; } 里的赋值
+            self.cur = (self.cur[0], self.cur[1] | names)
+
+    def separator(self, tok: str) -> None:
+        in_case = bool(self.stack) and self.stack[-1][0] == "case"
+        if tok in ("(", ")", ";;", ";&", ";;&"):
+            self._done(";")
+            if in_case:   # case 的模式 a) 与分支结尾 ;;
+                self._branch()
+            elif tok == "(":
+                self._open("(")
+            elif tok == ")":
+                self._close()
+        else:
+            self._done(tok)
+
+    def _done(self, sep: str) -> None:
+        if self.cur is None:
+            return
+        run, assigned = self.cur
+        self.cur = None
+        if sep in ("|", "|&"):
+            if self.pipe is None:
+                self.pipe = run
+            return
+        if self.pipe is not None:   # 管道到此结束：每一段都在子 shell 里，赋值不算数
+            run, assigned, self.pipe = self.pipe, set(), None
+        ok, fail = run | assigned, run | assigned   # 执行了就赋上了值，与成败无关（X=$(false) 失败了 X 也是空串）
+        if self.op == "&&" and self.fail is not None:     # 失败：前面已经失败、跳过了它，或者它自己失败
+            fail &= self.fail
+        elif self.op == "||" and self.ok is not None:     # 成功：前面已经成功、跳过了它，或者它执行成功
+            ok &= self.ok
+        if sep in ("&&", "||"):
+            self.ok, self.fail, self.op = ok, fail, sep
+            return
+        if sep != "&":   # 放到后台的整个列表在子 shell 里执行
+            self.stmt = ok & fail
+        self.ok = self.fail = self.op = None
+
+    def _open(self, kind: str, loopvar: str | None = None) -> None:
+        run = set(self._run())
+        self.stack.append((kind, run, loopvar, (self.stmt, self.ok, self.fail, self.op, self.pipe)))
+        self.stmt, self.ok, self.fail, self.op, self.pipe, self.cur = set(run), None, None, None, None, None
+
+    def _branch(self, loop: bool = False) -> None:
+        if self.stack:
+            _, entry, loopvar, _ = self.stack[-1]
+            self.stmt = entry | ({loopvar} if loop and loopvar else set())
+            self.ok = self.fail = self.op = self.pipe = self.cur = None
+
+    def _close(self) -> None:
+        if not self.stack:
+            return
+        kind, entry, _, outer = self.stack.pop()
+        inner = self.stmt
+        self.stmt, self.ok, self.fail, self.op, self.pipe = outer
+        self.cur = (entry, inner - entry if kind == "{" else set())
 
 
 def _split_operators(tokens: list[str]) -> list[str]:
@@ -245,10 +407,11 @@ def _bash_lines(cmd: str) -> str:
       宁可多问，也不能把真正会执行的行当成数据。正文里的凭证路径、``$( )`` 仍由 analyze() 对原始命令串的检查覆盖。
 
     - ``$'...'``（ANSI-C 引号）按 C 转义解码后换成普通单引号：shlex 不认识它，``$'\\x72m' -rf ~`` 执行的就是 ``rm -rf ~``。
+    - shell 不展开的 ``$``（单引号里、``\\$``）换成 _LIT：``sh -c 'rm -rf $D/*'`` 里的 $D 由子 shell 展开，不是当前 shell。
 
     引号不配对时原样交给 shlex，由它报“无法解析”。
     """
-    if "\n" not in cmd and "#" not in cmd and "$'" not in cmd:
+    if "\n" not in cmd and "#" not in cmd and "$'" not in cmd and not ("$" in cmd and ("'" in cmd or "\\" in cmd)):
         return cmd
     out: list[str] = []
     stack: list[str] = []                      # 上下文：引号 "'"、'"'、"$'"；命令 "`"、"$("、"("；算术 "(("、"a("
@@ -259,11 +422,11 @@ def _bash_lines(cmd: str) -> str:
         if top == "'":
             if c == "'":
                 stack.pop()
-            out.append(c)
+            out.append(_LIT if c == "$" else c)
             i += 1
             continue
         if top in ('"', "$'", "`") and c == "\\" and i + 1 < n:
-            out.append(cmd[i:i + 2])          # 转义的引号不结束字符串
+            out.append(_LIT if top == '"' and cmd[i + 1] == "$" else cmd[i:i + 2])   # 转义的引号不结束字符串
             i += 2
             continue
         if top == "$'":
@@ -302,7 +465,7 @@ def _bash_lines(cmd: str) -> str:
             continue
         if c == "\\" and i + 1 < n:
             if cmd[i + 1] != "\n":                # 续行：反斜杠和换行一起去掉
-                out.append(cmd[i:i + 2])
+                out.append(_LIT if cmd[i + 1] == "$" else cmd[i:i + 2])
             i += 2
             continue
         if c == "`" and top == "`":
@@ -314,7 +477,7 @@ def _bash_lines(cmd: str) -> str:
             while j < n and cmd[j] != "'":
                 j += 2 if cmd[j] == "\\" else 1
             if j < n:
-                out.append(shlex.quote(_ansi_c(cmd[i + 2:j])))
+                out.append(shlex.quote(_ansi_c(cmd[i + 2:j]).replace("$", _LIT)))
                 i = j + 1
                 continue
             stack.append("$'")                    # 不配对：留给 shlex 报错
@@ -427,14 +590,23 @@ def _heredoc_end(cmd: str, start: int, delim: str, strip_tabs: bool) -> int | No
 
 
 def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
-    """剥掉前置赋值、复合命令的保留字与包装命令，返回真正执行的那条命令（可能为空：例如单独的 ``env``、``fi``）。"""
+    """剥掉前置赋值、复合命令的保留字与包装命令，返回真正执行的那条命令（可能为空：例如单独的 ``env``、``fi``）。
+    段首的赋值后面没有命令时，就是在当前 shell 里赋值：记下取值，后面的段按值展开。"""
+    lead: list[str] | None = []
     while words:
         while words and (_ASSIGN.fullmatch(words[0]) or words[0] in RESERVED or words[0] == "function"):
             if _ASSIGN.fullmatch(words[0]):
                 _check_assign(words[0], a)
+                if lead is not None:
+                    lead.append(words[0])
             words = words[2:] if words[0] == "function" else words[1:]  # FOO=bar cmd、then cmd、function f { cmd
         if not words:
+            for w in lead or ():
+                _assign(w, a)
             return []
+        for w in lead or ():   # FOO=bar cmd：只在这条命令的环境里，sh -c 之类的子进程看得到
+            _prefix(w, a)
+        lead = None
         name = words[0].rsplit("/", 1)[-1]
         if name not in WRAPPERS:
             return words
@@ -447,6 +619,7 @@ def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
             opt = rest.pop(0)
             if _ASSIGN.fullmatch(opt):   # env PATH=. ls
                 _check_assign(opt, a)
+                _prefix(opt, a)
                 continue
             if name == "env" and opt in ("-S", "--split-string") or opt.startswith("--split-string="):
                 a.bump("external", "env -S 会把字符串再切分执行，无法静态分析")
@@ -454,6 +627,8 @@ def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
             val = rest.pop(0) if opt in takes and rest else opt.split("=", 1)[1] if opt.startswith("--") and "=" in opt else ""
             if val and _is_outside(val, a):   # env -C /etc cat passwd、xargs -a /etc/passwd echo：选项值同样是路径
                 a.bump("external", f"{name} {opt.split('=')[0]} 访问工作区外路径 {val}")
+            if val and name == "env" and opt.split("=")[0] in ("-C", "--chdir"):   # 之后的命令在那里执行（git 读那里的仓库配置）
+                _chdir_to(val, a)
         if name == "command" and rest[:1] in (["-v"], ["-V"]) or words[1:2] in (["-v"], ["-V"]) and name == "command":
             return ["type"]  # command -v：只是查找命令位置
         if name == "timeout" and rest and _DURATION.fullmatch(rest[0]):
@@ -480,24 +655,334 @@ def _check_assign(word: str, a: CommandAnalysis) -> None:
         _recurse(value.lstrip("|"), a, f"环境变量 {name}")
 
 
+# ---------------------------------------------------------------------- 变量与当前目录
+def _assign(word: str, a: CommandAnalysis, *, nameref: bool = False) -> None:
+    """当前 shell 里的赋值 ``NAME=值``（值已经按之前的赋值展开过）。值含命令替换时要到运行时才知道，记成 None；
+    ``X+=y`` 接在原来的取值后面；``declare -n`` 的名字引用指向别的变量，同样记成 None。"""
+    name, _, value = word.partition("=")
+    if name.endswith("+"):
+        name = name[:-1]
+        old = a.vars.get(name)
+        values = [o + value for o in old] if old and None not in old and name in a.sure else [None]
+    else:
+        dynamic = nameref or "$(" in value or "`" in value or value.endswith("$")   # X=$(cmd) 被切成 X=$ 与 (cmd)
+        values = [None if dynamic else value]
+    _add_values(name, values, a)
+    a.assigned.add(name)
+
+
+def _prefix(word: str, a: CommandAnalysis) -> None:
+    """记下前置赋值 ``FOO=bar cmd`` 的值（含命令替换时不知道，不记），见 _apply_prefix。"""
+    name, _, value = word.partition("=")
+    if not name.endswith("+"):
+        a.prefix[name] = None if "$(" in value or "`" in value or value.endswith("$") else value
+
+
+def _scope_for(a: CommandAnalysis, mode: str) -> tuple:
+    """递归分析时带进去的作用域：child（新进程）里没导出的变量可能是空的。"""
+    sure = a.sure & a.exported if mode == "child" else a.sure
+    return a.vars, sure, a.exported, a.cwds, a.cache, a.budget
+
+
+_LIT_REF = re.compile(_LIT + r"(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _apply_prefix(script: str, a: CommandAnalysis) -> str:
+    """前置赋值（``FOO=bar sh -c '...$FOO...'``）只有这条命令和它的子进程看得到：把单引号里留给子 shell 展开的
+    ``$FOO`` 换成它的值。外层已经展开过的 ``$FOO``（写在双引号里）用的是外层的值，不换——
+    ``DIR=build bash -c "rm -rf $DIR/*"`` 删的是 ``/*``。"""
+    if not a.prefix:
+        return script
+
+    def one(m: re.Match) -> str:
+        v = a.prefix.get(m.group(1) or m.group(2))
+        return m.group(0) if v is None else v
+    return _LIT_REF.sub(one, script)
+
+
+def _add_values(name: str, values, a: CommandAnalysis) -> None:
+    cur = a.vars.setdefault(name, [])
+    for v in values:
+        if v not in cur:
+            cur.append(v if len(cur) < _VALUE_LIMIT else None)
+
+
+def _set_unknown(name: str, a: CommandAnalysis) -> None:
+    if re.fullmatch(r"[A-Za-z_]\w*", name):
+        _add_values(name, [None], a)
+        a.assigned.add(name)
+
+
+def _var_values(name: str, keep: str, a: CommandAnalysis) -> list[str]:
+    """变量可能的取值。没赋过、不一定赋过或者值未知时，保留原来的写法（keep），之后按位置未知处理。"""
+    if name == "PWD":   # 没有 cd 过时就是工作区根目录
+        return ["."] if a.cwds == [""] else [keep]
+    vals = a.vars.get(name)
+    if not vals:
+        return [keep]
+    out = [v for v in vals if v is not None]
+    if None in vals or name not in a.sure:
+        out.append(keep)
+    return list(dict.fromkeys(out))
+
+
+def _may_be_empty(name: str, a: CommandAnalysis) -> bool:
+    if name in _NEVER_EMPTY:
+        return False
+    return name not in a.sure or any(v in ("", None) for v in a.vars.get(name, [None]))
+
+
+def _ref_values(m: re.Match, a: CommandAnalysis) -> list[str]:
+    """一处变量引用可能展开成的值。``${X:-默认值}`` 算上默认值，``${X:+替换}`` 算上空串；
+    ``${X#…}``、``${X/…}``、``${!X}`` 这类裁剪替换保留原样（值未知）。"""
+    body, name = m.group(1), m.group(2)
+    if body is None:
+        return _var_values(name, m.group(0), a)
+    if body.startswith("#") and len(body) > 1:   # ${#X}：长度
+        return ["0"]
+    p = _PARAM.fullmatch(body)
+    if not p:
+        return [m.group(0)]
+    name, op, word = p.groups()
+    if op is None:
+        return _var_values(name, m.group(0), a)
+    if op in (":+", "+"):
+        return [word, ""] if _may_be_empty(name, a) else [word]
+    keep = "${%s:?}" % name   # 非空、但不知道是什么
+    vals = [v for v in _var_values(name, keep, a) if v or op in ("-", "=", "?")]   # 带冒号的写法：空值同样换成默认值 / 报错
+    if op in (":-", "-", ":=", "=") and _may_be_empty(name, a):
+        vals.append(word)
+    return list(dict.fromkeys(vals)) or [keep]
+
+
+def _word_values(w: str, a: CommandAnalysis) -> list[str]:
+    if "$" not in w:
+        return [w]
+    parts: list[list[str]] = []
+    pos = 0
+    for m in _VAR_REF.finditer(w):
+        parts += [[w[pos:m.start()]], _ref_values(m, a)]
+        pos = m.end()
+    parts.append([w[pos:]])
+    out = list(dict.fromkeys("".join(c) for c in itertools.islice(itertools.product(*parts), _VARIANT_LIMIT + 1)))
+    if len(out) > _VARIANT_LIMIT:
+        a.bump("external", f"{w} 里变量取值的组合太多，无法逐个分析")
+    return out[:_VARIANT_LIMIT]
+
+
+def _substitute(words: list[str], a: CommandAnalysis) -> list[list[str]]:
+    """把赋过值的变量换成每种可能的取值，每种组合一份（最多 _VARIANT_LIMIT 份）。取值里有空白、原词里没有时，
+    带引号（整体一个词）与不带引号（按空白拆开）各算一份：``bash -c "$C"`` 与 ``rm $ARGS`` 都要看到；
+    取值为空时同理（带引号是一个空参数，不带引号整个词消失）。"""
+    if not any("$" in w for w in words):
+        return [words]
+    choices: list[list[tuple[str, ...]]] = []
+    for w in words:
+        opts: list[tuple[str, ...]] = []
+        for v in _word_values(w, a):
+            opts.append((v,))
+            if v != w and not any(c.isspace() for c in w) and (not v or any(c.isspace() for c in v)):
+                opts.append(tuple(v.split()))
+        choices.append(list(dict.fromkeys(opts)))
+    total = math.prod(len(c) for c in choices)
+    if total > _VARIANT_LIMIT:
+        a.bump("external", f"变量取值的组合太多（{total} 种），无法逐个分析")
+    return [[x for part in combo for x in part] for combo in itertools.islice(itertools.product(*choices), _VARIANT_LIMIT)]
+
+
+def _opaque(word: str, a: CommandAnalysis) -> bool:
+    """词里有值要到运行时才知道的变量（``$(...)``、``read`` 赋的值，或 ``${X#…}`` 这类裁剪替换）：落在哪里无从判断。"""
+    for m in _VAR_REF.finditer(word):
+        body, name = m.group(1), m.group(2)
+        if body is not None:
+            p = _PARAM.fullmatch(body)
+            if not p or p.group(2) not in (None, ":?", "?"):
+                return True
+            name = p.group(1)
+        if None in a.vars.get(name, ()):
+            return True
+    return False
+
+
+def _has_ref(word: str) -> bool:
+    return any(m.group(2) not in _SAFE_SPECIAL for m in _VAR_REF.finditer(word))
+
+
+def _empty_variant(word: str) -> tuple[str, list[str]]:
+    """可能为空的变量都换成空串之后的样子，以及换掉的变量。``${X:?}``、``$HOME``、``$?`` 这类不会为空。"""
+    names: list[str] = []
+
+    def one(m: re.Match) -> str:
+        body, name = m.group(1), m.group(2)
+        p = _PARAM.fullmatch(body) if body is not None else None
+        n = name or (p.group(1) if p else None)
+        if n in _NEVER_EMPTY or (p and p.group(2) in (":?", "?")) or (body or "").startswith("#"):
+            return m.group(0)
+        names.append(n or m.group(0))
+        return ""
+    return _VAR_REF.sub(one, word), list(dict.fromkeys(names))
+
+
+def _to_abs(p: str) -> str:
+    """家目录的写法（~、~user、$HOME、${HOME}）换成根下的占位目录，好和绝对路径一起做路径运算。"""
+    return re.sub(r"^(~[^/]*|\$HOME|\$\{HOME\})(?=/|$)", lambda m: _HOME_MARK, p)
+
+
+def _from_abs(p: str) -> str:
+    return "~" + p[len(_HOME_MARK):] if p == _HOME_MARK or p.startswith(_HOME_MARK + "/") else p
+
+
+def _root_depth(t: str) -> int | None:
+    """路径在根目录或家目录下第几层（/、~ 是 0，/usr、~/projects、/* 是 1）；相对路径返回 None。"""
+    t = _to_abs(t)
+    if not t.startswith("/"):
+        return None
+    parts = [p for p in posixpath.normpath(re.sub(r"/+", "/", t)).split("/") if p]
+    return len(parts) - 1 if parts[:1] == [_HOME_MARK[1:]] else len(parts)
+
+
+def _join_cwd(cwd: str | None, target: str) -> str | None:
+    """在 cwd 里 cd target 之后到了哪里：工作区内用相对路径表示（"" 是根目录），工作区外用绝对路径或 ~ 开头。"""
+    t = _to_abs(target)
+    if t.startswith("/"):
+        return _from_abs(posixpath.normpath(re.sub(r"/+", "/", t)))
+    if cwd is None:
+        return None
+    base = _to_abs(cwd)
+    if base.startswith("/"):
+        return _from_abs(posixpath.normpath(posixpath.join(base, t)))
+    rel = posixpath.normpath(posixpath.join(cwd, t))
+    return "" if rel == "." else rel
+
+
+def _add_cwd(c: str | None, a: CommandAnalysis) -> None:
+    if c not in a.cwds:
+        a.cwds.append(c if len(a.cwds) < _CWD_LIMIT else None)
+
+
+def _chdir_to(target: str, a: CommandAnalysis) -> None:
+    """记下切换到 target 之后可能的当前目录。只增不减：分支、子 shell 里的切换也算上，宁可多判几处。
+    target 取决于值未知的变量时位置未知；变量为空时，不带引号的 ``cd $D`` 回到家目录、``cd $D/x`` 到了 /x。"""
+    target = _from_abs(_to_abs(target))   # $HOME/x 就是 ~/x
+    if _has_ref(target):
+        a.bump("external", f"切换到的目录 {target} 取决于变量，之后的相对路径落在哪里无法静态判断")
+        _add_cwd(None, a)
+        ev, names = _empty_variant(target)
+        if names:
+            for c in list(a.cwds):
+                _add_cwd(_join_cwd(c, ev) if ev else "~", a)
+        return
+    for c in list(a.cwds):
+        _add_cwd(_join_cwd(c, target), a)
+
+
+def _chdir(cmd: str, args: list[str], a: CommandAnalysis) -> None:
+    """cd / pushd / popd。``cd -``、``popd`` 回到之前的目录：命令里切换过的都已经算上了，没切换过时是命令开始前的
+    目录（OLDPWD），位置未知。"""
+    targets = [x for x in args if x == "-" or not x.startswith(("-", "+"))]
+    if cmd == "popd" or targets[:1] == ["-"] or (cmd == "pushd" and (not targets or len(targets) < len(args))):
+        if len(a.cwds) == 1 and (cmd == "cd" or targets):
+            _add_cwd(None, a)
+        return
+    _chdir_to(targets[0] if targets else "~", a)
+
+
+def _loop_header(args: list[str], a: CommandAnalysis) -> None:
+    """``for NAME in 词…``：循环变量依次取这些词（已经展开过）。没有 in 时取位置参数，值未知。
+    它是否一定赋过值由 _Flow 管：只在循环体里算。"""
+    if not args or not re.fullmatch(r"[A-Za-z_]\w*", args[0]):
+        return
+    if args[1:2] == ["in"]:
+        _add_values(args[0], [None if "$(" in v or "`" in v or v.endswith("$") else v for v in args[2:]], a)
+    else:
+        _add_values(args[0], [None], a)
+
+
+_VAR_SETTERS = {"read", "mapfile", "readarray", "getopts", "unset"}
+
+
+def _var_setters(cmd: str, args: list[str], a: CommandAnalysis) -> None:
+    """给变量赋运行时才知道的值（read、mapfile、getopts），或者清空它（unset）。"""
+    if cmd == "unset":
+        for x in args:
+            if re.fullmatch(r"[A-Za-z_]\w*", x):
+                _add_values(x, [""], a)
+                a.assigned.add(x)
+        return
+    if cmd == "getopts":
+        for x in args[1:2]:
+            _set_unknown(x, a)
+        return
+    if cmd in ("mapfile", "readarray") and any(x.startswith("-C") for x in args):
+        a.bump("external", f"{cmd} -C 会执行回调命令，无法静态分析")
+        a.inline = True
+    takes = {"-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"} if cmd == "read" else {"-d", "-n", "-O", "-s", "-u", "-C", "-c"}
+    names, i = [], 0
+    while i < len(args):
+        if args[i] in takes:
+            if args[i] == "-a" and i + 1 < len(args):   # read -a 数组名
+                names.append(args[i + 1])
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            names.append(args[i])
+        i += 1
+    for n in names or ["REPLY" if cmd == "read" else "MAPFILE"]:
+        _set_unknown(n, a)
+
+
+def _root_hit(t: str, a: CommandAnalysis, depth: int) -> str | None:
+    """t 实际落到根目录、家目录（depth=1 时再加它们下面一级）时，返回说明它的文字。相对路径按可能的当前目录拼起来
+    （``cd ~ && rm -rf *``）；含可能为空的变量时按变量为空再判一次（``rm -rf $DIR/*`` 就是 ``rm -rf /*``）。
+    整个词都为空时 bash 直接丢掉它，不算。"""
+    ev, names = _empty_variant(t)
+    for form, empty in ((t, []), *([(ev, names)] if names and ev else [])):
+        for cwd in a.cwds:
+            joined = form
+            if cwd and _to_abs(cwd).startswith("/") and not _to_abs(form).startswith(("/", "$")):
+                joined = _from_abs(posixpath.join(_to_abs(cwd), form))
+            d = _root_depth(joined)
+            if d is None or d > depth:
+                continue
+            where = f"（当前目录是 {cwd}）" if joined != form else ""
+            if empty:
+                return (f"{joined}{where}：变量 {'、'.join(empty)} 为空时 {t} 就是 {ev}。"
+                        f"先确认变量非空（如 ${{{empty[0]}:?}}），或者写出完整路径")
+            return f"{joined}{where}"
+    return None
+
+
 @functools.lru_cache(maxsize=16)
 def _realroot(workspace: str) -> str:
     return os.path.realpath(workspace)
 
 
 def _real_paths(word: str, a: CommandAnalysis) -> list[str]:
-    """词在工作区里实际指向的位置：跟随符号链接，glob 按 bash 的规则展开（不含点文件，最多 _GLOB_LIMIT 个）。
-    没有工作区、或者词是选项 / 变量 / 绝对路径（交给 _is_outside 按字面判断）时返回空。"""
+    """词在工作区里实际指向的位置：跟随符号链接，glob 按 bash 的规则展开（不含点文件）。
+    没有工作区、或者词是选项 / 变量 / 绝对路径（交给 _is_outside 按字面判断）时返回空。
+    匹配太多、通配层数太多时不逐个确认，按工作区外处理：只看前一部分的话，链接可能就藏在后面。"""
     if not a.workspace or not word or word.startswith(("-", "$", "~", "/")) or len(word) > 1024 or "\0" in word:
         return []
-    root = _realroot(a.workspace)
-    names = [word]
-    if _GLOB_CHARS.search(word) and word.count("/") <= 4:   # 层数限一下：*/*/*/*/... 会把整个仓库走一遍
-        try:
-            names = list(itertools.islice(glob.iglob(word, root_dir=root), _GLOB_LIMIT)) or names   # 没匹配到时 bash 原样传参
-        except (OSError, ValueError):
-            pass
-    return [os.path.realpath(os.path.join(root, x)) for x in names]
+    if word in a.cache:
+        paths, why = a.cache[word]
+    else:
+        root, names, why = _realroot(a.workspace), [word], ""
+        if _GLOB_CHARS.search(word):
+            if sum(1 for part in word.split("/") if _GLOB_CHARS.search(part)) > _GLOB_DEPTH:
+                why = f"{word} 的通配层数太多，没法逐个确认匹配到的真实位置"
+            else:
+                try:
+                    found = list(itertools.islice(glob.iglob(word, root_dir=root), _GLOB_LIMIT + 1))
+                except (OSError, ValueError):
+                    found = []
+                if len(found) > _GLOB_LIMIT:
+                    why = f"{word} 匹配到的文件超过 {_GLOB_LIMIT} 个，没法逐个确认真实位置"
+                names = found[:_GLOB_LIMIT] or names   # 没匹配到时 bash 原样传参
+        paths = [os.path.realpath(os.path.join(root, x)) for x in names]
+        a.cache[word] = (paths, why)
+    if why:
+        a.bump("external", why)
+    return paths
 
 
 def _within(real: str, root: str) -> bool:
@@ -506,21 +991,24 @@ def _within(real: str, root: str) -> bool:
 
 def _is_outside(path: str, a: CommandAnalysis) -> bool:
     """工作区内的绝对路径在 analyze() 开头已被替换成 ./ 前缀，这里剩下的绝对路径都在工作区外；
-    相对路径用 normpath 判断是否经 .. 爬出了工作区（命令在工作区根目录执行），再按真实路径判断——
-    工作区里的符号链接可以指向任何地方。
-    以变量开头、又带 / 的词（``$D/passwd``）落在哪里取决于变量的值，按越界处理；``$PWD`` 就是工作区根目录。"""
-    if path in SAFE_ABS:
+    相对路径按每个可能的当前目录拼起来，用 normpath 判断是否经 .. 爬出了工作区，再按真实路径判断——
+    工作区里的符号链接可以指向任何地方。当前目录可能在工作区外或不知道在哪时，相对路径同样按越界处理。
+    以变量开头、又带 / 的词（``$D/passwd``）落在哪里取决于变量的值，按越界处理；值要到运行时才知道的变量在哪都一样。"""
+    if path in SAFE_ABS or path.startswith("-"):
         return False
-    m = _VAR_HEAD.match(path)
-    if m and "/" in path:
-        if (m.group(1) or m.group(2)) != "PWD":
-            return True
-        path = "." + path[m.end():]
+    if _opaque(path, a) or (_VAR_HEAD.match(path) and "/" in path):
+        return True
     if path.startswith(("/", *_HOME)):
         return True
-    if ".." in path and os.path.normpath(path).split("/", 1)[0] == "..":
-        return True
-    return any(not _within(real, _realroot(a.workspace)) for real in _real_paths(path, a))
+    for cwd in a.cwds:
+        if cwd is None or cwd.startswith(("/", "~")):
+            return True
+        rel = os.path.join(cwd, path) if cwd else path
+        if ".." in rel and os.path.normpath(rel).split("/", 1)[0] == "..":
+            return True
+        if any(not _within(real, _realroot(a.workspace)) for real in _real_paths(rel, a)):
+            return True
+    return False
 
 
 def _check_secrets(text: str, a: CommandAnalysis) -> None:
@@ -532,9 +1020,19 @@ def _check_secrets(text: str, a: CommandAnalysis) -> None:
 
 
 def _check_link(word: str, a: CommandAnalysis) -> None:
-    """按真实路径再查一次敏感清单：``cat notes.txt`` 读到的可能是 ``~/.ssh/id_rsa``（工作区里的符号链接）。"""
+    """按真实路径再查一次敏感清单：``cat notes.txt`` 读到的可能是 ``~/.ssh/id_rsa``（工作区里的符号链接），
+    ``cd ~/.ku""be && cat config`` 读到的是 ``~/.kube/config``（相对路径按可能的当前目录拼起来）。"""
     val = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
-    for real in _real_paths(val, a):
+    if not val or val.startswith("-"):
+        return
+    reals: list[str] = []
+    for cwd in a.cwds:
+        if cwd is not None and cwd.startswith(("/", "~")):
+            if not val.startswith(("$", "~", "/")):
+                reals.append(os.path.realpath(os.path.expanduser(os.path.join(cwd, val))))
+        elif cwd is not None:
+            reals += _real_paths(os.path.join(cwd, val) if cwd else val, a)
+    for real in reals:
         level = sensitivity(real)
         if level == "deny":
             a.flag_credential(f"{val} 实际指向凭证位置 {real}")
@@ -607,6 +1105,17 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         if not complete:
             a.bump("external", "花括号展开的结果过多，无法静态分析")
         expanded.extend(words)
+    # 然后是变量展开：命令里赋过值的按每种取值各分析一遍（C=rm; $C -rf ~ 实际执行的是 rm -rf ~）
+    for words in _substitute(expanded, a):
+        a.budget[0] -= 1
+        if a.budget[0] < 0:
+            a.bump("external", _OVER_BUDGET)
+            return
+        _classify_words(words, a)
+
+
+def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
+    a.prefix = {}
     for w in expanded:
         _check_secrets(w, a)  # 这时看到的是 shell 去掉引号、展开花括号之后的样子：~/.k''ube/config、~/.ku{be,}/config
         _check_link(w, a)     # 再按真实路径查一次：工作区里的符号链接可以指向凭证
@@ -640,20 +1149,36 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
             continue
         val = w.split("=", 1)[1] if w.startswith("-") and "=" in w else w
         if _is_outside(val, a):
-            a.bump("external", f"路径 {val} 以变量开头，位置无法静态判断，按工作区外处理" if _VAR_HEAD.match(val)
-                   else f"访问工作区外路径 {val}")
+            if _opaque(val, a):
+                why = f"路径 {val} 里的变量要到运行时才知道值，位置无法静态判断，按工作区外处理"
+            elif _VAR_HEAD.match(val):
+                why = f"路径 {val} 以变量开头，位置无法静态判断，按工作区外处理"
+            elif not val.startswith(("/", *_HOME)) and any(c is None or c.startswith(("/", "~")) for c in a.cwds):
+                why = f"之前切换到了工作区外或无法确定的目录，{val} 按工作区外处理"
+            else:
+                why = f"访问工作区外路径 {val}"
+            a.bump("external", why)
             break
 
     if cmd in SHELLS and (script := _shell_script(args)) is not None:
         _recurse(script, a, f"{cmd} -c")
     elif cmd == "eval":
-        _recurse(" ".join(args), a, "eval")
+        _recurse(" ".join(args), a, "eval", mode="same")
     elif cmd == "trap":
         _trap(args, a)
     elif cmd == "watch":
         _watch(args, a)
     elif cmd in ("source", "."):
         a.bump("external", f"{cmd} 执行脚本文件，内容无法静态分析")
+    elif cmd in ("cd", "pushd", "popd"):
+        _chdir(cmd, args, a)
+        a.bump("read", f"{cmd} 切换目录")
+    elif cmd in ("for", "select"):
+        _loop_header(args, a)
+        a.bump("read", f"{cmd} 循环")
+    elif cmd in _VAR_SETTERS:
+        _var_setters(cmd, args, a)
+        a.bump("write", f"{cmd} 给 shell 变量赋值")
     elif cmd in DANGEROUS_CMDS:
         a.bump("dangerous", f"高危命令 {cmd}")
         dev = next((x[3:] for x in args if x.startswith("of=")), "")
@@ -673,16 +1198,16 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         flags = "".join(x for x in args if x.startswith("-"))
         targets = [x for x in args if not x.startswith("-")]
         recursive = "r" in flags or "R" in flags
-        roots = [t for t in targets if _is_root_like(t)]
-        if recursive and roots:
-            a.flag_catastrophic(f"递归删除 {roots[0]}")
-        elif recursive and any(t.rstrip("/") in ("*", "..", ".", "") or _is_outside(t, a) for t in targets):
-            a.bump("dangerous", "递归删除工作区外路径或整个工作区")
+        hit = next((h for t in targets if (h := _root_hit(t, a, 1))), None) if recursive else None
+        if hit:
+            a.flag_catastrophic(f"递归删除 {hit}")
+        elif recursive and any(t.rstrip("/") in ("*", "..", ".", "") or _is_outside(t, a) or _has_ref(t) for t in targets):
+            a.bump("dangerous", "递归删除工作区外路径、整个工作区，或者目标取决于变量")
         else:
             a.bump("write", "删除文件")
     elif cmd in ("chmod", "chown") and any(x in ("-R", "--recursive") for x in args) and \
-            any(t.rstrip("/") in ("", *_HOME) for t in args if not t.startswith("-")):
-        a.flag_catastrophic("递归修改根目录/家目录的权限")
+            (hit := next((h for t in args if not t.startswith("-") and (h := _root_hit(t, a, 0))), None)):
+        a.flag_catastrophic(f"递归修改根目录/家目录的权限：{hit}")
     elif cmd == "git":
         _git(args, a)
     elif cmd == "find":
@@ -694,9 +1219,18 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         else:
             a.bump("read", "find 只读搜索")
     elif cmd in ("export", "declare", "typeset", "local", "readonly"):
+        opts = "".join(x[1:] for x in args if x.startswith("-"))
         for x in args:
+            if x.startswith("-"):
+                continue
+            name = x.split("=", 1)[0].rstrip("+")
             if _ASSIGN.fullmatch(x):
                 _check_assign(x, a)
+                _assign(x, a, nameref="n" in opts)
+            elif cmd == "local" and re.fullmatch(r"[A-Za-z_]\w*", x):   # local X：函数里的 X 变成空的
+                _assign(x + "=", a)
+            if cmd == "export" or "x" in opts:
+                a.exported.add(name)
         a.bump("write", f"{cmd} 修改 shell 变量")
     elif cmd in ("sed", "perl") and any(re.fullmatch(r"-[A-Za-z]*i.*|--in-place.*", x) for x in args):
         a.bump("write", f"{cmd} -i 原地修改文件")   # 含合写的短选项：sed -Ei、sed -ni.bak
@@ -721,6 +1255,8 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
         a.bump("write", f"{cmd} 可能修改文件或执行代码")
         _embedded_catastrophe(cmd, args, a)
     elif cmd in READ_CMDS:
+        if cmd == "printf" and args[:1] == ["-v"] and len(args) > 1:
+            _set_unknown(args[1], a)
         risk = _read_options(cmd, args)
         if risk:
             a.bump(*risk)
@@ -863,12 +1399,14 @@ def _awk(cmd: str, args: list[str], a: CommandAnalysis) -> None:
 
 
 def _trap(args: list[str], a: CommandAnalysis) -> None:
-    """``trap '命令' 信号``：命令会在收到信号或退出时执行（``trap 'rm -rf ~' EXIT``），按一条命令递归分析。"""
+    """``trap '命令' 信号``：命令会在收到信号或退出时执行（``trap 'rm -rf ~' EXIT``），按一条命令递归分析。
+    执行时变量可能已经改了（``trap 'rm -rf $D/*' EXIT; D=~``），所以留到整条命令分析完再分析，见 analyze()。"""
     args = args[1:] if args[:1] == ["--"] else args
     if not args or args[0].startswith("-") or not args[0].strip():   # trap、trap -p、trap - EXIT、trap '' INT
         a.bump("read", "trap 列出或重置信号处理")
         return
-    _recurse(args[0], a, "trap")
+    a.inline = True
+    a.traps.append((args[0], set(a.sure)))
 
 
 def _watch(args: list[str], a: CommandAnalysis) -> None:
@@ -878,7 +1416,7 @@ def _watch(args: list[str], a: CommandAnalysis) -> None:
         direct = direct or args[i] in ("-x", "--exec")
         i += 2 if args[i] in ("-n", "--interval", "-q", "--equexit") else 1
     if i < len(args):
-        _recurse(shlex.join(args[i:]) if direct else " ".join(args[i:]), a, "watch")
+        _recurse(_requote(args[i:]) if direct else " ".join(args[i:]), a, "watch")
 
 
 def _embedded_catastrophe(cmd: str, args: list[str], a: CommandAnalysis) -> None:
@@ -889,16 +1427,23 @@ def _embedded_catastrophe(cmd: str, args: list[str], a: CommandAnalysis) -> None
     for i, w in enumerate(args[:16]):
         head = w.rsplit("/", 1)[-1]
         if head in _CATASTROPHE_HEADS or head.startswith("mkfs"):
-            inner = analyze(shlex.join(args[i:]), a.workspace, _depth=a.depth + 1)
+            inner = analyze(_requote(args[i:]), a.workspace, _depth=a.depth + 1, _scope=_scope_for(a, "same"))
             if inner.catastrophic:
                 a.flag_catastrophic(f"{cmd} 包装执行：{inner.catastrophic_reason}")
             return
 
 
-def _is_root_like(t: str) -> bool:
-    """根目录、家目录，以及它们下面的一级目录（/usr、/etc、~/projects、$HOME/Documents……）：整棵删掉就是灾难。"""
-    return (t.rstrip("/") in ("", "/*", *_HOME, "~/*", "$HOME/*")
-            or bool(re.fullmatch(r"/[^/]+/?", t) or re.fullmatch(r"(~|\$HOME|\$\{HOME\})/[^/]+/?", t)))
+def _requote(words: list[str]) -> str:
+    """把已经展开过的词重新拼成一条命令（find -exec、watch -x、包装命令直接执行它们，不再经过 shell）。
+    不用 shlex.join：它会把还留着的 ``$D``（值未知的变量，可能为空）包进单引号变成字面量；这里用双引号，
+    变量照样展开，shell 不展开的 $（_LIT）写成 ``\\$``。"""
+    out = []
+    for w in words:
+        if re.fullmatch(r"[\w@%+=:,./~-]+", w):
+            out.append(w)
+        else:
+            out.append('"' + re.sub(r'([\\"`])', r"\\\1", w).replace(_LIT, "\\$") + '"')
+    return " ".join(out)
 
 
 def _shell_script(args: list[str]) -> str | None:
@@ -936,10 +1481,12 @@ def _find_actions(args: list[str], a: CommandAnalysis) -> None:
         roots.append(args[i])
         i += 1
     roots = roots or ["."]
-    if "-delete" in args:
-        hit = next((r for r in roots if _is_root_like(r)), None)
+    if "-delete" in args:   # 根目录、家目录，以及它们下面一级（/usr、~/projects）：整棵删掉就是灾难
+        hit = next((h for r in roots if (h := _root_hit(r, a, 1))), None)
         if hit:
-            a.flag_catastrophic(f"find {hit} -delete 删除整棵目录树")
+            a.flag_catastrophic(f"find -delete 删除整棵目录树 {hit}")
+        elif any(_has_ref(r) or _is_outside(r, a) for r in roots):
+            a.bump("dangerous", "find -delete 删除工作区外的目录树，或者起点取决于变量")
     for j, x in enumerate(args):
         if x not in ("-exec", "-execdir", "-ok", "-okdir"):
             continue
@@ -948,7 +1495,7 @@ def _find_actions(args: list[str], a: CommandAnalysis) -> None:
         if not action:
             continue
         for root in roots[:4]:
-            _recurse(shlex.join(root if w == "{}" else w for w in action), a, f"find {x}")
+            _recurse(_requote([root if w == "{}" else w for w in action]), a, f"find {x}")
 
 
 def _ps_shows_env(args: list[str]) -> bool:
@@ -972,13 +1519,20 @@ def _ps_shows_env(args: list[str]) -> bool:
     return False
 
 
-def _recurse(script: str, a: CommandAnalysis, via: str) -> None:
-    """``sh -c`` / ``eval`` 的字符串本身就是一条命令：递归分析（限制深度，防止构造的深层嵌套拖慢判定）。"""
+def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child") -> None:
+    """``sh -c`` / ``eval`` 的字符串本身就是一条命令：递归分析（限制深度，防止构造的深层嵌套拖慢判定）。
+    内层看得到外层的变量与当前目录。mode 为 child（``sh -c`` 这类新进程）时，没导出的变量在里面可能是空的；
+    sub（命令替换、trap）与 same（``eval``）看得到全部变量，same 就在当前 shell 里执行，赋值与 cd 留到后面。"""
     a.inline = True
     if a.depth >= 3 or not script.strip():
         a.bump("external", f"{via} 嵌套过深或内容为空，无法静态分析")
         return
-    inner = analyze(script, a.workspace, _depth=a.depth + 1)
+    if a.budget[0] <= 0:
+        a.bump("external", _OVER_BUDGET)
+        return
+    if mode != "sub":
+        script = _apply_prefix(script, a)
+    inner = analyze(script.replace(_LIT, "$"), a.workspace, _depth=a.depth + 1, _scope=_scope_for(a, mode))
     a.bump(inner.level, f"{via}：{inner.reasons[0] if inner.reasons else '内层命令'}")
     a.reasons.extend(r for r in inner.reasons[1:] if r not in a.reasons)
     a.opaque = a.opaque or inner.opaque
@@ -987,6 +1541,13 @@ def _recurse(script: str, a: CommandAnalysis, via: str) -> None:
     if inner.credential and not a.credential:
         a.credential, a.credential_reason = True, f"{via}：{inner.credential_reason}"
     a.network = a.network or inner.network
+    if mode == "same":
+        for name, values in inner.vars.items():
+            _add_values(name, values, a)
+        for c in inner.cwds:
+            _add_cwd(c, a)
+        a.exported |= inner.exported
+        a.assigned |= inner.sure
 
 
 # 值是一条命令的配置键：git -c core.pager='rm -rf ~' log 执行的就是 rm -rf ~
@@ -1107,7 +1668,12 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
 
     def read(reason: str) -> None:
         a.bump("read", reason)
-        progs = _repo_programs(a.workspace, chdir)
+        if None in a.cwds or _has_ref(chdir):
+            # 不知道在哪个仓库里执行：那里的配置（core.fsmonitor、textconv……）同样可以执行命令
+            a.bump("external", f"git {sub} 所在的目录取决于变量，那个仓库的配置可能定义了外部程序")
+            a.opaque = True
+        progs = list(dict.fromkeys(p for c in a.cwds if c is not None
+                                   for p in _repo_programs(a.workspace, os.path.join(os.path.expanduser(c), chdir))))
         if progs:
             # 实际执行的程序写在仓库配置里、不在命令文本里：allow:bash(git diff*) 这类前缀规则也不能替人放行
             a.bump("external", f"仓库配置为 git 定义了外部程序（{'、'.join(progs[:3])}），git {sub} 可能执行它们")

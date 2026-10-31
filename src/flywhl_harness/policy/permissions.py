@@ -30,9 +30,9 @@ default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。�
 线索档（``.env``、``credentials`` 字样、shell 历史）维持高危要确认，bypass 下不升级：
 ``cp .env.example .env``、``pytest tests/test_credentials.py`` 都会命中，硬拒绝会误伤日常命令。
 
-字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（``D=$HOME/.ku; cat ${D}be/config``、
-glob、编码）。后者要靠系统沙箱：``permissions.sandbox = "macos"`` / ``"linux"`` 让 bash 跑在 sandbox-exec / bubblewrap 里，
-由内核按真实路径拒绝。
+字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（运行时才拼出来的
+``D=$(echo $HOME/.ku); cat ${D}be/config``、glob、编码）。后者要靠系统沙箱：
+``permissions.sandbox = "macos"`` / ``"linux"`` 让 bash 跑在 sandbox-exec / bubblewrap 里，由内核按真实路径拒绝。
 
 四种模式
 --------

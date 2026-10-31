@@ -662,12 +662,15 @@ def needs_seatbelt(fn):
     for mark in SEATBELT:
         fn = mark(fn)
     return fn
-SPLICED = "D=$HOME/.ku; cat ${D}be/config"   # 变量拼出来的路径：命令串里没有 .kube 字样
+
+
+SPLICED = "D=$(echo $HOME/.ku); cat ${D}be/config"   # 运行时才拼出来的路径：命令串里没有 .kube 字样
 
 
 @pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=SEATBELT)])
 async def test_sandbox_blocks_credential_reads_static_analysis_misses(ws, tmp_path, monkeypatch, sandbox, leaked):
-    """命令分析看不出 ${D}be/config 是凭证，只按“工作区外路径”处理，bypass 下照样执行；沙箱按真实路径拒绝。"""
+    """变量的值要到运行时才知道（$(...)）：命令分析看不出 ${D}be/config 是凭证，只按“无法静态分析”处理，
+    bypass 下照样执行；沙箱按真实路径拒绝。"""
     home = tmp_path / "home"
     (home / ".kube").mkdir(parents=True)
     (home / ".kube" / "config").write_text("token: s3cr3t\n")

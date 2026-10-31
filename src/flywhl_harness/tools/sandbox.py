@@ -1,6 +1,6 @@
 """系统沙箱档位（原型）：bash 子进程跑在 macOS Seatbelt 或 Linux bubblewrap 里，由内核兜住命令分析漏掉的部分。
 
-命令分析只能看字符串：``D=$HOME/.ku; cat ${D}be/config`` 这种变量拼接、glob、编码过的路径它都看不到，
+命令分析只能看命令文本：``D=$(echo $HOME/.ku); cat ${D}be/config`` 这种运行时才拼出来的路径、glob、编码过的路径它都看不到，
 bypass 模式下又没有人审，漏掉就是照读。这一档让内核按真实路径判定：
 
 - **凭证位置不可读写**：``policy/sensitive.py`` 的 ``CREDENTIAL_GLOBS`` 转成 Seatbelt 正则，与文件工具、命令分析共用一份清单；

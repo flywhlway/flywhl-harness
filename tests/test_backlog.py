@@ -12,12 +12,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
 from flywhl_harness.config import HarnessConfig, HookConfig
+from flywhl_harness.policy.bash_analyzer import analyze
 
 from .conftest import make_harness, tool_ends
 from .test_security import needs_seatbelt
@@ -305,8 +307,8 @@ async def test_sandbox_blocks_keychain(ws):
     keychain = "/Library/Keychains/System.keychain"
     if subprocess.run(["security", "show-keychain-info", keychain], capture_output=True).returncode != 0:
         pytest.skip("本机查不了系统钥匙串的设置")
-    # 路径用变量拼出来：字面的 Library/Keychains 在策略层就被拒了，走不到沙箱
-    cmd = "K=/Library/Key; security show-keychain-info ${K}chains/System.keychain; echo EXIT=$?"
+    # 路径在运行时才拼出来：字面的 Library/Keychains、直接赋值的变量在策略层就被认出来拒了，走不到沙箱
+    cmd = "K=$(printf /Library/Key); security show-keychain-info ${K}chains/System.keychain; echo EXIT=$?"
     h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": cmd}}]}, "好"],
                      permissions__mode="bypass", permissions__sandbox="macos")
     out = tool_ends((await h.run("查一下")).events)[0]["content"]
@@ -431,8 +433,10 @@ async def test_linux_sandbox_hides_credentials_and_guards_harness_state(ws):
     (ws / "deploy" / ".aws").mkdir(parents=True)
     (ws / "deploy" / ".aws" / "credentials").write_text("CANARY-WS-AWS\n")
     (ws / ".flywhl").mkdir(exist_ok=True)
-    # 路径与文件名都用变量拼出来：命令分析认不出（字面的 ~/.ssh、id_ed25519 在策略层就被拒了，走不到沙箱），只能靠沙箱兜住
-    cmds = ["D=$HOME/.ss; K=id_ed; N=$HOME/.ne; W=sub/.ne; A=deploy/.aw; cat ${D}h/${K}25519 ${N}trc ${W}trc ${A}s/cred* 2>&1; echo END",
+    # 路径与文件名都在运行时才拼出来：命令分析认不出（字面的 ~/.ssh、直接赋值的变量在策略层就被拒了，走不到沙箱），
+    # 只能靠沙箱兜住
+    cmds = ["D=$(echo $HOME/.ss); K=$(echo id_ed); N=$(echo $HOME/.ne); W=$(echo sub/.ne); A=$(echo deploy/.aw); "
+            "cat ${D}h/${K}25519 ${N}trc ${W}trc ${A}s/cred* 2>&1; echo END",
             "echo hi > inside.txt && cat inside.txt",
             "touch .flywhl/planted 2>/dev/null && echo WROTE || echo READONLY"]
     h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": c}}]} for c in cmds] + ["好"],
@@ -532,3 +536,107 @@ async def test_linux_sandbox_network_deny(ws, network, reachable):
     assert ("CONNECTED" in out) is reachable, out
     if not reachable:   # /run 换成了空目录：docker.sock、D-Bus 的套接字都看不到
         assert out.split("\n")[1].strip() == "0", out
+
+
+# ---------------------------------------------------------------------- 整条路径放在变量里
+# 只调用 analyze()（纯判定），不执行任何命令
+@pytest.mark.parametrize("cmd", [
+    "D=~; rm -rf $D",                       # 赋过值的变量按取值展开
+    "C=rm; $C -rf ~",                       # 命令名在变量里
+    'A="-rf ~"; rm $A',                     # 不带引号的变量按空白拆开
+    'C="rm -rf ~"; bash -c "$C"',
+    'eval "D=~"; rm -rf $D',                # eval 在当前 shell 里赋值
+    "X='rm -rf ~'; eval $X",
+    "rm -rf //*", "rm -rf /./usr/..", "rm -rf ~other", "find $HOME/. -delete",
+    "cd ~ && rm -rf *", "cd; rm -rf ./*", "cd /usr && rm -rf ../*", "pushd ~ && rm -rf *",
+    "cd $X && rm -rf *",                    # X 为空时 cd 回到家目录
+    "D=~ sh -c 'rm -rf $D'", "env D=~ sh -c 'rm -rf $D'",   # 前置赋值，子 shell 看得到
+])
+def test_paths_in_variables_and_cwd_are_resolved(cmd):
+    assert analyze(cmd).catastrophic, cmd
+
+
+@pytest.mark.parametrize("cmd,var", [
+    ("rm -rf $DIR/*", "DIR"),
+    ("X=$(mktemp -d); rm -rf $X/*", "X"),                # mktemp 失败时 X 是空的
+    ("if c; then D=build; fi; rm -rf $D/*", "D"),        # 分支可能没走
+    ("c && D=build; rm -rf $D/*", "D"),
+    ("D=build | cat; rm -rf $D/*", "D"),                 # 管道、子 shell 里的赋值留不下来
+    ("(D=build); rm -rf $D/*", "D"),
+    ("D=x; sh -c 'rm -rf $D/*'", "D"),                   # 没导出：子 shell 里是空的
+    ("trap 'rm -rf $D/*' EXIT; D=build", "D"),           # trap 可能在赋值之前触发
+    ("find . -exec rm -rf $D/x {} +", "D"),
+    ("taskset 1 rm -rf $D/*", "D"),
+    ("chmod -R 777 $D/", "D"),
+    ("DIR=build bash -c \"rm -rf $DIR/*\"", "DIR"),     # 双引号里的 $DIR 由外层展开，前置赋值管不到
+])
+def test_possibly_empty_variable_is_catastrophic_and_says_how_to_fix(cmd, var):
+    a = analyze(cmd)
+    assert a.catastrophic, cmd
+    assert f"${{{var}:?}}" in a.catastrophic_reason, a.catastrophic_reason
+
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf ${DIR:?}/*",                    # 为空时 bash 报错、不执行
+    "D=build; rm -rf $D/*",
+    "D=build && rm -rf $D/*",
+    "{ D=build; } > log; rm -rf $D/*",      # 花括号不开子 shell
+    "for d in a b; do rm -rf $d/*; done",   # 循环变量在循环体里一定有值
+    "export D=build; sh -c 'rm -rf $D/*'",
+    "D=build; trap 'rm -rf $D/*' EXIT",
+    "rm -rf '$D'/*", "rm -rf \\$D/*",       # 不展开的 $：就是名叫 $D 的目录
+    'rm -rf ""',                            # 空参数：rm 报错，什么也不删
+    "cd build && rm -rf *",
+    "DIR=build bash -c 'rm -rf $DIR/*'",
+])
+def test_assigned_or_guarded_variables_are_not_catastrophic(cmd):
+    a = analyze(cmd)
+    assert not a.catastrophic, (cmd, a.catastrophic_reason)
+    assert not any("\ue024" in r for r in a.reasons) and not any("\ue024" in s for s in a.segments)
+
+
+def test_assembled_paths_hit_credential_and_boundary_checks(ws, tmp_path):
+    assert analyze("D=$HOME/.ss; cat ${D}h/known_hosts").credential
+    assert analyze("K=.ku; cat ~/${K}be/config").credential
+    a = analyze("F=/etc/passwd; cat $F")
+    assert any("/etc/passwd" in r for r in a.reasons), a.reasons
+    assert analyze("cat ${X:-/etc}/passwd").level == "external"
+    # 切换目录之后的相对路径按真实位置再查一次：链接在工作区外，字面上看不出指向凭证
+    (tmp_path / "home" / ".ssh").mkdir(parents=True)
+    (tmp_path / "home" / ".ssh" / "id_ed").write_text("x")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "notes").symlink_to(tmp_path / "home" / ".ssh" / "id_ed")
+    assert analyze(f"cd {tmp_path / 'out'} && cat notes", str(ws)).credential
+    assert analyze("cd sub && cat ../../x", str(ws)).level == "external"
+
+
+def test_git_reads_the_repository_it_runs_in(ws):
+    (ws / ".git").mkdir()
+    (ws / ".git" / "config").write_text("[core]\n\tbare = false\n")
+    (ws / "sub" / ".git").mkdir(parents=True)
+    (ws / "sub" / ".git" / "config").write_text('[diff "y"]\n\ttextconv = id\n')
+    assert analyze("git diff", str(ws)).level == "read"
+    a = analyze("cd sub && git diff", str(ws))
+    assert (a.level, a.opaque) == ("external", True), a.reasons
+    a = analyze("cd $X && git status", str(ws))
+    assert (a.level, a.opaque) == ("external", True), a.reasons
+
+
+def test_globs_too_wide_to_check_fail_closed(ws):
+    (ws / "many").mkdir()
+    for i in range(1025):
+        (ws / "many" / f"f{i}").touch()
+    a = analyze("cat many/*", str(ws))
+    assert a.level == "external" and any("1024" in r for r in a.reasons), a.reasons
+    assert analyze("cat */*/*/*", str(ws)).level == "external"
+    assert analyze("cat many/f1*", str(ws)).level == "read"
+
+
+def test_self_referencing_values_do_not_stall_the_analysis():
+    """取值里又引用变量、层层 bash -c：组合数是 16 的三次方。整棵递归共用一份预算，超了按“无法静态分析”处理。"""
+    vals = ("A='bash -c \"$A $B; $B $A\"';" + ";".join(f"A=v{i}" for i in range(7)) + ";"
+            "B='eval \"$B $A\"';" + ";".join(f"B=w{i}" for i in range(7)) + "; export A B; ")
+    started = time.perf_counter()
+    a = analyze(vals + "; ".join(['bash -c "$A $B; $B $A"'] * 16))
+    assert time.perf_counter() - started < 10
+    assert a.level == "external" and any("组合太多" in r for r in a.reasons), a.reasons
