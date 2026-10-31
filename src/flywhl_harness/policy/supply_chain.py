@@ -32,7 +32,6 @@ _SEMVER = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _COMMIT = re.compile(r"[#@][0-9a-f]{40}$")
 _DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
-_PEP723 = re.compile(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
 _SCRIPT_LIMIT = 1 << 20
 
 
@@ -110,6 +109,12 @@ def changed_files(pins: dict[str, str]) -> list[str]:
 class _Where(NamedTuple):
     base: Path                  # 命令运行的目录，本地路径写法（./pkg.tgz）按它找文件
     bound: frozenset[Path]      # 内容已经按引用文件绑定的文件
+    moved: str = ""             # uv 的 --directory / --project：相对路径改按那个目录解析，绑定的不一定是它用的文件
+
+
+def _moved(opts: list[tuple[str, str]], where: _Where) -> _Where:
+    d = next((v for o, v in opts if o in ("--directory", "--project")), None)
+    return where._replace(moved=d or ".") if d is not None and not where.moved else where
 
 
 def unpinned_packages(command: str | Iterable[str], base: str | Path = ".") -> list[str]:
@@ -188,6 +193,7 @@ def _runner(name: str, rest: list[str], where: _Where) -> list[str]:
     if name == "uvx":
         return _python(name, rest, where, _UV_VALUES, _UV_FLAGS, _UV_SPECS)
     if name == "uv":
+        where = _moved(_scan(rest, _UV_VALUES, _UV_FLAGS)[0], where)    # 子命令前面的 --directory
         i = _subcommand(name, rest, _UV_VALUES, _UV_FLAGS, ("tool", "run"))
         if isinstance(i, list):
             return i
@@ -282,9 +288,12 @@ def _python(runner: str, args: list[str], where: _Where, values: frozenset[str],
     opts, i, unknown = _scan(args, values, flags)
     if unknown:
         return [_unknown(runner, unknown)]
+    where = _moved(opts, where)
     specs = [v for o, v in opts if o in spec_opts]
     target = args[i] if i < len(args) else ""
-    script = bool(scripts and target and (_URL.match(target) or _bound(target, where)))
+    # uv run 的操作数是命令或脚本；pipx run 只把存在的本地文件与 URL 当脚本，其余是包名
+    script = bool(scripts and target and (_URL.match(target) or _bound(target, where) or not operand and (
+        target.endswith((".py", ".pyw")) or any(a in ("-s", "--script") for a in args[:i]))))
     if operand and target and not script and not any(o in ("--from", "--spec") for o, _ in opts):
         specs.append(target)
     out = [f"{runner} 依赖清单 {_shown(v)}（里面的版本这里核对不到）" for o, v in opts if o == "--with-requirements"]
@@ -296,6 +305,8 @@ def _python(runner: str, args: list[str], where: _Where, values: frozenset[str],
 def _bound(target: str, where: _Where) -> Path | None:
     """target 指向内容已按引用文件绑定的本地文件时，返回它的真实路径。"""
     p = Path(os.path.expanduser(_without_scheme(target)))
+    if where.moved and not p.is_absolute():
+        return None
     try:
         real = (p if p.is_absolute() else where.base / p).resolve()
     except OSError:
@@ -308,6 +319,8 @@ def _script(runner: str, target: str, where: _Where) -> list[str]:
     （``# /// script`` 块里的 dependencies）会在运行前现装，同样要锁版本。"""
     if _URL.match(target):
         return [f"{runner} 远程脚本 {_shown(target)}（每次运行都可能拿到不同的内容）"]
+    if where.moved and not Path(os.path.expanduser(target)).is_absolute():
+        return [f"{runner} 用 --directory / --project 换了目录，脚本 {target} 按那个目录找，内容与内联依赖这里核对不到"]
     real = _bound(target, where)
     try:
         if real is None or real.stat().st_size > _SCRIPT_LIMIT:
@@ -315,18 +328,37 @@ def _script(runner: str, target: str, where: _Where) -> list[str]:
         text = real.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return [f"{runner} 脚本 {target} 读不了，内联依赖这里核对不到"]
-    m = _PEP723.search(text)
-    if not m:
-        return []
-    body = "".join(line[2:] if line.startswith("# ") else line[1:] for line in m.group("content").splitlines(True))
+    return _inline_deps(runner, target, text)
+
+
+def _inline_deps(runner: str, target: str, text: str) -> list[str]:
+    """PEP 723 内联依赖，按 uv 的读法解析：只在 ``\\n`` 处分行（去掉行尾 ``\\r``）；块从第一行正好是 ``# /// script``
+    的地方开始，之后连续的注释行（``#`` 或 ``# …``）是内容，其中 **最后** 一个 ``///`` 是结束行。
+    出现了 ``/// script`` 却对不上这个格式、TOML 解析不了、或者带 ``[tool.uv]``（能换包源、换索引）时，一律算核对不到。"""
+    unknown = [f"{runner} 脚本 {target} 的内联依赖解析不了，这里核对不到版本"]
+    lines = [x.removesuffix("\r") for x in text.split("\n")]
+    if "# /// script" not in lines:
+        return unknown if "/// script" in text else []
+    body: list[str] = []
+    for line in lines[lines.index("# /// script") + 1:]:
+        if line != "#" and not line.startswith("# "):
+            break
+        body.append(line[2:])
+    if "///" not in body:
+        return unknown
+    body = body[:len(body) - 1 - body[::-1].index("///")]
     try:
-        deps = tomllib.loads(body).get("dependencies", [])
+        meta = tomllib.loads("\n".join(body))
     except tomllib.TOMLDecodeError:
-        deps = None
+        return unknown
+    deps = meta.get("dependencies", [])
     if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
-        return [f"{runner} 脚本 {target} 的内联依赖解析不了，这里核对不到版本"]
-    return [f"{runner} 脚本 {target} 的内联依赖 {_shown(d.strip())}" for d in deps
-            if not _version_pinned(re.sub(r"\s+", "", d.split(";")[0]), npm=False)]
+        return unknown
+    tool = meta.get("tool")
+    out = [f"{runner} 脚本 {target} 的内联元数据带 [tool.uv]（能换包源、换索引），依赖从哪里来这里核对不到"] \
+        if isinstance(tool, dict) and "uv" in tool else []
+    return out + [f"{runner} 脚本 {target} 的内联依赖 {_shown(d.strip())}" for d in deps
+                  if not _version_pinned(re.sub(r"\s+", "", d.split(";")[0]), npm=False)]
 
 
 def _container(name: str, args: list[str]) -> list[str]:
@@ -351,7 +383,9 @@ def _check(runner: str, spec: str, where: _Where, *, npm: bool) -> str:
     """没锁住时返回一句说明，锁住了返回空串。"""
     local = _local(spec, where)
     if local is not None:
-        return "" if local else f"{runner} 包 {_shown(spec)}（本地目录或不存在的路径，内容没有按内容绑定；打包成文件再引用）"
+        why = "用 --directory / --project 换了目录，相对路径按那个目录找" if where.moved and not _absolute(spec) \
+            else "本地目录或不存在的路径"
+        return "" if local else f"{runner} 包 {_shown(spec)}（{why}，内容没有按内容绑定；打包成文件再引用）"
     return "" if _version_pinned(spec, npm=npm) else f"{runner} 包 {_shown(spec)}"
 
 
@@ -371,12 +405,18 @@ def _local(spec: str, where: _Where) -> bool | None:
     算作锁住、内容却没人核对的文件。"""
     if not spec.startswith(("file:", ".", "/", "~")):
         return None
+    if where.moved and not _absolute(spec):
+        return False
     p = Path(os.path.expanduser(_without_scheme(spec)))
     try:
         real = (p if p.is_absolute() else where.base / p).resolve()
         return real in where.bound or (str(real).startswith(_SYSTEM_DIRS) and real.is_file())
     except OSError:
         return False
+
+
+def _absolute(spec: str) -> bool:
+    return Path(os.path.expanduser(_without_scheme(spec))).is_absolute()
 
 
 def _shown(spec: str) -> str:

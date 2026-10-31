@@ -779,6 +779,15 @@ def _scripts(d):
                                        "# ]\n# ///\n", encoding="utf-8")
     (d / "broken.py").write_text("# /// script\n# dependencies = [\n# ///\n", encoding="utf-8")
     (d / "plain.py").write_text("print(1)\n", encoding="utf-8")
+    # 按 uv 的读法：CRLF 换行照样是一个块；最后一个 ///（这里在多行字符串里）才是结束行
+    (d / "crlf.py").write_bytes(b'# /// script\r\n# dependencies = ["requests<3"]\r\n# ///\r\nprint(1)\r\n')
+    (d / "multi.py").write_text(head + '#   "requests==2.31.0",\n# ]\n# note = """\n# ///\n# """\n# ///\n', encoding="utf-8")
+    (d / "odd.py").write_text('#/// script\n# dependencies = ["requests"]\n# ///\n', encoding="utf-8")
+    (d / "sources.py").write_text(head + '#   "requests==2.31.0",\n# ]\n# [tool.uv.sources]\n'
+                                         '# requests = { git = "https://github.com/x/requests", branch = "main" }\n# ///\n',
+                                  encoding="utf-8")
+    (d / "sub").mkdir()
+    (d / "sub" / "tight.py").write_text(head + '#   "evil",\n# ]\n# ///\n', encoding="utf-8")
 
 
 @pytest.mark.parametrize("command", [
@@ -809,6 +818,12 @@ def _scripts(d):
     "uv run --script loose.py",
     "pipx run loose.py",
     "uv run broken.py",                                        # 内联依赖解析不了
+    "uv run crlf.py",
+    "uv run odd.py",                                           # 像是 script 块又对不上格式
+    "uv run sources.py",                                       # [tool.uv.sources] 能把锁了版本的包换成别的来源
+    "uv run --directory sub tight.py",                         # 换了目录：执行的是 sub/tight.py，不是绑定的那份
+    "uv --directory=sub run tight.py",
+    "uvx --directory sub --from ./pkg.tgz tool",
 ])
 def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import unpinned_packages
@@ -836,6 +851,7 @@ def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     "uv run plain.py",
     "pipx run tight.py",
     "uv run python loose.py",                                  # 脚本交给 python 运行时，uv 不读内联依赖
+    "uv run multi.py",
 ])
 def test_pinned_sources_stay_pinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import referenced_files, unpinned_packages
@@ -990,3 +1006,4 @@ async def test_settings_show_supply_chain(ws):
     assert d["hooks"][0]["files"] == [str((ws / "guard.py").resolve())] and d["hooks"][0]["unpinned"] == []
     assert d["hooks"][1]["unpinned"] == ["npx 包 lint-hook"]
     assert d["permissions"]["require_pinned"] is False
+
