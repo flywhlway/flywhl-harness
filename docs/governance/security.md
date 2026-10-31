@@ -229,7 +229,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 - 用户配置 `~/.flywhl/config.toml` 与 `-c` 显式指定的文件视为可信，完整加载。用户配置先加载，两层的 `hooks` 与 `permissions.rules`
   追加合并而不是替换——否则项目配置写一行 `rules = ["ask:read(*)"]` 就能冲掉你在用户配置里写的 deny 规则。
 
-信任锁定的只是配置文件本身：`command` 引用的脚本、`mcp_servers` 启动的程序不在哈希范围内，拉取上游改动后仍要自己看一眼。
+信任哈希还包含 hook 命令与 MCP 启动参数里直接写出的文件（`python3 scripts/guard.py` 里的脚本，跟随符号链接，系统目录里的解释器除外），确认提示逐个列出；脚本改了，即使配置一字未动也要重新确认。脚本再导入的模块、`cd hooks && ./guard.sh` 这类先切换目录的写法、`npx` 临时拉取的包不在其中：前两者要靠审阅，后者靠下文的锁版本。
 
 ### 审批界面本身也是攻击面
 
@@ -315,14 +315,14 @@ MCP 服务器、技能包、hook 脚本有一个共同点：**它们是在你机
 - MCP 工具名带服务器前缀，便于按服务器写规则（如 `deny:mcp__untrusted__*`）；
 - MCP 服务器子进程以 `env={**_clean_env(True), **self.env}` 启动：密钥类变量被剥离，服务器需要的凭证只能在 `flywhl.toml` 的 `env` 里
   显式给出，第三方服务器拿到了什么，从配置里一眼可见；
-- 启动目录 `flywhl.toml` 里的 `mcp_servers` 要先信任这份配置才会启动；信任锁定的是配置内容，不是服务器程序的版本；
+- 启动目录 `flywhl.toml` 里的 `mcp_servers` 要先信任这份配置才会启动；信任哈希包含启动参数里写出的脚本；
+- 经 `npx`、`bunx`、`pnpm dlx`、`uvx`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）；
 - 服务器发来的请求（MCP 允许服务器反向请求客户端）只回复 `ping`，其它一律返回 `-32601`——服务器无法借 sampling 之类的能力反过来驱动模型；
-- annotations 的缺省值取保守一侧，但服务器声明的放宽（`readOnlyHint`、`idempotentHint`、`openWorldHint: false`）被直接采信，见上文；
-- 没有签名、锁版本、权限声明机制。
+- annotations 的缺省值取保守一侧，服务器声明的放宽默认不采信，要在配置里写明 `trust_annotations` 或 `read_only_tools`，见上文；
+- 没有签名与权限声明机制。
 
-**hook 也是供应链。** 第 16 章已经说明：`flywhl.toml` 里的 `[[hooks]]` 会以完整环境执行任意命令，权限比模型本身还高。
-项目配置里的 hook 要先信任才会注册，但信任只锁定配置文件，不锁定它引用的脚本；hook 脚本应当纳入同样的审阅流程，
-并加上 `deny:write(...)` 规则防止 Agent 修改自己的护栏。
+**hook 也是供应链。** 第 16 章已经说明：`flywhl.toml` 里的 `[[hooks]]` 在系统沙箱外执行任意命令，权限比模型本身还高。
+项目配置里的 hook 要先信任才会注册，信任哈希包含它引用的脚本；命令 hook 每次执行前还会重新核对一遍——Agent 能改工作区里的文件，脚本内容变了、符号链接换了指向、引用的文件新出现或不见了，都拒绝执行（守卫类 hook 按阻断处理），确认无误后重启 harness 才恢复。核对只覆盖命令行里直接写出的文件：把 hook 脚本放在工作区外（如 `~/.flywhl/hooks/`），系统沙箱下 Agent 就写不到它。
 
 ## OWASP Agentic Top 10 映射
 
@@ -334,7 +334,7 @@ OWASP 发布了面向 Agentic 应用的 Top 10（2026 版）。下表按其中�
 | 目标劫持 | 注入内容改变 Agent 的目标 | 来源标注、污点升级、关键动作人审 | 污点 → ask；Stop hook 以外部条件定义“完成” |
 | 工具滥用 | 合法工具被用于非预期目的 | 最小工具集、参数级规则、命令分析 | 规则、复合命令防搭便车、`analyze()` |
 | 身份与权限滥用 | Agent 继承或扩大了不该有的权限 | 工作负载身份、短期令牌、凭据代持 | 托管基线、环境变量剥离 |
-| 供应链 | 恶意 MCP 服务器、技能、依赖 | 准入、签名、锁版本、隔离运行 | MCP 命名空间；项目配置里的 hook / MCP 先信任再生效；其余未实现 |
+| 供应链 | 恶意 MCP 服务器、技能、依赖 | 准入、签名、锁版本、隔离运行 | MCP 命名空间；项目配置里的 hook / MCP 先信任再生效，信任哈希包含引用的脚本；命令 hook 执行前核对脚本；没锁版本的包标出，`require_pinned` 时拒绝启动；签名、技能准入未实现 |
 | 意外代码执行 | 模型生成并执行了危险代码 | 沙箱、命令分析、人审 | 命令分析 + 人审；灾难性命令任何模式下拒绝；可选的 macOS / Linux 沙箱档位（文件访问、网络、本机 IPC） |
 | 记忆与上下文投毒 | 污染长期记忆、压缩摘要、项目指令 | 记忆写入审阅、来源追踪、压缩时保留来源 | `AGENTS.md` 可关闭加载；压缩摘要不保留污点信息 |
 | 不安全的 Agent 间通信 | 子代理 / 对等 Agent 之间传递被篡改或注入的消息 | 结构化契约、校验、来源标注 | 子代理回传契约校验；子代理的污点向父 Run 传播 |
@@ -429,6 +429,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 审批改参绕过 hook、审批看不到改动 | `test_edited_args_rerun_pre_tool_hooks`、`test_approval_request_carries_diff_preview` |
 | MCP annotations 缺省值 | `test_mcp_annotation_defaults_are_conservative` |
 | 不可信项目配置（hook、MCP、放宽审批、改请求去向） | `test_untrusted_project_config_keeps_only_safe_settings`、`test_trust_is_bound_to_path_and_content` |
+| hook / MCP 引用的脚本被改、包没锁版本 | `test_trust_covers_scripts_the_config_references`、`test_command_hook_refuses_scripts_changed_after_start`、`test_require_pinned_refuses_to_start` |
 
 已知缺口适合先以 `xfail` 的形式补进来，修复后转为必须通过——大写的 `<SYSTEM-REMINDER>`、`cat ../../etc/passwd`、
 整条路径放在变量里的 `F=/etc/passwd; cat $F` 就是这样从“已知缺口”变成 `test_reminder_tag_variants_are_escaped`、
@@ -463,7 +464,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 审批疲劳导致盲批 | 会话授权、规则减少无效审批 | 秒批 / 重复审批监控 | 沙箱 | 有数据，无内置监控 |
 | 伪造 `<system-reminder>` | 工具结果中转义该标签（含大小写变体与带属性的写法） | 系统提示词声明 | — | 已实现；工具描述与 `AGENTS.md` 不经过转义 |
 | 恶意 MCP 服务器自报只读 / 幂等 | annotations 默认不采信，放宽要在配置里点名（`read_only_tools`）或写明 `trust_annotations` | 服务器级 deny 规则 | 隔离运行 | 已修复，有测试 |
-| 恶意项目配置（`flywhl.toml` 里的 hook、MCP、`bypass`、`base_url`） | 高危设置先信任再生效，确认提示列出命令、子进程环境变量与注解策略 | 信任绑定路径与内容哈希，内容变化重新确认 | — | 已实现，有测试；引用的脚本不在哈希范围内 |
+| 恶意项目配置（`flywhl.toml` 里的 hook、MCP、`bypass`、`base_url`） | 高危设置先信任再生效，确认提示列出命令、子进程环境变量与注解策略 | 信任绑定路径与内容哈希，内容变化重新确认 | — | 已实现，有测试；hook / MCP 引用的脚本一并纳入哈希 |
 | 恶意 hook / MCP 包 | 准入审查、锁版本 | 最小化环境变量 | 隔离运行 | MCP 子进程已剥离密钥变量；准入、锁版本未实现 |
 | 无人值守下的危险动作 | `on_ask="deny"` + 显式 allow 规则 | 托管基线 | 一次性沙箱 | 可配置；`--yes` 会放行所有 ask |
 | 灾难性正则卡住整个服务 | 正则搜索放进子进程并设超时 | Run 取消时直接杀掉子进程 | — | 已修复，有测试 |

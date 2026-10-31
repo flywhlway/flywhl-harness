@@ -89,6 +89,8 @@ class PermissionConfig:
     sandbox_network: str = "allow"         # allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；要求开启沙箱
     network_allow: list[str] = field(default_factory=list)   # 出站白名单：pypi.org、*.github.com、registry.local:5000
     unix_sockets: list[str] = field(default_factory=list)    # 沙箱里放行连接的 Unix 套接字（绝对路径），如本机数据库；默认只放行 DNS 与系统日志
+    # hook / MCP 服务器经 npx、uvx、docker run 这类命令临时拉取的包必须锁到确切版本（镜像要带 @sha256: 摘要），否则拒绝启动
+    require_pinned: bool = False
 
 
 @dataclass
@@ -279,6 +281,7 @@ _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
     # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
     "sandbox_network": ("deny",), "network_allow": ([],),
     "unix_sockets": ([],),   # 放行的套接字可能连着 docker.sock 这类能绕开沙箱的守护进程
+    "require_pinned": (True,),
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 
@@ -292,7 +295,7 @@ class TrustRequest:
     """一份等待信任的项目配置，交给 ``HarnessConfig.load(trust=...)`` 的回调判断。"""
 
     path: Path          # 绝对路径。信任绑定位置：同样一行 python scripts/guard.py，换个仓库执行的就是另一份脚本
-    digest: str         # 文件内容的 SHA-256，内容一变就要重新确认
+    digest: str         # 文件内容（连同 hook、MCP 引用的脚本）的 SHA-256，哪个变了都要重新确认
     risky: list[str]    # 需要信任才能生效的设置，每项一行，供人审阅
 
 
@@ -301,8 +304,9 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
-def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。
+def split_untrusted(data: dict[str, Any], base: Path | None = None) -> tuple[dict[str, Any], list[str]]:
+    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是项目根目录：hook、MCP 命令里的
+    相对路径按它解析，引用的文件与没锁版本的包写进确认提示。
 
     未知键留在前一部分，交给 ``_merge`` 照常报错——拼写错误不该变成一次信任确认。
     """
@@ -324,18 +328,21 @@ def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         elif key in _SAFE_KEYS or key not in known:
             safe[key] = value
         else:
-            risky += _describe(key, value)
+            risky += _describe(key, value, base or Path.cwd())
     # 转义控制字符：防止配置里的终端转义序列把确认提示改写成别的样子
     return safe, ["".join(c if c.isprintable() else repr(c)[1:-1] for c in s) for s in risky]
 
 
-def _describe(key: str, value: Any) -> list[str]:
+def _describe(key: str, value: Any, base: Path) -> list[str]:
     """高危设置写成一行：会执行的命令完整展示（不截断，截断处正好可以藏东西），其余展示取值。"""
+    from .policy.supply_chain import describe
+
     if key == "hooks" and isinstance(value, list) and value:
         return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}{_describe_env(h)}"
+                + (describe(h["command"], base) if isinstance(h.get("command"), str) else "")
                 if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
     if key == "mcp_servers" and isinstance(value, dict) and value:
-        return [_describe_mcp(name, s) for name, s in value.items()]
+        return [_describe_mcp(name, s, base) for name, s in value.items()]
     return [f"{key} = {value!r}"]
 
 
@@ -353,7 +360,9 @@ def _describe_env(spec: dict[str, Any]) -> str:
     return "".join(f"；{p}" for p in parts)
 
 
-def _describe_mcp(name: str, spec: Any) -> str:
+def _describe_mcp(name: str, spec: Any, base: Path) -> str:
+    from .policy.supply_chain import describe, mcp_argv, mcp_base
+
     try:
         check_mcp_server(name, spec)
     except ValueError as e:
@@ -366,16 +375,23 @@ def _describe_mcp(name: str, spec: Any) -> str:
         line += "；采信服务器自报的只读、幂等、封闭世界注解"
     if spec.get("read_only_tools"):
         line += f"；这些工具按只读处理，调用不经审批：{spec['read_only_tools']!r}"
-    return line
+    return line + describe(mcp_argv(spec), mcp_base(spec, base))
 
 
 def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
                   trust: Callable[[TrustRequest], bool] | None) -> dict[str, Any]:
-    """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。"""
-    safe, risky = split_untrusted(data)
+    """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。
+    hook、MCP 命令里引用的脚本（``python3 scripts/guard.py``）真正执行的是脚本的内容：一并算进哈希，改了脚本同样要重新确认。"""
+    from .policy.supply_chain import config_files, file_digest
+
+    base = path.parent.parent if path.parent.name == ".flywhl" else path.parent   # .flywhl/config.toml 的项目根目录
+    safe, risky = split_untrusted(data, base)
     if not risky:
         return data
-    req = TrustRequest(path, hashlib.sha256(raw).hexdigest(), risky)
+    digest = hashlib.sha256(raw)
+    for f in config_files(data, base):
+        digest.update(f"\0{f}\0{file_digest(f)}".encode())
+    req = TrustRequest(path, digest.hexdigest(), risky)
     if is_trusted(req):
         return data
     if trust is None:

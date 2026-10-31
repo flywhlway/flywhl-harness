@@ -52,6 +52,7 @@ from ..observe.export import session_markdown
 from ..observe.trace import export_trajectory
 from ..policy.bash_analyzer import analyze
 from ..policy.permissions import MANAGED_BASELINE
+from ..policy.supply_chain import mcp_argv, mcp_base, referenced_files, unpinned_packages
 from ..runtime.manager import Harness
 from ..runtime.state import TERMINAL, RunStatus
 
@@ -273,10 +274,14 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         def mcp_entry(n: str, spec: dict[str, Any]) -> dict[str, Any]:
             prefix = f"mcp__{n}__"
             tools = [t for t in h.tools if t.name.startswith(prefix)]
+            argv = mcp_argv(spec)
             return {"name": n, "transport": "stdio" if spec.get("command") else "http", "tools": len(tools),
                     "trust_annotations": spec.get("trust_annotations") is True,
                     "read_only": [t.name.removeprefix(prefix) for t in tools if str(t.effect) == "read"],
-                    "ignored_hints": sum(1 for t in tools if getattr(t, "ignored_hints", None))}
+                    "ignored_hints": sum(1 for t in tools if getattr(t, "ignored_hints", None)),
+                    # 供应链：引用的文件只给路径，没锁版本的只给包名——完整的启动参数里常带密钥
+                    "files": [str(f) for f in referenced_files(argv, mcp_base(spec, h.workspace_root))],
+                    "unpinned": unpinned_packages(argv)}
 
         return {
             "workspace": str(h.workspace_root),
@@ -285,12 +290,14 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                       "max_output": h.model_info.max_output},
             "permissions": {"mode": pc.mode, "on_ask": pc.on_ask, "approval_timeout": pc.approval_timeout,
                             "rules": list(pc.rules), "baseline": len(MANAGED_BASELINE),
-                            "strip_secret_env": pc.strip_secret_env},
+                            "strip_secret_env": pc.strip_secret_env, "require_pinned": pc.require_pinned},
             "sandbox": {"level": pc.sandbox, "network": pc.sandbox_network, "allow": list(pc.network_allow),
                         "unix_sockets": list(pc.unix_sockets)},
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
-                       "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env})} for hc in c.hooks],   # 只给变量名
+                       "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env}),   # 只给变量名
+                       "files": [str(f) for f in referenced_files(hc.command, h.workspace_root)],
+                       "unpinned": unpinned_packages(hc.command)} for hc in c.hooks],
             "mcp": [mcp_entry(n, spec) for n, spec in c.mcp_servers.items()],
             "budget": dict(c.budget.__dict__), "snapshots": c.snapshots, "verify_command": c.verify_command,
             "tools": len(names),

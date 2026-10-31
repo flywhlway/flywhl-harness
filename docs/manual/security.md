@@ -76,6 +76,8 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、关闭沙箱、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
 
+hook 与 MCP 服务器跑在系统沙箱之外，按供应链对待：命令里写出的脚本（`python3 scripts/guard.py`）一并算进信任哈希，命令 hook 每次执行前再核对，Agent 改过脚本就拒绝执行；`npx`、`uvx`、`docker run` 临时拉取又没锁到确切版本的包会在确认提示和设置页里标出，`permissions.require_pinned = true` 时直接拒绝启动。
+
 `.env` 同理：默认只读取各家密钥与模型选择，地址、代理、权限模式等变量被忽略；确实需要时写进环境变量，或用 `--env-file` 显式加载。
 
 ## Web 访问控制

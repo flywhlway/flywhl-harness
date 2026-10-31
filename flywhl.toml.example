@@ -64,6 +64,7 @@ sandbox_network = "allow"         # allow | deny | allowlist；后两档要求�
                                   # deny 禁止一切对外连接（含回环地址、DNS 查询与本机 Unix 套接字）
 # network_allow = ["pypi.org", "files.pythonhosted.org", "*.github.com"]   # allowlist 时经本机代理只放行这些主机
 # unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]   # 沙箱里放行的本机 Unix 套接字（不能在工作区、临时目录里）；默认只放行 DNS，docker.sock、ssh-agent 都连不上
+# require_pinned = true          # hook / MCP 经 npx、uvx、docker run 临时拉取的包必须锁到确切版本（镜像带 @sha256:），否则拒绝启动
 rules = [
   "allow:bash(git status*)",
   "allow:bash(git diff*)",

@@ -776,6 +776,8 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .rule-list, .plain-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .plain-list { gap: 12px; }
 .plain-list .row1 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); }
+.warn-line { display: flex; align-items: flex-start; gap: 4px; color: var(--warning); font-size: var(--fs-xs); margin-top: 2px; }
+.warn-line .i { flex: none; margin-top: 1px; }
 .plain-list .cmd { margin-top: 6px; padding: 6px 8px; border-radius: var(--r-md); background: var(--surface-2); font: var(--fs-xs)/1.5 var(--font-mono); color: var(--text-2); overflow-wrap: anywhere; }
 
 .posture { list-style: none; margin: -1px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); }

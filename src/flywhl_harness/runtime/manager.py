@@ -43,6 +43,7 @@ from ..llm.base import Provider
 from ..policy.approvals import ApprovalBroker, ApprovalDecision, Resolver
 from ..policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput
 from ..policy.permissions import PermissionPolicy, Rule
+from ..policy.supply_chain import unpinned_in
 from ..prompts import SUBAGENT_PROMPT, build_system_prompt
 from ..tools import default_tools
 from ..tools.registry import ToolRegistry
@@ -178,6 +179,10 @@ class Harness:
         self.model = model or self.config.model or "flywhl-demo"
         self.model_info = provider.model_info(self.model)
         self.tools = tools if tools is not None else default_tools(self.config, self.data_dir)
+        loose = unpinned_in([hc.command for hc in self.config.hooks], self.config.mcp_servers)
+        if loose and self.config.permissions.require_pinned:
+            raise ValueError("permissions.require_pinned 已开启，以下 hook / MCP 服务器临时拉取的包没有锁定确切版本"
+                             f"（npm 包写成 名字@1.2.3，Python 包写成 名字==1.2.3，镜像带 @sha256: 摘要），拒绝启动：{'；'.join(loose)}")
         self.hooks = hooks or HookBus()
         for hc in self.config.hooks:
             cmd = CommandHook(hc.command, str(self.workspace_root), env=hc.env, pass_env=hc.pass_env)

@@ -16,6 +16,8 @@ const TONE = { ok: { cls: "success", icon: "checkCircle", label: "正常" }, war
 function posture(s) {
   const P = s.permissions, sb = s.sandbox, ac = s.access, mode = modeOf(P.mode);
   const openHooks = s.hooks.filter((x) => x.event === "pre_tool_use" && !x.fail_closed).length;
+  const loose = [...s.hooks, ...s.mcp].flatMap((x) => x.unpinned || []);
+  const bound = new Set([...s.hooks, ...s.mcp].flatMap((x) => x.files || [])).size;
   return [
     { tone: ac.token ? "ok" : "warn", icon: "lock", label: "访问令牌", value: ac.token ? "已启用" : "已关闭",
       why: ac.token ? "页面与 API 都要求令牌；令牌保存在 ~/.flywhl/server_token（仅属主可读）" : "以 --no-token 启动：本机任何程序都能在这里批准命令、切换权限" },
@@ -37,6 +39,10 @@ function posture(s) {
       why: s.snapshots ? "写操作前用影子 git 打快照，可在检查器「历史」里回滚" : "改错的文件只能靠你自己的版本管理恢复" },
     { tone: openHooks ? "warn" : "ok", icon: "hook", label: "Hooks", value: s.hooks.length ? `${s.hooks.length} 个` : "未配置",
       why: openHooks ? `${openHooks} 个 pre_tool_use hook 出错时放行（fail_closed = false）` : s.hooks.length ? "pre_tool_use hook 出错或超时即拒绝执行（fail-closed）" : "可在 flywhl.toml 里用命令 hook 拦截或改写工具调用" },
+    { tone: loose.length ? "warn" : "ok", icon: "layers", label: "供应链",
+      value: loose.length ? `${loose.length} 个包没锁版本` : P.require_pinned ? "强制锁定版本" : bound ? `绑定 ${bound} 个文件` : "无临时拉取的包",
+      why: loose.length ? `每次启动都可能拉到新发布的版本，包被接管就会投毒：${loose.join("；")}。锁到确切版本，或设置 permissions.require_pinned = true 拒绝启动`
+        : `hook 与 MCP 引用的脚本按内容绑定：项目配置的信任哈希包含它们，命令 hook 每次执行前核对，改过就拒绝执行${P.require_pinned ? "；没锁版本的包拒绝启动" : ""}` },
   ];
 }
 
@@ -55,6 +61,8 @@ const kv = (rows) => `<dl class="kv wide">${rows.map(([k, v]) => `<dt>${esc(k)}<
 const card = (iconName, title, body, aside = "") => `<section class="card"><div class="card-head">${icon(iconName)}<h2>${esc(title)}</h2>${aside ? `<span class="aside">${aside}</span>` : ""}</div><div class="card-body">${body}</div></section>`;
 const none = (text) => `<span class="muted">${esc(text)}</span>`;
 const code = (text) => `<code class="mono">${esc(text)}</code>`;
+/** hook / MCP 的供应链：按内容绑定的文件，没锁版本的包 */
+const supply = (x) => `${(x.files || []).length ? `<div class="muted">按内容绑定：${x.files.map(code).join(" ")}</div>` : ""}${(x.unpinned || []).length ? `<div class="warn-line">${icon("alert", "sm")}没锁版本：${x.unpinned.map(esc).join("；")}</div>` : ""}`;
 
 function render(inner, s, app) {
   const checks = posture(s);
@@ -85,10 +93,10 @@ function render(inner, s, app) {
         ["可信 Host", s.access.any_host ? "任意（依赖令牌）" : s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
       ${card("hook", "Hooks", s.hooks.length ? `<ul class="plain-list">${s.hooks.map((x) => `<li><div class="row1">${code(x.event)}<span class="muted">匹配</span>${code(x.matcher)}
         <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
-        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div></li>`).join("")}</ul>`
+        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${supply(x)}</li>`).join("")}</ul>`
         : `<p class="muted">没有配置命令 hook。</p>`, s.hooks.length ? `${s.hooks.length} 个` : "")}
       ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具
-        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
+        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>${supply(m)}`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
       ${card("gauge", "单次运行预算", kv([["最多轮次", fmt.int(B.max_turns)], ["最多工具调用", fmt.int(B.max_tool_calls)],
         ["token 上限", B.max_total_tokens ? fmt.int(B.max_total_tokens) : none("不限")], ["费用上限", B.max_cost_usd ? esc("$" + B.max_cost_usd) : none("不限")],
         ["墙钟上限", B.max_wall_seconds ? esc(fmt.dur(B.max_wall_seconds)) : none("不限")]]))}

@@ -114,8 +114,9 @@ async def test_settings_show_mcp_annotation_policy(ws):
     async with h:
         async with _client(create_app(h, auto_recover=False)) as c:
             m = (await c.get("/api/settings")).json()["mcp"][0]
+    assert str(Path(ECHO_SERVER[1]).resolve()) in m.pop("files")   # 解释器在系统目录里时不列
     assert m == {"name": "demo", "transport": "stdio", "tools": 2, "trust_annotations": False, "read_only": [],
-                 "ignored_hints": 1}
+                 "ignored_hints": 1, "unpinned": []}
 
 
 @pytest.mark.parametrize("bad", [{"read_only_tools": "safe_*"}, {"read_only_tools": [1]}, {"trust_annotations": "yes"},
@@ -746,3 +747,124 @@ def test_truncated_values_are_checked_against_the_current_directory():
     a = analyze(f"cd /tmp; {many_a}; A=../*; {many_b}; B=y7; rm -rf $A $B")   # ../* 排在第 57 种之后
     assert a.catastrophic and "../*" in a.catastrophic_reason, a.reasons
 
+
+# ---------------------------------------------------------------------- hook 与 MCP 的供应链
+@pytest.mark.parametrize("command, loose", [
+    ("npx -y @modelcontextprotocol/server-filesystem /data", ["npx 包 @modelcontextprotocol/server-filesystem"]),
+    ("npx -y @modelcontextprotocol/server-filesystem@2025.1.14 /data", []),
+    ("pnpm dlx some-hook@latest", ["pnpm dlx 包 some-hook@latest"]),   # latest 会变
+    ("uvx ruff check", ["uvx 包 ruff"]),
+    ("uvx ruff@0.6.9 check", []),
+    ("uvx --from 'mcp-server-git==2025.1.1' mcp-server-git", []),
+    ("pipx run --spec black==24.1.0 black .", []),
+    ("docker run --rm -i mcp/fetch", ["docker 镜像 mcp/fetch（没有用 @sha256: 摘要锁定）"]),
+    ("docker run --rm -i mcp/fetch@sha256:" + "a" * 64, []),
+    ("sh -c 'npx -y lint-hook'", ["npx 包 lint-hook"]),                 # 套一层 shell 照样认得
+    ("python3 scripts/guard.py", []),
+])
+def test_unpinned_packages_are_recognized(command, loose):
+    from flywhl_harness.policy.supply_chain import unpinned_packages
+
+    assert unpinned_packages(command) == loose
+
+
+def test_trust_covers_scripts_the_config_references(tmp_path, monkeypatch):
+    """python3 check.py 真正执行的是 check.py 的内容：脚本改了，即使 flywhl.toml 一字未动也要重新确认。"""
+    (tmp_path / "flywhl.toml").write_text('[[hooks]]\nevent = "stop"\ncommand = "python3 check.py"\n', encoding="utf-8")
+    script = tmp_path / "check.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    asked = []
+
+    def yes(req):
+        asked.append(req)
+        return True
+
+    assert len(HarnessConfig.load(trust=yes).hooks) == 1
+    assert str(script.resolve()) in asked[0].risky[0] and "文件内容一并确认" in asked[0].risky[0]
+    assert len(HarnessConfig.load(trust=yes).hooks) == 1 and len(asked) == 1
+    script.write_text("print('changed')\n", encoding="utf-8")
+    assert HarnessConfig.load(trust=lambda req: asked.append(req) or False).hooks == []
+    assert len(asked) == 2 and asked[1].digest != asked[0].digest
+
+
+def test_trust_prompt_resolves_paths_from_the_project_root(tmp_path, monkeypatch):
+    """.flywhl/config.toml 里的相对路径相对于项目根目录（hook 在工作区根目录执行），不是 .flywhl 目录。"""
+    (tmp_path / ".flywhl").mkdir()
+    (tmp_path / ".flywhl" / "config.toml").write_text(
+        '[mcp_servers.local]\ncommand = "python3"\nargs = ["srv.py"]\n', encoding="utf-8")
+    (tmp_path / "srv.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    asked = []
+    HarnessConfig.load(trust=lambda req: asked.append(req) or False)
+    assert str((tmp_path / "srv.py").resolve()) in asked[0].risky[0]
+
+
+async def test_command_hook_refuses_scripts_changed_after_start(tmp_path):
+    """Agent 改了 hook 脚本：改过的脚本一次也不执行（载荷是在临时目录里 touch 一个标记文件）。"""
+    from flywhl_harness.policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput
+
+    mark = tmp_path / "ran"
+    guard = tmp_path / "guard.sh"
+    guard.write_text("exit 0\n", encoding="utf-8")
+    hook = CommandHook("sh guard.sh", str(tmp_path))
+    inp = HookInput(HookEvent.PRE_TOOL_USE, "r", "s", tool_name="bash")
+    assert await hook(inp) is None
+    guard.write_text(f'touch "{mark}"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="guard.sh"):
+        await hook(inp)
+    bus = HookBus()
+    bus.add(Hook(HookEvent.PRE_TOOL_USE, hook, name="guard", fail_closed=True))
+    out = await bus.run(HookEvent.PRE_TOOL_USE, inp)
+    assert out.decision == "deny" and "启动后被改过" in out.reason
+    assert not mark.exists()
+
+
+async def test_command_hook_notices_a_retargeted_symlink(tmp_path):
+    from flywhl_harness.policy.hooks import CommandHook, HookEvent, HookInput
+
+    mark = tmp_path / "ran"
+    (tmp_path / "a.sh").write_text("exit 0\n", encoding="utf-8")
+    (tmp_path / "b.sh").write_text(f'touch "{mark}"\n', encoding="utf-8")
+    (tmp_path / "link.sh").symlink_to(tmp_path / "a.sh")
+    hook = CommandHook("sh link.sh", str(tmp_path))
+    inp = HookInput(HookEvent.POST_TOOL_USE, "r", "s", tool_name="bash")
+    assert await hook(inp) is None
+    (tmp_path / "link.sh").unlink()
+    (tmp_path / "link.sh").symlink_to(tmp_path / "b.sh")
+    with pytest.raises(RuntimeError, match="b.sh"):
+        await hook(inp)
+    assert not mark.exists()
+
+
+def test_require_pinned_refuses_to_start(ws):
+    """打开 require_pinned 后，没锁版本的 hook / MCP 包直接拒绝启动（MCP 还没启动，什么也没拉取）。"""
+    loose_hook = HookConfig(event="stop", command="npx -y lint-hook")
+    with pytest.raises(ValueError, match="require_pinned.*lint-hook"):
+        make_harness(ws, ["好"], hooks=[loose_hook], permissions__require_pinned=True)
+    with pytest.raises(ValueError, match="@x/server"):
+        make_harness(ws, ["好"], mcp_servers={"x": {"command": "npx", "args": ["-y", "@x/server"]}},
+                     permissions__require_pinned=True)
+    make_harness(ws, ["好"], hooks=[HookConfig(event="stop", command="npx -y lint-hook@1.2.3")],
+                 permissions__require_pinned=True)
+    make_harness(ws, ["好"], hooks=[loose_hook])   # 默认只在设置页与信任确认里提示
+
+
+def test_require_pinned_can_only_be_relaxed_with_trust():
+    from flywhl_harness.config import split_untrusted
+
+    assert split_untrusted({"permissions": {"require_pinned": True}})[1] == []
+    assert split_untrusted({"permissions": {"require_pinned": False}})[1] == ["permissions.require_pinned = False"]
+
+
+async def test_settings_show_supply_chain(ws):
+    from flywhl_harness.server.app import create_app
+
+    (ws / "guard.py").write_text("", encoding="utf-8")
+    hooks = [HookConfig(event="stop", command="python3 guard.py"), HookConfig(event="stop", command="npx -y lint-hook")]
+    h = make_harness(ws, ["好"], hooks=hooks)
+    async with _client(create_app(h, auto_recover=False)) as c:
+        d = (await c.get("/api/settings")).json()
+    assert d["hooks"][0]["files"] == [str((ws / "guard.py").resolve())] and d["hooks"][0]["unpinned"] == []
+    assert d["hooks"][1]["unpinned"] == ["npx 包 lint-hook"]
+    assert d["permissions"]["require_pinned"] is False
