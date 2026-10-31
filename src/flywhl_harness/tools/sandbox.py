@@ -28,7 +28,8 @@ Linux 档（``sandbox = "linux"``）用 bubblewrap，规则对齐 macOS，做法
 - 根目录只读挂载，工作区可写，``.flywhl/`` 与 ``flywhl.toml`` 再只读挂回去（工作区里还不存在的
   ``flywhl.toml`` 拦不住新建，新建的项目配置仍要经过信任确认）；
 - Unix 套接字没有按连接拒绝的规则，只读挂载也挡不住连接，只能让它们不出现在沙箱里：``/run``（docker.sock、D-Bus、
-  ``XDG_RUNTIME_DIR``）换成空目录，``/tmp``（X11、tmux、ssh-agent）换成本会话私有的目录；``unix_sockets`` 列出的再挂回来。
+  ``XDG_RUNTIME_DIR``）换成空目录，``/tmp``（X11、tmux、ssh-agent）换成本会话私有的目录，其余位置上的（家目录里的
+  Docker Desktop、colima……）按 ``/proc/net/unix`` 逐个盖成 ``/dev/null``；``unix_sockets`` 列出的再挂回来。
   ``allow`` 与宿主共用网络命名空间，抽象命名空间里的套接字（不在文件系统上，如部分 X11、D-Bus）仍然连得上；
 - ``deny`` 另起网络命名空间（只剩回环，抽象套接字也隔开了）；``allowlist`` 还没有实现，配置了就拒绝执行。
 """
@@ -41,6 +42,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -129,8 +131,8 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     # 放行要写在拒绝之后：Unix 套接字那条写在放行后面时，连到本机端口也会被拒（实测）。
     # allow 档放行 DNS 与系统日志；deny / allowlist 档连 DNS 也不放：查询经 mDNSResponder 的套接字，数据能编码进域名带出去
     lines += [f'(allow network-outbound (remote ip "localhost:{p}"))' for p in (local_ports if network == "allowlist" else ())]
-    sockets = [*(_UNIX_SYSTEM if network == "allow" else ()), *unix_sockets]
-    for p in dict.fromkeys(q for s in sockets for q in (s, os.path.realpath(s))):   # /tmp 解析为 /private/tmp：两种写法都放行
+    # 内核按解析后的真实路径判定（实测）：放行位置上被换成指向别处的符号链接时，连接照样被拒
+    for p in dict.fromkeys([*(_UNIX_SYSTEM if network == "allow" else ()), *unix_sockets]):
         lines.append(f"(allow network-outbound (remote unix-socket (path-literal {_str(p)})))")
     return "\n".join(lines)
 
@@ -145,6 +147,28 @@ def sandbox_argv(command: str, workspace: str | Path, *, writable: Iterable[str]
     profile = seatbelt_profile(workspace, writable=writable, network=network, local_ports=local_ports,
                                unix_sockets=unix_sockets)
     return [executable, "-p", profile, "/bin/bash", "-c", command]
+
+
+def pin_sockets(paths: Iterable[str]) -> list[tuple[str, str]]:
+    """``unix_sockets`` 启动时定下真实位置：(配置的路径, 目录部分解析过符号链接、最后一级保留原样的路径)。
+    之后每条命令都用这个结果、不再解析——沙箱能写的目录（macOS 的 /tmp）里，套接字可能被换成指向 docker.sock 的符号链接，
+    每次重新解析就会把 docker.sock 放进来。最后一级不解析：放行位置上是符号链接时，连接按它指向的真实路径判定，不会放行。"""
+    return [(p, os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))) for p in paths]
+
+
+def _under(path: str, base: str) -> bool:
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def host_sockets() -> list[str]:
+    """宿主上绑定在文件系统上的 Unix 套接字（``/proc/net/unix``，本网络命名空间里的全部）：比遍历目录完整，也便宜。
+    抽象命名空间里的（``@`` 开头）与按相对路径绑定的不在其中。"""
+    try:
+        with open("/proc/net/unix", encoding="utf-8", errors="replace") as f:
+            rows = f.read().splitlines()[1:]
+    except OSError:
+        return []
+    return sorted({cols[7] for cols in (r.split(None, 7) for r in rows) if len(cols) == 8 and cols[7].startswith("/")})
 
 
 def workspace_credentials(workspace: str) -> set[str]:
@@ -187,9 +211,10 @@ def _credential_paths(workspace: str, env: dict[str, str]) -> list[str]:
 
 def bwrap_argv(command: str, workspace: str | Path, *, writable: Iterable[str] | None = None,
                env: dict[str, str] | None = None, network: str = "allow", executable: str | None = None,
-               private_tmp: str | None = None, unix_sockets: Iterable[str] = ()) -> list[str]:
+               private_tmp: str | None = None, unix_sockets: Iterable[tuple[str, str]] = ()) -> list[str]:
     """把 bash 命令包进 bubblewrap。不可用、工作区大到数不完凭证位置、或要求了还没实现的出站白名单时抛 ``RuntimeError``，
-    由调用方拒绝执行。``private_tmp`` 是挂成沙箱里 ``/tmp`` 的宿主目录（会话内的命令共用），不给就每条命令一个空的。"""
+    由调用方拒绝执行。``private_tmp`` 是挂成沙箱里 ``/tmp`` 的宿主目录（会话内的命令共用），不给就每条命令一个空的；
+    ``unix_sockets`` 是 ``pin_sockets()`` 定下的 (配置的路径, 真实位置)。"""
     bwrap = executable or shutil.which("bwrap")
     if not sys.platform.startswith("linux") or not bwrap or not os.path.exists(bwrap):
         raise RuntimeError('sandbox = "linux" 需要 Linux 上的 bubblewrap（bwrap），当前环境没有')
@@ -221,11 +246,28 @@ def bwrap_argv(command: str, workspace: str | Path, *, writable: Iterable[str] |
             argv += ["--ro-bind", p, p]
     for p in _credential_paths(ws, dict(os.environ) if env is None else env):
         argv += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
-    for p in unix_sockets:   # 显式放行的套接字挂回来
-        if os.path.exists(p):
-            argv += ["--bind", p, p]
+    # 宿主上其余的套接字（家目录里的 Docker Desktop、colima、screen……）逐个盖成 /dev/null；/run、/tmp 已经整体换掉了
+    pinned = {real for _, real in unix_sockets}
+    hidden = [h for h in ("/run", "/var/run", "/tmp") if not os.path.islink(h)]
+    for p in host_sockets():
+        if p not in pinned and not any(_under(p, h) for h in hidden) and _is_socket(p):
+            argv += ["--ro-bind", "/dev/null", p]
+    # 显式放行的挂回来：只挂真的套接字；沙箱能写的目录里的不挂，命令能把它换成指向别处的符号链接
+    writable_dirs = [ws, *(os.path.realpath(p) for p in [*extra, *([private_tmp] if private_tmp else [])])]
+    for want, real in unix_sockets:
+        if any(_under(real, w) for w in writable_dirs):
+            raise RuntimeError(f"unix_sockets 里的 {want} 在沙箱可写的目录里，命令能把它换成指向别处的符号链接；换个位置再放行")
+        if _is_socket(real):   # 服务没启动时不挂，连接照常失败
+            argv += ["--bind", real, want]
     return [*argv, "--setenv", "TMPDIR", "/tmp", "--chdir", ws, "/bin/bash", "-c", command]
 
 
+def _is_socket(path: str) -> bool:
+    try:
+        return stat.S_ISSOCK(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 __all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "SANDBOX_NETWORK", "bwrap_argv", "default_writable", "sandbox_argv",
-           "seatbelt_profile", "workspace_credentials"]
+           "host_sockets", "pin_sockets", "seatbelt_profile", "workspace_credentials"]

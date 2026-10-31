@@ -242,18 +242,31 @@ async def test_sandbox_blocks_unix_sockets_unless_listed(ws, network):
     """Unix 套接字连着本机守护进程：docker.sock 能起挂载家目录的容器，tmux 能替命令在沙箱外执行。任何网络策略下都拒绝，
     unix_sockets 列出的才放行（本机数据库这类）。deny / allowlist 下连 DNS 也不放：查询能把数据编码进域名带出去。"""
     d = tempfile.mkdtemp(prefix="fw", dir="/tmp")   # Unix 套接字路径不能超过 104 字节
-    hidden, listed = os.path.join(d, "h"), os.path.join(d, "l")
+    hidden, listed, link = os.path.join(d, "h"), os.path.join(d, "l"), os.path.join(d, "k")
+    os.symlink(hidden, link)   # 放行位置上是指向别处的符号链接：连接按真实路径判定，不放行
     probe = 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {} 2>&1 | tail -1'
-    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": probe.format(p)}}]} for p in (hidden, listed)]
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": probe.format(p)}}]} for p in (hidden, listed, link)]
                      + ["好"], permissions__mode="bypass", permissions__sandbox="macos", permissions__sandbox_network=network,
-                     permissions__unix_sockets=[listed])
+                     permissions__unix_sockets=[listed, link])
     servers = [await asyncio.start_unix_server(lambda r, w: w.close(), p) for p in (hidden, listed)]
     try:
         async with servers[0], servers[1]:
             out = [e["content"] for e in tool_ends((await h.run("连一下")).events)]
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    assert "PermissionError" in out[0] and "CONNECTED" in out[1], out
+    assert "PermissionError" in out[0] and "CONNECTED" in out[1] and "PermissionError" in out[2], out
+
+
+def test_unix_sockets_are_pinned_at_startup(tmp_path):
+    """放行的套接字启动时定下真实位置、之后不再解析：沙箱能写的目录里，它可能被换成指向 docker.sock 的符号链接。
+    目录部分解析（/tmp → /private/tmp），最后一级保留原样。"""
+    from flywhl_harness.tools.sandbox import pin_sockets
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    (tmp_path / "real" / "s").symlink_to("/var/run/docker.sock")
+    [(want, real)] = pin_sockets([str(tmp_path / "alias" / "s")])
+    assert want == str(tmp_path / "alias" / "s") and real == os.path.join(os.path.realpath(tmp_path / "real"), "s")
 
 
 def test_seatbelt_profile_closes_local_ipc():
@@ -449,6 +462,23 @@ async def test_linux_sandbox_hides_host_sockets_but_keeps_session_tmp(ws):
         shutil.rmtree(d, ignore_errors=True)
     assert "CONNECTED" not in out[0] and "CONNECTED" in out[1], out
     assert out[3].startswith("kept") and not os.path.exists("/tmp/keep.txt"), out
+
+
+@needs_bwrap
+async def test_linux_sandbox_masks_host_sockets_outside_tmp_and_run(ws):
+    """家目录、/var/tmp 这类沙箱看得见的位置上的套接字（Docker Desktop、colima、screen……）按 /proc/net/unix 逐个盖住。"""
+    d = tempfile.mkdtemp(prefix="fw", dir="/var/tmp")
+    sock = os.path.join(d, "s")
+    probe = f'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print(\'CONNECTED\')" {sock} 2>&1 | tail -1'
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": probe}}]}, "好"],
+                     permissions__mode="bypass", permissions__sandbox="linux")
+    server = await asyncio.start_unix_server(lambda r, w: w.close(), sock)
+    try:
+        async with server:
+            out = tool_ends((await h.run("连一下")).events)[0]["content"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert "CONNECTED" not in out, out
 
 
 @needs_bwrap

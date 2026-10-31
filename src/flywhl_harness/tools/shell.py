@@ -36,7 +36,7 @@ from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
 from .egress import EgressProxy, local_ports, parse_rules
-from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, sandbox_argv
+from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, pin_sockets, sandbox_argv
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
                          r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
@@ -155,7 +155,7 @@ class BashTool(Tool):
         self.sandbox = sandbox
         self.sandbox_network = sandbox_network
         self.network_allow = parse_rules(network_allow or [])   # 写法不对在启动时报错
-        self.unix_sockets = sockets
+        self.unix_sockets = pin_sockets(sockets)   # 启动时定下真实位置，之后不再解析
         self._private_tmp: str | None = None
 
     def private_tmp(self) -> str:
@@ -206,7 +206,7 @@ class BashTool(Tool):
                 try:
                     argv = (sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network,
                                          local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else (),
-                                         unix_sockets=self.unix_sockets)
+                                         unix_sockets=[real for _, real in self.unix_sockets])
                             if self.sandbox == "macos" else
                             bwrap_argv(command, ctx.workspace.root, network=self.sandbox_network,
                                        private_tmp=self.private_tmp(), unix_sockets=self.unix_sockets))
