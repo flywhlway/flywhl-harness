@@ -57,3 +57,27 @@ Top10 修复后按上面四个条件逐条复核，记录见 [fix-report.md](fix
 | 4. 结果写回 evidence | 已写 | `evidence/fix-*` |
 
 四条都满足，按本文的规则就绪度可改为 **有条件就绪**：限于本机单用户、default 模式。条件是上文“残余风险”仍然成立——沙箱默认关闭且不封网络（QA-008），命令 hook 超时放行（QA-007），bypass / `--yes` 仍不适合跑不可信任务。
+
+## 第二轮加固后复核（2026-10-31）
+
+第二轮加固与能力清单完成后，逐条复核上文的残余风险，记录见 [security-round2.md](security-round2.md)、[capability-backlog.md](capability-backlog.md)：
+
+| 残余风险 | 2026-10-18 | 2026-10-31 |
+|---|---|---|
+| 命令分析漏判 | 变量拼接、编码、`python -c` 都看不到 | 赋过值的变量按取值展开，`cd` 之后按可能的当前目录拼路径，值要到运行时才知道的按越界处理。编码过的命令和 `python -c` 里的代码仍看不到：default 下要确认，bypass 下照样执行 |
+| 沙箱（QA-008） | 默认关闭，不封网络 | 有 macOS、Linux 两档，可断网，macOS 档可只放行白名单主机；钥匙串、docker.sock 这类本机通道被拦住。仍默认关闭，命令 hook 与 MCP 子进程不在沙箱里 |
+| 命令 hook 超时（QA-007） | 失败即放行 | `pre_tool_use` 默认失败即拒绝 |
+| live 模型行为 | 没有证据 | 仍没有：本轮没跑 live 用例（要花钱，留给人决定） |
+| 覆盖率、依赖漏洞 | 没有扫描结果 | 仍没有 |
+| SQLite `synchronous=NORMAL` | 断电可能丢最后一次提交 | 未变 |
+
+测试（提交 `81e6e3e`）：
+- macOS，Python 3.12：离线 670 passed，33 个 live 用例默认不选；系统沙箱用例 11 passed，6 个 Linux 专用的跳过；
+- 一次性 Linux 容器（Python 3.12，bubblewrap 0.12）：667 passed、3 skipped；系统沙箱用例 6 passed，11 个 macOS 专用的跳过；
+- 审计不变量套件 13 passed。
+
+判定维持 **有条件就绪**：限于本机单用户、default 模式。跑不可信仓库时，现在有两种比 bypass / `--yes` 稳妥的做法：
+- 打开沙箱并断网：`sandbox = "macos"` 或 `"linux"`，`sandbox_network = "deny"`；
+- 无人值守时用 `on_ask = "deny"` 加 `auto_approve` 规则，只放行写明的操作。
+
+bypass / `--yes` 仍不适合跑不可信任务。

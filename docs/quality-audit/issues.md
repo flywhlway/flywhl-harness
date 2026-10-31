@@ -6,6 +6,13 @@
 
 整改（2026-10-18）：QA-001～006、QA-009～012 已修复，QA-007、QA-008、QA-013 未处理，见 [fix-report.md](fix-report.md)。下面的“实际”一栏是审计时的结果。
 
+第二轮（2026-10-31）：QA-007、QA-013 已关闭。QA-008 部分处理：
+- 沙箱有了 macOS、Linux 两档，可以断网，macOS 档可只放行白名单主机；
+- macOS 档拦住钥匙串、剪贴板这类 Mach 服务；两档都拦住 docker.sock、ssh-agent 这类本机套接字；
+- 仍默认关闭，命令 hook 与 MCP 子进程不在沙箱里。
+
+见 [security-round2.md](security-round2.md)。
+
 ## 索引
 
 | ID | 级别 | 模块 | 一句话 |
