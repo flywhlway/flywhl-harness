@@ -229,7 +229,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 - 用户配置 `~/.flywhl/config.toml` 与 `-c` 显式指定的文件视为可信，完整加载。用户配置先加载，两层的 `hooks` 与 `permissions.rules`
   追加合并而不是替换——否则项目配置写一行 `rules = ["ask:read(*)"]` 就能冲掉你在用户配置里写的 deny 规则。
 
-信任哈希还包含 hook 命令与 MCP 启动参数里直接写出的文件（`python3 scripts/guard.py` 里的脚本，跟随符号链接，系统目录里的解释器除外），确认提示逐个列出；脚本改了，即使配置一字未动也要重新确认。脚本再导入的模块、`cd hooks && ./guard.sh` 这类先切换目录的写法、`npx` 临时拉取的包不在其中：前两者要靠审阅，后者靠下文的锁版本。
+信任哈希还包含 hook 命令与 MCP 启动参数里直接写出的文件（`python3 scripts/guard.py` 里的脚本，跟随符号链接，系统目录里的解释器除外），确认提示逐个列出；脚本改了，即使配置一字未动也要重新确认。相对路径按 hook 实际运行的目录（工作区）解析，不按配置文件所在目录：用 `--workspace` 或 `FLYWHL_WORKSPACE` 换个工作区启动，执行的是另一份脚本，哈希跟着变，要重新确认。脚本再导入的模块、`cd hooks && ./guard.sh` 这类先切换目录的写法、`npx` 临时拉取的包不在其中：前两者要靠审阅，后者靠下文的锁版本。
 
 ### 审批界面本身也是攻击面
 
@@ -316,7 +316,7 @@ MCP 服务器、技能包、hook 脚本有一个共同点：**它们是在你机
 - MCP 服务器子进程以 `env={**_clean_env(True), **self.env}` 启动：密钥类变量被剥离，服务器需要的凭证只能在 `flywhl.toml` 的 `env` 里
   显式给出，第三方服务器拿到了什么，从配置里一眼可见；
 - 启动目录 `flywhl.toml` 里的 `mcp_servers` 要先信任这份配置才会启动；信任哈希包含启动参数里写出的脚本；
-- 经 `npx`、`bunx`、`pnpm dlx`、`uvx`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）；
+- 经 `npx`、`bunx`、`pnpm dlx`、`uvx`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）。判断锁没锁要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数：认不出的选项（分不清下一个词是它的值还是包名、镜像名）、本地目录、compose 文件与依赖清单里的版本，一律按没锁处理；设置页只给包名，URL 里的账号与查询串去掉；
 - 服务器发来的请求（MCP 允许服务器反向请求客户端）只回复 `ping`，其它一律返回 `-32601`——服务器无法借 sampling 之类的能力反过来驱动模型；
 - annotations 的缺省值取保守一侧，服务器声明的放宽默认不采信，要在配置里写明 `trust_annotations` 或 `read_only_tools`，见上文；
 - 没有签名与权限声明机制。
@@ -429,7 +429,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 审批改参绕过 hook、审批看不到改动 | `test_edited_args_rerun_pre_tool_hooks`、`test_approval_request_carries_diff_preview` |
 | MCP annotations 缺省值 | `test_mcp_annotation_defaults_are_conservative` |
 | 不可信项目配置（hook、MCP、放宽审批、改请求去向） | `test_untrusted_project_config_keeps_only_safe_settings`、`test_trust_is_bound_to_path_and_content` |
-| hook / MCP 引用的脚本被改、包没锁版本 | `test_trust_covers_scripts_the_config_references`、`test_command_hook_refuses_scripts_changed_after_start`、`test_require_pinned_refuses_to_start` |
+| hook / MCP 引用的脚本被改、包没锁版本 | `test_trust_covers_scripts_the_config_references`、`test_trust_follows_the_workspace_the_hooks_run_in`、`test_command_hook_refuses_scripts_changed_after_start`、`test_ambiguous_or_unbound_sources_count_as_unpinned`、`test_require_pinned_refuses_to_start` |
 
 已知缺口适合先以 `xfail` 的形式补进来，修复后转为必须通过——大写的 `<SYSTEM-REMINDER>`、`cat ../../etc/passwd`、
 整条路径放在变量里的 `F=/etc/passwd; cat $F` 就是这样从“已知缺口”变成 `test_reminder_tag_variants_are_escaped`、
@@ -465,7 +465,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 伪造 `<system-reminder>` | 工具结果中转义该标签（含大小写变体与带属性的写法） | 系统提示词声明 | — | 已实现；工具描述与 `AGENTS.md` 不经过转义 |
 | 恶意 MCP 服务器自报只读 / 幂等 | annotations 默认不采信，放宽要在配置里点名（`read_only_tools`）或写明 `trust_annotations` | 服务器级 deny 规则 | 隔离运行 | 已修复，有测试 |
 | 恶意项目配置（`flywhl.toml` 里的 hook、MCP、`bypass`、`base_url`） | 高危设置先信任再生效，确认提示列出命令、子进程环境变量与注解策略 | 信任绑定路径与内容哈希，内容变化重新确认 | — | 已实现，有测试；hook / MCP 引用的脚本一并纳入哈希 |
-| 恶意 hook / MCP 包 | 准入审查、锁版本 | 最小化环境变量 | 隔离运行 | MCP 子进程已剥离密钥变量；准入、锁版本未实现 |
+| 恶意 hook / MCP 包 | 准入审查、锁版本 | 最小化环境变量 | 隔离运行 | MCP 子进程已剥离密钥变量；引用的脚本按内容绑定，没锁版本的标出、`require_pinned` 时拒绝启动；准入审查、签名未实现 |
 | 无人值守下的危险动作 | `on_ask="deny"` + 显式 allow 规则 | 托管基线 | 一次性沙箱 | 可配置；`--yes` 会放行所有 ask |
 | 灾难性正则卡住整个服务 | 正则搜索放进子进程并设超时 | Run 取消时直接杀掉子进程 | — | 已修复，有测试 |
 | 回放 / 恢复时重复副作用 | 幂等键 + 对账 | 回放不执行副作用 | — | 已实现（[14 幂等](/reliability/idempotency)） |

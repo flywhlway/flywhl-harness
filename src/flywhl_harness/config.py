@@ -178,12 +178,13 @@ class HarnessConfig:
         user_file = (flywhl_home() / "config.toml").resolve()
         if user_file.is_file():
             _merge(cfg, tomllib.loads(user_file.read_text(encoding="utf-8")), layer=True)
+        explicit = {k: v for k, v in overrides.items() if v is not None}
         project = Path(path) if path else next((p for p in map(Path, PROJECT_CONFIG_FILES) if p.is_file()), None)
         if project is not None and project.is_file() and project.resolve() != user_file:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _trusted_part(project.resolve(), raw, data, trust)
+                data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit))
             _merge(cfg, data, layer=True)
         env_map = {
             "FLYWHL_PROVIDER": "provider",
@@ -206,7 +207,6 @@ class HarnessConfig:
             cfg.fallback_models = [m.strip() for m in fallbacks.split(",") if m.strip()]
         if os.environ.get("FLYWHL_PERMISSION_MODE"):
             cfg.permissions.mode = os.environ["FLYWHL_PERMISSION_MODE"]
-        explicit = {k: v for k, v in overrides.items() if v is not None}
         if explicit.get("provider", "auto") != "auto" and "model" not in explicit:
             from .llm.profiles import pinned_provider   # 延迟导入：llm 包反过来依赖本模块
 
@@ -305,8 +305,8 @@ def flywhl_home() -> Path:
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None) -> tuple[dict[str, Any], list[str]]:
-    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是项目根目录：hook、MCP 命令里的
-    相对路径按它解析，引用的文件与没锁版本的包写进确认提示。
+    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是 hook、MCP 服务器实际运行的目录
+    （工作区）：命令里的相对路径按它解析，引用的文件与没锁版本的包写进确认提示。
 
     未知键留在前一部分，交给 ``_merge`` 照常报错——拼写错误不该变成一次信任确认。
     """
@@ -378,13 +378,22 @@ def _describe_mcp(name: str, spec: Any, base: Path) -> str:
     return line + describe(mcp_argv(spec), mcp_base(spec, base))
 
 
+def _run_dir(cfg: HarnessConfig, data: dict[str, Any], explicit: dict[str, Any]) -> Path:
+    """hook 与 MCP 服务器实际运行的目录，即最终生效的工作区：显式参数 > 环境变量 > 项目配置 > 用户配置。
+    项目配置里的 workspace 本身也要信任才生效；不信任时连同 hook 一起丢掉，按它算也不会错。"""
+    ws = explicit.get("workspace") or os.environ.get("FLYWHL_WORKSPACE") or data.get("workspace") or cfg.workspace
+    return Path(str(ws)).expanduser().resolve()
+
+
 def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
-                  trust: Callable[[TrustRequest], bool] | None) -> dict[str, Any]:
+                  trust: Callable[[TrustRequest], bool] | None, base: Path) -> dict[str, Any]:
     """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。
-    hook、MCP 命令里引用的脚本（``python3 scripts/guard.py``）真正执行的是脚本的内容：一并算进哈希，改了脚本同样要重新确认。"""
+
+    hook、MCP 命令里引用的脚本（``python3 scripts/guard.py``）真正执行的是脚本的内容：一并算进哈希，改了脚本同样要
+    重新确认。相对路径按 base（hook、MCP 实际运行的工作区）解析，不按配置文件所在目录：换个工作区启动，执行的是
+    另一份脚本，哈希跟着变，要重新确认。"""
     from .policy.supply_chain import config_files, file_digest
 
-    base = path.parent.parent if path.parent.name == ".flywhl" else path.parent   # .flywhl/config.toml 的项目根目录
     safe, risky = split_untrusted(data, base)
     if not risky:
         return data

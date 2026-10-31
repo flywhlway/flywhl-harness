@@ -768,6 +768,86 @@ def test_unpinned_packages_are_recognized(command, loose):
     assert unpinned_packages(command) == loose
 
 
+_DIGEST = "@sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("command", [
+    "docker run --cgroupns host evil/img",                     # 带值的选项认得出，镜像仍是 evil/img
+    f"docker run --frobnicate mcp/a{_DIGEST} evil/img",        # 认不出的选项：分不清哪个才是镜像
+    "docker run -itz evil/img",
+    "docker --context prod run evil/img",                      # 全局选项后面的 run
+    "docker container run evil/img",
+    "podman run -it --rm evil/img",
+    "docker compose run lint",                                 # 镜像写在 compose 文件里
+    "npx --frobnicate lint@1.0.0 evil-pkg",
+    "npx -y ./pkgdir",                                         # 本地目录：内容没人核对
+    "npx -y file:pkgdir",
+    "uvx --from . tool",
+    "uvx --with-editable ./pkgdir tool==1.0.0",
+    "uvx --with-requirements req.txt tool==1.0.0",             # 依赖清单里的版本核对不到
+    "pipx run --sp evil black==24.1.0",                        # argparse 认缩写，这里不猜
+])
+def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
+    from flywhl_harness.policy.supply_chain import unpinned_packages
+
+    (tmp_path / "pkgdir").mkdir()
+    (tmp_path / "req.txt").write_text("requests\n", encoding="utf-8")
+    assert unpinned_packages(command, tmp_path)
+
+
+@pytest.mark.parametrize("command", [
+    f"docker run -i --rm --init -e TOKEN -v /a:/b --network=none mcp/x{_DIGEST}",
+    f"docker run -it --rm -eFOO=1 -p8080:80 mcp/x{_DIGEST} --some-server-flag",
+    f"docker --context prod container run --rm -- mcp/x{_DIGEST}",
+    "npx -y --package=@x/server@1.2.3 server",
+    "npx -y ./pkg.tgz",
+    "npx -y file:pkg.tgz",
+    "uvx --python 3.12 --with dep==2.0 tool==1.0.0 --tool-flag",
+    "uvx --from ./dist/tool-1.0-py3-none-any.whl tool",
+])
+def test_pinned_sources_stay_pinned(command, tmp_path):
+    from flywhl_harness.policy.supply_chain import referenced_files, unpinned_packages
+
+    (tmp_path / "pkg.tgz").write_bytes(b"")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "tool-1.0-py3-none-any.whl").write_bytes(b"")
+    assert unpinned_packages(command, tmp_path) == []
+    if "pkg.tgz" in command or ".whl" in command:      # 本地文件算锁住，前提是它的内容按引用文件绑定了
+        assert referenced_files(command, tmp_path)
+
+
+def test_unpinned_list_hides_url_credentials():
+    """设置页与拒绝启动的报错只给包名：URL 里的账号密码、查询串常带令牌。"""
+    from flywhl_harness.policy.supply_chain import unpinned_packages
+
+    out = unpinned_packages("uvx --from git+https://bob:s3cret@git.example.com/x.git?token=abc tool")
+    assert out and all(s not in out[0] for s in ("bob", "s3cret", "abc")) and "git.example.com/x.git" in out[0]
+
+
+def test_trust_follows_the_workspace_the_hooks_run_in(tmp_path, monkeypatch):
+    """hook 在工作区里执行，不在配置文件所在目录：换个工作区启动，执行的是另一份脚本，要重新确认。"""
+    proj, other = tmp_path / "proj", tmp_path / "other"
+    for d, body in ((proj, "exit 0\n"), (other, "exit 1\n")):
+        d.mkdir()
+        (d / "guard.sh").write_text(body, encoding="utf-8")
+    (proj / "flywhl.toml").write_text('[[hooks]]\nevent = "stop"\ncommand = "sh guard.sh"\n', encoding="utf-8")
+    monkeypatch.chdir(proj)
+    asked = []
+
+    def no(req):
+        asked.append(req)
+        return False
+
+    assert len(HarnessConfig.load(trust=lambda req: asked.append(req) or True).hooks) == 1
+    assert str((proj / "guard.sh").resolve()) in asked[0].risky[0]
+    assert HarnessConfig.load(trust=no, workspace=str(other)).hooks == []
+    assert str((other / "guard.sh").resolve()) in asked[1].risky[0] and asked[1].digest != asked[0].digest
+    monkeypatch.setenv("FLYWHL_WORKSPACE", str(other))
+    assert HarnessConfig.load(trust=no).hooks == [] and len(asked) == 3
+    monkeypatch.delenv("FLYWHL_WORKSPACE")
+    assert len(HarnessConfig.load(trust=no).hooks) == 1 and len(asked) == 3   # 回到原工作区，信任记录照常有效
+
+
 def test_trust_covers_scripts_the_config_references(tmp_path, monkeypatch):
     """python3 check.py 真正执行的是 check.py 的内容：脚本改了，即使 flywhl.toml 一字未动也要重新确认。"""
     (tmp_path / "flywhl.toml").write_text('[[hooks]]\nevent = "stop"\ncommand = "python3 check.py"\n', encoding="utf-8")
