@@ -115,9 +115,9 @@ _VARIANT_LIMIT = 16   # 一段命令按变量取值最多展开成几份
 _VALUE_LIMIT = 8      # 一个变量最多记几种取值，再多就记成“值未知”
 _CWD_LIMIT = 8
 # 一条命令连同 sh -c / eval 的递归最多逐个分析这么多段：取值里再引用变量、层层 bash -c 时组合数是 16 的三次方，
-# 不设上限会把权限判定拖上几十秒
+# 不设上限会把权限判定拖上几十秒。超了按灾难性处理（任何模式都拒绝）：剩下的段没分析，后面可能就跟着 rm -rf ~
 _WORK_LIMIT = 1024
-_OVER_BUDGET = "命令里的变量取值与嵌套组合太多，无法逐个分析"
+_OVER_BUDGET = "命令里的变量取值与嵌套组合太多，无法逐个确认它不会删除根目录、家目录或读取凭证；请拆成几条较短的命令"
 _HOME_MARK = "/\0home"   # 路径运算时，家目录记成根下的一个占位目录
 # shell 不展开的 $（单引号里、\$、$'...' 解出来的）：shlex 去掉引号之后就分不出来了，_bash_lines 先换成这个字符，
 # 变量代入时跳过它；交给 sh -c / eval 递归分析时、写进原因与分段时换回 $
@@ -776,18 +776,36 @@ def _substitute(words: list[str], a: CommandAnalysis) -> list[list[str]]:
     取值为空时同理（带引号是一个空参数，不带引号整个词消失）。"""
     if not any("$" in w for w in words):
         return [words]
+    ifs = a.vars.get("IFS") or []
+    if None in ifs:
+        a.flag_catastrophic("IFS 的值要到运行时才知道，变量展开后怎么拆成词无法静态判断；不要改 IFS，或者给变量加上引号")
+    sep = re.compile(r"[\s%s]+" % re.escape("".join({c for v in ifs if v for c in v})))   # IFS=/ 时 /bin/rm 拆成 bin rm
     choices: list[list[tuple[str, ...]]] = []
     for w in words:
         opts: list[tuple[str, ...]] = []
         for v in _word_values(w, a):
             opts.append((v,))
-            if v != w and not any(c.isspace() for c in w) and (not v or any(c.isspace() for c in v)):
-                opts.append(tuple(v.split()))
+            if v != w and not any(c.isspace() for c in w) and (not v or sep.search(v)):
+                opts.append(tuple(x for x in sep.split(v) if x))
         choices.append(list(dict.fromkeys(opts)))
     total = math.prod(len(c) for c in choices)
     if total > _VARIANT_LIMIT:
-        a.bump("external", f"变量取值的组合太多（{total} 种），无法逐个分析")
+        # 只分析前 _VARIANT_LIMIT 种：截掉的组合里若有危险的取值，宁可拒绝，也不能当作没看见
+        risky = next((x for w, c in zip(words, choices) if "$" in w for opt in c for v in opt for x in v.split()
+                      if _risky_value(x)), None)
+        if risky:
+            a.flag_catastrophic(f"变量取值的组合太多（{total} 种），其中有 {risky} 这样的取值（根目录、家目录、块设备或凭证位置），"
+                                "无法逐个确认；请拆成几条命令")
+        else:
+            a.bump("external", f"变量取值的组合太多（{total} 种），无法逐个分析")
     return [[x for part in combo for x in part] for combo in itertools.islice(itertools.product(*choices), _VARIANT_LIMIT)]
+
+
+def _risky_value(v: str) -> bool:
+    """变量取值本身（或者其中的变量为空时）是根目录、家目录及其下一级、块设备或凭证位置。"""
+    if _BLOCK_DEV.match(v) or CREDENTIAL_HINTS.search(v):
+        return True
+    return any(form and (d := _root_depth(form)) is not None and d <= 1 for form in (v, _empty_variant(v)[0]))
 
 
 def _opaque(word: str, a: CommandAnalysis) -> bool:
@@ -898,11 +916,41 @@ def _loop_header(args: list[str], a: CommandAnalysis) -> None:
         _add_values(args[0], [None], a)
 
 
-_VAR_SETTERS = {"read", "mapfile", "readarray", "getopts", "unset"}
+_VAR_SETTERS = {"read", "mapfile", "readarray", "getopts", "unset", "wait"}
+# 各命令带值的短选项字母；值是变量名的另外列出（read -a 数组、printf -v、wait -p）
+_SETTER_OPTS = {"read": ("adinNptu", "a"), "mapfile": ("dnOsuCc", ""), "readarray": ("dnOsuCc", ""), "wait": ("p", "p"),
+                "printf": ("v", "v")}
+
+
+def _short_split(args: list[str], takes: str) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """短选项簇按 getopt 的规则拆开（``-raNAME``、``-vNAME``、``-u 3``）：返回 ([(字母, 值)], 位置参数)。"""
+    opts: list[tuple[str, str | None]] = []
+    pos: list[str] = []
+    i = 0
+    while i < len(args):
+        x = args[i]
+        if x == "--":
+            pos += args[i + 1:]
+            break
+        if not x.startswith("-") or x == "-":
+            pos.append(x)
+            i += 1
+            continue
+        for j, c in enumerate(x[1:], start=1):
+            if c in takes:
+                val = x[j + 1:]
+                if not val and i + 1 < len(args):
+                    i += 1
+                    val = args[i]
+                opts.append((c, val))
+                break
+            opts.append((c, None))
+        i += 1
+    return opts, pos
 
 
 def _var_setters(cmd: str, args: list[str], a: CommandAnalysis) -> None:
-    """给变量赋运行时才知道的值（read、mapfile、getopts），或者清空它（unset）。"""
+    """给变量赋运行时才知道的值（read、mapfile、getopts、printf -v、wait -p），或者清空它（unset）。"""
     if cmd == "unset":
         for x in args:
             if re.fullmatch(r"[A-Za-z_]\w*", x):
@@ -913,22 +961,23 @@ def _var_setters(cmd: str, args: list[str], a: CommandAnalysis) -> None:
         for x in args[1:2]:
             _set_unknown(x, a)
         return
-    if cmd in ("mapfile", "readarray") and any(x.startswith("-C") for x in args):
+    takes, named = _SETTER_OPTS[cmd]
+    opts, pos = _short_split(args, takes)
+    if cmd in ("mapfile", "readarray") and any(c == "C" for c, _ in opts):
         a.bump("external", f"{cmd} -C 会执行回调命令，无法静态分析")
         a.inline = True
-    takes = {"-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"} if cmd == "read" else {"-d", "-n", "-O", "-s", "-u", "-C", "-c"}
-    names, i = [], 0
-    while i < len(args):
-        if args[i] in takes:
-            if args[i] == "-a" and i + 1 < len(args):   # read -a 数组名
-                names.append(args[i + 1])
-            i += 2
-            continue
-        if not args[i].startswith("-"):
-            names.append(args[i])
-        i += 1
-    for n in names or ["REPLY" if cmd == "read" else "MAPFILE"]:
+    names = [v for c, v in opts if c in named and v]
+    if cmd in ("read", "mapfile", "readarray"):
+        names += pos[:None if cmd == "read" else 1] or ([] if names else ["REPLY" if cmd == "read" else "MAPFILE"])
+    for n in names:
         _set_unknown(n, a)
+
+
+def _forget(a: CommandAnalysis) -> None:
+    """source 的脚本、alias 之类改了什么看不到：赋过值的变量都可能变成任何值，当前目录也可能换了。"""
+    for name in list(a.vars):
+        _add_values(name, [None], a)
+    _add_cwd(None, a)
 
 
 def _root_hit(t: str, a: CommandAnalysis, depth: int) -> str | None:
@@ -1109,7 +1158,7 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
     for words in _substitute(expanded, a):
         a.budget[0] -= 1
         if a.budget[0] < 0:
-            a.bump("external", _OVER_BUDGET)
+            a.flag_catastrophic(_OVER_BUDGET)
             return
         _classify_words(words, a)
 
@@ -1170,6 +1219,12 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
         _watch(args, a)
     elif cmd in ("source", "."):
         a.bump("external", f"{cmd} 执行脚本文件，内容无法静态分析")
+        _forget(a)
+    elif cmd == "alias":   # shopt -s expand_aliases 之后，alias ls='rm -rf ~' 让 ls 执行的就是 rm -rf ~
+        for x in args:
+            if "=" in x and not x.startswith("-"):
+                _recurse(x.split("=", 1)[1], a, "alias", mode="same")
+        a.bump("write", "alias 定义别名")
     elif cmd in ("cd", "pushd", "popd"):
         _chdir(cmd, args, a)
         a.bump("read", f"{cmd} 切换目录")
@@ -1255,8 +1310,8 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
         a.bump("write", f"{cmd} 可能修改文件或执行代码")
         _embedded_catastrophe(cmd, args, a)
     elif cmd in READ_CMDS:
-        if cmd == "printf" and args[:1] == ["-v"] and len(args) > 1:
-            _set_unknown(args[1], a)
+        if cmd == "printf":
+            _var_setters(cmd, args, a)
         risk = _read_options(cmd, args)
         if risk:
             a.bump(*risk)
@@ -1528,7 +1583,7 @@ def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child") 
         a.bump("external", f"{via} 嵌套过深或内容为空，无法静态分析")
         return
     if a.budget[0] <= 0:
-        a.bump("external", _OVER_BUDGET)
+        a.flag_catastrophic(_OVER_BUDGET)
         return
     if mode != "sub":
         script = _apply_prefix(script, a)

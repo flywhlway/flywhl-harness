@@ -633,10 +633,34 @@ def test_globs_too_wide_to_check_fail_closed(ws):
 
 
 def test_self_referencing_values_do_not_stall_the_analysis():
-    """取值里又引用变量、层层 bash -c：组合数是 16 的三次方。整棵递归共用一份预算，超了按“无法静态分析”处理。"""
+    """取值里又引用变量、层层 bash -c：组合数是 16 的三次方。整棵递归共用一份预算，超了任何模式都拒绝——
+    剩下的段没分析，后面可能就跟着 rm -rf ~。"""
     vals = ("A='bash -c \"$A $B; $B $A\"';" + ";".join(f"A=v{i}" for i in range(7)) + ";"
             "B='eval \"$B $A\"';" + ";".join(f"B=w{i}" for i in range(7)) + "; export A B; ")
     started = time.perf_counter()
-    a = analyze(vals + "; ".join(['bash -c "$A $B; $B $A"'] * 16))
+    a = analyze(vals + "; ".join(['bash -c "$A $B; $B $A"'] * 16) + "; rm -rf ~")
     assert time.perf_counter() - started < 10
-    assert a.level == "external" and any("组合太多" in r for r in a.reasons), a.reasons
+    assert a.catastrophic and "组合太多" in a.catastrophic_reason, a.catastrophic_reason
+
+
+def test_truncated_value_combinations_fail_closed_on_risky_values():
+    """取值组合超过 16 种时只逐个分析前 16 种：截掉的取值里有根目录、家目录这类值就拒绝，其余按无法静态分析处理。"""
+    many = ";".join(f"A=a{i}" for i in range(8)) + ";" + ";".join(f"B=b{i}" for i in range(7))
+    a = analyze(many + "; B=~; rm -rf $A $B")
+    assert a.catastrophic and "~" in a.catastrophic_reason, a.catastrophic_reason
+    a = analyze("for f in a b c d e f g h i j; do cp $f $f.bak; done")
+    assert a.level == "external" and not a.catastrophic, a.reasons
+
+
+@pytest.mark.parametrize("cmd", [
+    "D=build; read -raD <<< x; rm -rf $D/*",      # 选项与变量名写在一起
+    "D=build; wait -p D; rm -rf $D/*",
+    "D=build; printf -vD x; rm -rf $D/*",
+    "D=build; source env.sh; rm -rf $D/*",         # 脚本里改了什么看不到
+    "IFS=x; C=rmx-rfx~; $C",                       # 改了 IFS，展开后按 x 拆词
+    "IFS=$(printf x); C=y; $C",
+    "alias ls='rm -rf ~'; ls",
+])
+def test_hidden_variable_changes_are_not_trusted(cmd):
+    a = analyze(cmd)
+    assert a.catastrophic, (cmd, a.reasons)
