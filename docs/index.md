@@ -52,6 +52,7 @@ features:
 
 | 你想… | 从这里开始 |
 |---|---|
+| 半小时抓住要点 | [精简手册](/manual/)：7 页、万字以内，浓缩理论、架构、关键机制、安全与实战 |
 | 先建立整体概念 | [01 什么是 Harness](/guide/what-is-harness) → [03 架构总览](/guide/architecture) |
 | 边跑边学 | [02 快速上手](/guide/quickstart)，然后打开 Web UI 右侧的“运行 / 上下文 / 事件 / 会话树” |
 | 深入某个机制 | 按 [知识地图](/reference/knowledge-map) 找到对应章节、源码与可运行示例 |
