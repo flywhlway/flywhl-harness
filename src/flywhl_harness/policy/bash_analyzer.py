@@ -122,6 +122,7 @@ _HOME_MARK = "/\0home"   # 路径运算时，家目录记成根下的一个占�
 # shell 不展开的 $（单引号里、\$、$'...' 解出来的）：shlex 去掉引号之后就分不出来了，_bash_lines 先换成这个字符，
 # 变量代入时跳过它；交给 sh -c / eval 递归分析时、写进原因与分段时换回 $
 _LIT = ""
+_DRIFT = "\ue025"   # IFS 的取值里有它：source 执行的脚本可能改了 IFS，见 _drift_variants
 _BRACE_RANGE = re.compile(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])")
 _BRACE_LIMIT = 64                                      # 展开结果的上限：{a,b}{a,b}…… 会指数膨胀
 
@@ -178,6 +179,8 @@ class CommandAnalysis:
     budget: list = field(default_factory=lambda: [_WORK_LIMIT], repr=False)   # 还能逐个分析几段（取值组合也算）
     prefix: dict = field(default_factory=dict, repr=False)        # 当前这条命令的前置赋值（FOO=bar cmd）
     traps: list = field(default_factory=list, repr=False)          # trap 的命令与设下时一定赋过值的变量
+    # 命令里定义的别名与函数：名字 → ("alias", 值) / ("func", 函数体的词，写法认不出时为 None)，调用处再分析一遍
+    defs: dict = field(default_factory=dict, repr=False)
 
     def bump(self, level: str, reason: str) -> None:
         """提升风险等级。决定最终等级的原因排在最前面（reasons[0] 就是“为什么这么判”）。"""
@@ -207,10 +210,11 @@ class CommandAnalysis:
 
 def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _scope: tuple | None = None) -> CommandAnalysis:
     """分析命令风险。传入 workspace 时，指向工作区内部的绝对路径按工作区内路径处理。
-    ``_scope`` 是递归分析时从外层带进来的 (变量取值, 一定赋过的, 导出的, 当前目录, 路径缓存, 分析预算)，后两样整棵递归共用。"""
+    ``_scope`` 是递归分析时从外层带进来的 (变量取值, 一定赋过的, 导出的, 当前目录, 路径缓存, 分析预算, 别名与函数)，
+    缓存与预算整棵递归共用。"""
     a = CommandAnalysis(command=command, workspace=workspace, depth=_depth)
     if _scope:
-        values, sure, exported, cwds, a.cache, a.budget = _scope
+        values, sure, exported, cwds, a.cache, a.budget, a.defs = _scope
         a.vars, a.sure, a.exported, a.cwds = {k: list(v) for k, v in values.items()}, set(sure), set(exported), list(cwds)
     if workspace:
         # 工作区根目录本身（ls /ws）和它下面的路径（cat /ws/app.py、>/ws/out、@/ws/body.json）都换成相对写法。
@@ -247,9 +251,11 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
         a.bump("external", f"命令无法解析：{e}")
         return a
 
+    toks = _split_operators(tokens) + [";"]
+    _function_defs(toks, a)
     flow = _Flow(a)
     segment: list[str] = []
-    for tok in _split_operators(tokens) + [";"]:
+    for tok in toks:
         if tok in SEPARATORS:
             if segment:
                 a.segments.append(" ".join(segment).replace(_LIT, "$"))
@@ -679,9 +685,10 @@ def _prefix(word: str, a: CommandAnalysis) -> None:
 
 
 def _scope_for(a: CommandAnalysis, mode: str) -> tuple:
-    """递归分析时带进去的作用域：child（新进程）里没导出的变量可能是空的。"""
+    """递归分析时带进去的作用域：child（新进程）里没导出的变量可能是空的；same（eval、调用别名与函数）里定义的
+    别名与函数留到后面。"""
     sure = a.sure & a.exported if mode == "child" else a.sure
-    return a.vars, sure, a.exported, a.cwds, a.cache, a.budget
+    return a.vars, sure, a.exported, a.cwds, a.cache, a.budget, a.defs if mode == "same" else dict(a.defs)
 
 
 _LIT_REF = re.compile(_LIT + r"(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
@@ -766,7 +773,15 @@ def _word_values(w: str, a: CommandAnalysis) -> list[str]:
     parts.append([w[pos:]])
     out = list(dict.fromkeys("".join(c) for c in itertools.islice(itertools.product(*parts), _VARIANT_LIMIT + 1)))
     if len(out) > _VARIANT_LIMIT:
-        a.bump("external", f"{w} 里变量取值的组合太多，无法逐个分析")
+        # 只往下传前 _VARIANT_LIMIT 种：截掉的取值同样要看，有根目录、家目录这类取值，或者多到查不过来，都拒绝
+        total = math.prod(len(p) for p in parts)
+        risky = None if total > _WORK_LIMIT else next(
+            (v for c in itertools.product(*parts) if _risky_value(v := "".join(c), a)), None)
+        if total > _WORK_LIMIT or risky:
+            a.flag_catastrophic(f"{w} 里变量取值的组合太多（{total} 种）" + (f"，其中有 {risky} 这样的取值" if risky else "") +
+                                "，无法逐个确认它不是根目录、家目录、块设备或凭证位置；请拆成几条命令")
+        else:
+            a.bump("external", f"{w} 里变量取值的组合太多，无法逐个分析")
     return out[:_VARIANT_LIMIT]
 
 
@@ -778,8 +793,9 @@ def _substitute(words: list[str], a: CommandAnalysis) -> list[list[str]]:
         return [words]
     ifs = a.vars.get("IFS") or []
     if None in ifs:
-        a.flag_catastrophic("IFS 的值要到运行时才知道，变量展开后怎么拆成词无法静态判断；不要改 IFS，或者给变量加上引号")
-    sep = re.compile(r"[\s%s]+" % re.escape("".join({c for v in ifs if v for c in v})))   # IFS=/ 时 /bin/rm 拆成 bin rm
+        a.flag_catastrophic("IFS 被赋了运行时才知道的值，变量展开后怎么拆成词无法静态判断；不要这样改 IFS")
+    # IFS=/ 时 /bin/rm 拆成 bin rm
+    sep = re.compile(r"[\s%s]+" % re.escape("".join({c for v in ifs if v and v != _DRIFT for c in v})))
     choices: list[list[tuple[str, ...]]] = []
     for w in words:
         opts: list[tuple[str, ...]] = []
@@ -792,7 +808,7 @@ def _substitute(words: list[str], a: CommandAnalysis) -> list[list[str]]:
     if total > _VARIANT_LIMIT:
         # 只分析前 _VARIANT_LIMIT 种：截掉的组合里若有危险的取值，宁可拒绝，也不能当作没看见
         risky = next((x for w, c in zip(words, choices) if "$" in w for opt in c for v in opt for x in v.split()
-                      if _risky_value(x)), None)
+                      if _risky_value(x, a)), None)
         if risky:
             a.flag_catastrophic(f"变量取值的组合太多（{total} 种），其中有 {risky} 这样的取值（根目录、家目录、块设备或凭证位置），"
                                 "无法逐个确认；请拆成几条命令")
@@ -801,11 +817,50 @@ def _substitute(words: list[str], a: CommandAnalysis) -> list[list[str]]:
     return [[x for part in combo for x in part] for combo in itertools.islice(itertools.product(*choices), _VARIANT_LIMIT)]
 
 
-def _risky_value(v: str) -> bool:
-    """变量取值本身（或者其中的变量为空时）是根目录、家目录及其下一级、块设备或凭证位置。"""
-    if _BLOCK_DEV.match(v) or CREDENTIAL_HINTS.search(v):
+def _risky_value(v: str, a: CommandAnalysis) -> bool:
+    """变量取值本身（或者其中的变量为空时）是根目录、家目录及其下一级、块设备或凭证位置。相对路径按可能的当前目录
+    拼起来判断（cd /tmp 之后的 ../*）；当前目录不知道在哪时，.. 开头的相对路径哪里都能到。"""
+    if _BLOCK_DEV.match(v) or CREDENTIAL_HINTS.search(v) or _root_hit(v, a, 1):
         return True
-    return any(form and (d := _root_depth(form)) is not None and d <= 1 for form in (v, _empty_variant(v)[0]))
+    return None in a.cwds and v.startswith("..")
+
+
+def _drift_tokens(v: str) -> list[str]:
+    """IFS 被改过时，v 拆成词后可能出现的根目录、家目录或它们下一级：a:/ 在 IFS 含 : 时拆出 /，x,/usr 在 IFS 含 ,
+    时拆出 /usr。拆出的词前后的字符就是 IFS 里的字符，它们不能出现在这个词里面。只算标点、空白这类分隔符：
+    把字母、数字设成 IFS（/tmp/x 在 IFS 含 t 时拆出 /）只出现在刻意混淆的命令里，那要靠系统沙箱兜底。"""
+    w = _to_abs(v)[:128]
+    out = []
+
+    def sep(c: str, t: str) -> bool:
+        return not (c.isalnum() or c in "_\0" or c in t)   # \0 是家目录占位，代表家目录路径里的字符
+    for i, c in enumerate(w):
+        if c != "/" or (i and not sep(w[i - 1], "/")):
+            continue
+        for j in range(i + 1, len(w) + 1):
+            t = w[i:j]
+            if (i and not sep(w[i - 1], t)) or (j < len(w) and not sep(w[j], t)):
+                continue
+            if (d := _root_depth(t)) is not None and d <= 1 and "\0" not in (t := _from_abs(t)):
+                out.append(t)
+    return out
+
+
+def _drift_variants(words: list[str], a: CommandAnalysis) -> list[list[str]]:
+    """source 执行的脚本可能把 IFS 改成了任意字符（见 _forget），变量展开后的拆法无法一一列举。补两份最要紧的：
+    按标点拆开（C=rm:-rf:/ 在 IFS=: 时执行的是 rm -rf /），以及拆出根目录、家目录或它们下一级的那种。"""
+    split: list[str] = []
+    risky: list[str] = []
+    for w in words:
+        vals = [v for v in _word_values(w, a) if v != w] if "$" in w else []
+        if not vals:
+            split.append(w)
+            risky.append(w)
+            continue
+        split += [x for x in re.split(r"[^\w./~-]+", vals[0]) if x] if not any(c.isspace() for c in w) else [vals[0]]
+        toks = [t for v in vals for t in _drift_tokens(v)]
+        risky.append(min(toks, key=lambda t: _root_depth(t)) if toks else vals[0])
+    return [split, risky]
 
 
 def _opaque(word: str, a: CommandAnalysis) -> bool:
@@ -974,10 +1029,81 @@ def _var_setters(cmd: str, args: list[str], a: CommandAnalysis) -> None:
 
 
 def _forget(a: CommandAnalysis) -> None:
-    """source 的脚本、alias 之类改了什么看不到：赋过值的变量都可能变成任何值，当前目录也可能换了。"""
+    """source 的脚本改了什么看不到：赋过值的变量都可能变成任何值，当前目录也可能换了，IFS 也可能改了。
+    IFS 不记成“值未知”（那样之后每个变量展开都得拒绝），按 _drift_variants 补几种拆法。"""
     for name in list(a.vars):
-        _add_values(name, [None], a)
+        _add_values(name, [_DRIFT if name == "IFS" else None], a)
+    _add_values("IFS", [_DRIFT], a)
     _add_cwd(None, a)
+
+
+# ---------------------------------------------------------------------- 别名与函数
+def _function_defs(toks: list[str], a: CommandAnalysis) -> None:
+    """记下命令里定义的函数（``f() { ...; }``、``function f { ...; }``、``f() ( ... )``）。定义处照常逐段分析一遍，
+    那时位置参数不知道是什么；调用处（``f ~``）再代入这次的参数分析，见 _call。只认 { } 与 ( ) 函数体。"""
+    for i, t in enumerate(toks):
+        if t == "function" and i + 1 < len(toks):
+            name, j = toks[i + 1], i + 2
+            j += 2 if toks[j:j + 2] == ["(", ")"] else 0
+        elif toks[i + 1:i + 3] == ["(", ")"] and (i == 0 or toks[i - 1] in SEPARATORS or toks[i - 1] in RESERVED):
+            name, j = t, i + 3
+        else:
+            continue
+        if not re.fullmatch(r"[\w.:@%+,-]+", name) or name in RESERVED:
+            continue
+        pair = {"{": "}", "(": ")"}.get(toks[j] if j < len(toks) else "")
+        if pair is None:
+            a.defs[name] = ("func", None)
+            continue
+        depth, k = 0, j
+        while k < len(toks):
+            depth += (toks[k] == toks[j]) - (toks[k] == pair)
+            if depth == 0:
+                break
+            k += 1
+        a.defs[name] = ("func", toks[j + 1:k])
+
+
+def _call(name: str, args: list[str], a: CommandAnalysis) -> None:
+    """调用命令里定义过的别名或函数：别名换成它的值再接上参数（``alias r='rm -rf'; r ~``），函数体代入这次的参数
+    （``f() { rm -rf "$@"; }; f ~``），在当前 shell 里再分析一遍。分析时先拿掉这个名字：bash 不会在别名的值里
+    再展开同一个别名（``alias ls='ls -F'``），函数递归调用自己也不必再分析一遍。"""
+    args = [w for k, w in enumerate(args) if not _OPERATOR.fullmatch(w) and not (k and _OPERATOR.fullmatch(args[k - 1]))]
+    kind, body = a.defs.pop(name)
+    try:
+        if kind == "alias":
+            # 值里单引号中的 $ 在用到别名时照样展开，不是留给子 shell 的：先换回 $，免得被当作前置赋值代入
+            _recurse(f"{body.replace(_LIT, '$')} {_requote(args)}", a, f"别名 {name}", mode="same")
+        elif body is None:
+            a.bump("external", f"函数 {name} 的写法认不出，调用时执行什么无法静态分析")
+        elif body:
+            _recurse(_bind_args(body, args), a, f"函数 {name}", mode="same")
+    finally:
+        a.defs.setdefault(name, (kind, body))
+
+
+_POS_REF = re.compile(r"\$(?:\{([0-9]+|[@*#])\}|([0-9@*#]))")
+
+
+def _bind_args(body: list[str], args: list[str]) -> str:
+    """函数体的词代入这次调用的参数（$1、${2}、$@、$*、$#），拼回一条命令。``shift`` 不跟踪：参数只多不少，宁可多判。"""
+    def one(m: re.Match) -> str:
+        k = m.group(1) or m.group(2)
+        if k in ("@", "*"):
+            return " ".join(args)
+        if k == "#":
+            return str(len(args))
+        n = int(k)
+        return m.group(0) if n == 0 else args[n - 1] if n <= len(args) else ""
+    out = []
+    for t in body:
+        if _OPERATOR.fullmatch(t) or t in RESERVED:
+            out.append(t)
+        elif t in ("$@", "${@}", "$*", "${*}"):   # "$@"：每个参数各是一个词
+            out.append(_requote(args))
+        else:
+            out.append(_requote([_POS_REF.sub(one, t)]))
+    return " ".join(out)
 
 
 def _root_hit(t: str, a: CommandAnalysis, depth: int) -> str | None:
@@ -1155,12 +1281,18 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
             a.bump("external", "花括号展开的结果过多，无法静态分析")
         expanded.extend(words)
     # 然后是变量展开：命令里赋过值的按每种取值各分析一遍（C=rm; $C -rf ~ 实际执行的是 rm -rf ~）
-    for words in _substitute(expanded, a):
+    variants = _substitute(expanded, a)
+    drift = _drift_variants(expanded, a) if _DRIFT in (a.vars.get("IFS") or ()) else []
+    for words in variants + [d for d in drift if d not in variants]:
         a.budget[0] -= 1
         if a.budget[0] < 0:
             a.flag_catastrophic(_OVER_BUDGET)
             return
+        was = a.catastrophic
         _classify_words(words, a)
+        if a.catastrophic and not was and words not in variants:
+            a.catastrophic_reason = (f"source 执行的脚本可能改了 IFS，变量展开后可能拆成 {' '.join(words)}："
+                                     f"{a.catastrophic_reason}")
 
 
 def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
@@ -1171,6 +1303,10 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
     words = _unwrap(expanded, a)
     if not words:
         return
+    if m := re.fullmatch(r"BASH_ALIASES\[['\"]?([^\]'\"]+)['\"]?\]=(.*)", words[0], re.S):   # 另一种定义别名的写法
+        words = ["alias", f"{m[1]}={m[2]}"]
+    if words[0] in a.defs:
+        _call(words[0], words[1:], a)
     cmd = words[0].rsplit("/", 1)[-1]
     args = words[1:]
 
@@ -1223,7 +1359,9 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
     elif cmd == "alias":   # shopt -s expand_aliases 之后，alias ls='rm -rf ~' 让 ls 执行的就是 rm -rf ~
         for x in args:
             if "=" in x and not x.startswith("-"):
-                _recurse(x.split("=", 1)[1], a, "alias", mode="same")
+                name, _, value = x.partition("=")
+                a.defs[name] = ("alias", value)   # 用到时接上参数再分析（alias r='rm -rf'; r ~），见 _call
+                _recurse(value, a, "alias", mode="sub")
         a.bump("write", "alias 定义别名")
     elif cmd in ("cd", "pushd", "popd"):
         _chdir(cmd, args, a)

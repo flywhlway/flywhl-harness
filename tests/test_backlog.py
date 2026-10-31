@@ -660,7 +660,52 @@ def test_truncated_value_combinations_fail_closed_on_risky_values():
     "IFS=x; C=rmx-rfx~; $C",                       # 改了 IFS，展开后按 x 拆词
     "IFS=$(printf x); C=y; $C",
     "alias ls='rm -rf ~'; ls",
+    "source env.sh; D=a:/; rm -rf $D",            # 脚本可能改了 IFS：按标点拆出根目录
+    "source env.sh; C=rm:-rf:/; $C",
 ])
 def test_hidden_variable_changes_are_not_trusted(cmd):
     a = analyze(cmd)
     assert a.catastrophic, (cmd, a.reasons)
+
+
+def test_source_does_not_make_every_expansion_fatal():
+    """source 之后 IFS 可能被改过，但只补按标点拆的几种：之后的变量展开照常可用，字母当 IFS 属于刻意混淆。"""
+    for cmd in ("source .venv/bin/activate && echo $VIRTUAL_ENV && pytest $ARGS",
+                "source a.sh; source b.sh; X=1; echo $X",
+                "source env.sh; D=/tmp/build; rm -rf $D"):
+        a = analyze(cmd)
+        assert not a.catastrophic, (cmd, a.catastrophic_reason)
+
+
+@pytest.mark.parametrize("cmd", [
+    "shopt -s expand_aliases\nalias r='rm -rf'\nr ~",
+    "alias r='rm -rf'; r ~",
+    "alias s='sudo '; alias r='rm -rf'; s r ~",     # 以空格结尾的别名，下一个词同样按别名展开
+    "BASH_ALIASES[r]='rm -rf'; r ~",
+    'f() { rm -rf "$@"; }; f ~',
+    "function f { rm -rf $1/*; }; f /",
+    'f() ( rm -rf "$1" ); f ~',
+    "eval 'g() { rm -rf \"$@\"; }'; g ~",
+    'f() { g "$@"; }; g() { rm -rf "$@"; }; f ~',
+])
+def test_aliases_and_functions_are_checked_where_they_are_called(cmd):
+    """定义处只看得到 rm -rf 和位置参数，删什么要到调用处才知道：接上这次的参数再分析一遍。"""
+    a = analyze(cmd)
+    assert a.catastrophic and ("~" in a.catastrophic_reason or "/" in a.catastrophic_reason), (cmd, a.reasons)
+
+
+def test_harmless_aliases_and_functions_stay_harmless():
+    for cmd in ("alias ll='ls -l'; ll", "alias ls='ls -F'; ls", 'f() { rm -rf "$@"; }; f build', "f() { f; }; f",
+                "f() { echo hi; }; f > out.txt"):
+        a = analyze(cmd)
+        assert not a.catastrophic, (cmd, a.catastrophic_reason)
+
+
+def test_truncated_values_are_checked_against_the_current_directory():
+    """截掉的取值按可能的当前目录判断：cd /tmp 之后的 ../* 就是 /*。一个词里的组合截断同样检查。"""
+    many_a = ";".join(f"A=x{i}" for i in range(7))
+    many_b = ";".join(f"B=y{i}" for i in range(7))
+    a = analyze(f"cd /tmp; {many_a}; A=..; {many_b}; B=/*; rm -rf $A$B")
+    assert a.catastrophic and "组合太多" in a.catastrophic_reason, a.reasons
+    a = analyze(f"cd /tmp; {many_a}; A=../*; {many_b}; B=y7; rm -rf $A $B")   # ../* 排在第 57 种之后
+    assert a.catastrophic and "../*" in a.catastrophic_reason, a.reasons
