@@ -254,12 +254,11 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
         return a
 
     toks = _split_operators(tokens) + [";"]
-    defs_at = _function_defs(toks)
+    for name, body in _function_defs(toks):   # 一开始全部登记：循环里可能先调用、下一轮才用上后面的定义
+        _define(name, ("func", body), a)
     flow = _Flow(a)
     segment: list[str] = []
-    for idx, tok in enumerate(toks):
-        for name, body in defs_at.get(idx, ()):   # 执行到定义处才生效：之前的调用用不到它
-            _define(name, ("func", body), a)
+    for tok in toks:
         if tok in SEPARATORS:
             if segment:
                 a.segments.append(" ".join(segment).replace(_LIT, "$"))
@@ -808,7 +807,7 @@ def _substitute(words: list[str], a: CommandAnalysis, drift: str | None = None) 
         for v in _word_values(w, a):
             opts.append((v,))
             if v != w and not any(c.isspace() for c in w) and (not v or sep.search(v)):
-                opts.append(tuple(x for x in sep.split(v) if x))
+                opts.append(tuple(_split_value(v, sep)))
         choices.append(list(dict.fromkeys(opts)))
     total = math.prod(len(c) for c in choices)
     if total > _VARIANT_LIMIT:
@@ -821,6 +820,17 @@ def _substitute(words: list[str], a: CommandAnalysis, drift: str | None = None) 
         else:
             a.bump("external", f"变量取值的组合太多（{total} 种），无法逐个分析")
     return [[x for part in combo for x in part] for combo in itertools.islice(itertools.product(*choices), _VARIANT_LIMIT)]
+
+
+def _split_value(v: str, sep: re.Pattern) -> list[str]:
+    """按 IFS 拆开一个取值。取值里家目录的写法（~/x）在赋值时已经展开成真实路径：分隔符落在家目录路径里时
+    （IFS=/），先换成真实路径再拆，拆出来的是 Users、me 这样的相对词，不是 ~。"""
+    m = re.match(r"(~[^/]*|\$HOME|\$\{HOME\})(?=/|$)", v)
+    if m:
+        home = os.path.expanduser(m.group(0)) if m.group(0).startswith("~") else _real_home()
+        if sep.search(home):
+            v = home + v[m.end():]
+    return [x for x in sep.split(v) if x]
 
 
 def _risky_value(v: str, a: CommandAnalysis) -> bool:
@@ -900,9 +910,25 @@ def _empty_variant(word: str) -> tuple[str, list[str]]:
     return _VAR_REF.sub(one, word), list(dict.fromkeys(names))
 
 
+def _real_home() -> str:
+    """当前账户的家目录。取账户数据库里的，不取 HOME 环境变量：测试、hook 会改 HOME，账户的真实家目录不变。"""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_dir.rstrip("/") or "/"
+    except (ImportError, KeyError):
+        return os.path.expanduser("~").rstrip("/") or "/"
+
+
+# 字面写出的家目录同样是家目录：rm -rf /Users/me 和 rm -rf ~ 是一回事，模型常从 pwd 的输出里抄来绝对路径
+_HOME_FORMS = re.compile(r"^(~[^/]*|\$HOME|\$\{HOME\}|/Users/[^/]+|/home/[^/]+|/root|/var/root|%s)(?=/|$)"
+                         % re.escape(_real_home()))
+
+
 def _to_abs(p: str) -> str:
-    """家目录的写法（~、~user、$HOME、${HOME}）换成根下的占位目录，好和绝对路径一起做路径运算。"""
-    return re.sub(r"^(~[^/]*|\$HOME|\$\{HOME\})(?=/|$)", lambda m: _HOME_MARK, p)
+    """家目录的写法（~、~user、$HOME、${HOME}，以及 /Users/<名字>、/home/<名字>、/root 这类字面路径）换成根下的
+    占位目录，好和绝对路径一起做路径运算。"""
+    return _HOME_FORMS.sub(lambda m: _HOME_MARK, p)
 
 
 def _from_abs(p: str) -> str:
@@ -1043,14 +1069,13 @@ def _forget(a: CommandAnalysis) -> None:
 
 # ---------------------------------------------------------------------- 别名与函数
 _CALL_LIMIT = 8   # 别名、函数层层调用最多展开几层，再深就拒绝
-_POSITIONAL = ["@", "*", "#", *map(str, range(1, 10))]
 
 
-def _function_defs(toks: list[str]) -> dict[int, list[tuple[str, list[str] | None]]]:
-    """命令里的函数定义（``f() { ...; }``、``function f { ...; }``、``f() ( ... )``），按定义开始处的位置记下：
-    执行到那里才生效。定义处照常逐段分析一遍（那时位置参数不知道是什么）；调用处（``f ~``）再代入这次的参数
-    分析，见 _call。只认 { } 与 ( ) 函数体，认不出的记成 None。"""
-    out: dict[int, list] = {}
+def _function_defs(toks: list[str]) -> list[tuple[str, list[str] | None]]:
+    """命令里的函数定义（``f() { ...; }``、``function f { ...; }``、``f() ( ... )``）。定义处照常逐段分析一遍
+    （那时位置参数不知道是什么）；调用处（``f ~``）再代入这次的参数分析，见 _call。不管先后，调用处每个同名定义
+    都算：分支、循环里先调用后定义都可能用上。只认 { } 与 ( ) 函数体，认不出的记成 None。"""
+    out: list[tuple[str, list[str] | None]] = []
     for i, t in enumerate(toks):
         head = i == 0 or toks[i - 1] in SEPARATORS or toks[i - 1] in RESERVED   # 只认命令位置上的
         if t == "function" and head and i + 1 < len(toks):
@@ -1072,7 +1097,7 @@ def _function_defs(toks: list[str]) -> dict[int, list[tuple[str, list[str] | Non
                     break
                 k += 1
             body = toks[j + 1:k]
-        out.setdefault(i, []).append((name, body))
+        out.append((name, body))
     return out
 
 
@@ -1113,10 +1138,23 @@ def _call(name: str, args: list[str], a: CommandAnalysis) -> None:
         a.defs[name] = defs + [d for d in later if d not in defs]
 
 
+def _moves_positional(body: list[str], a: CommandAnalysis) -> bool:
+    """函数体可能挪动或重设位置参数：含 shift / set / getopts 字样的词（``eval "shift 2"``、``builtin shift``）、
+    ``${@:n}`` 截取，或者命令位置上是 eval、source、变量（``$CMD`` 可能就是 shift）、别名。宁可多算几份。"""
+    for i, t in enumerate(body):
+        if re.search(r"shift|set|getopts|\$\{[@*]:", t):
+            return True
+        head = i == 0 or body[i - 1] in SEPARATORS or body[i - 1] in RESERVED
+        if head and (t in ("eval", "source", ".") or "$" in t or
+                     any(kind == "alias" for kind, _ in a.defs.get(t, ()))):
+            return True
+    return False
+
+
 def _arg_views(body: list[str], args: list[str], a: CommandAnalysis) -> list[list[str]]:
-    """这次调用里位置参数可能的样子。函数体里有 shift、set、getopts、``${@:n}`` 时，$1 可能是后面任何一个参数：
+    """这次调用里位置参数可能的样子。函数体可能挪动位置参数时（见 _moves_positional），$1 可能是后面任何一个参数：
     去掉前 0、1、2……个各算一份，``set -- 词…`` 写明的词另算一份。"""
-    if not any(t in ("shift", "set", "getopts") or "${@:" in t or "${*:" in t for t in body):
+    if not _moves_positional(body, a):
         return [args]
     views = [args[k:] for k in range(len(args) + 1)]
     for i, t in enumerate(body[:-1]):
@@ -1135,10 +1173,12 @@ def _arg_views(body: list[str], args: list[str], a: CommandAnalysis) -> list[lis
 
 
 def _bind_positional(args: list[str], a: CommandAnalysis) -> dict:
-    """把位置参数（$1……$9、$@、$*、$#）当作一定赋过值的变量绑上这次的参数，返回原来的样子供恢复。"""
-    saved = {n: (a.vars.get(n), n in a.sure) for n in _POSITIONAL}
+    """把位置参数（$1、${10}……、$@、$*、$#）当作一定赋过值的变量绑上这次的参数，返回原来的样子供恢复。
+    参数个数之后的 ${N} 是空的：至少绑到 $9，再往后没绑的按“可能为空、值未知”处理。"""
+    names = ["@", "*", "#", *map(str, range(1, max(9, len(args)) + 1))]
+    saved = {n: (a.vars.get(n), n in a.sure) for n in names}
     joined = " ".join(args)
-    for n in _POSITIONAL:
+    for n in names:
         v = joined if n in ("@", "*") else str(len(args)) if n == "#" else (args[int(n) - 1] if int(n) <= len(args) else "")
         a.vars[n] = [v]
         a.sure.add(n)
@@ -1152,7 +1192,7 @@ def _restore_positional(saved: dict, a: CommandAnalysis) -> None:
         else:
             a.vars[n] = vals
         (a.sure.add if sure else a.sure.discard)(n)
-    a.assigned -= set(_POSITIONAL)
+    a.assigned -= set(saved)
 
 
 def _body_text(body: list[str]) -> str:

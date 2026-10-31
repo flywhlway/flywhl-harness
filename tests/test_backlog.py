@@ -696,6 +696,11 @@ def test_source_does_not_make_every_expansion_fatal():
     'f() { rm -rf "${@:2}"; }; f build ~',
     'f() { rm -rf "${1:-/}"; }; f',
     "; ".join(f"g{i}() {{ g{i + 1} \"$@\"; }}" for i in range(4)) + '; g4() { rm -rf "$@"; }; g0 ~',   # 不占 sh -c 的递归深度
+    'for i in 1 2; do f ~; f() { rm -rf "$@"; }; done',                 # 第二轮循环用上后面的定义
+    'f() { rm -rf "${10}"; }; f 1 2 3 4 5 6 7 8 9 ~',
+    'f() { eval "shift 2"; rm -rf "$1"; }; f a b ~',                     # 间接的 shift
+    'f() { S=shift; $S; rm -rf "$1"; }; f a ~',
+    "alias s=shift; f() { s; rm -rf \"$1\"; }; f a ~",
 ])
 def test_aliases_and_functions_are_checked_where_they_are_called(cmd):
     """定义处只看得到 rm -rf 和位置参数，删什么要到调用处才知道：接上这次的参数再分析一遍。"""
@@ -706,9 +711,23 @@ def test_aliases_and_functions_are_checked_where_they_are_called(cmd):
 def test_harmless_aliases_and_functions_stay_harmless():
     for cmd in ("alias ll='ls -l'; ll", "alias ls='ls -F'; ls", 'f() { rm -rf "$@"; }; f build', "f() { f; }; f",
                 "f() { echo hi; }; f > out.txt", 'f() { shift; rm -rf "$1"; }; f a b', "f() { g; }; g() { f; }; f",
-                "echo function f { echo hi; }; f ~"):
+                "echo function f { echo hi; }; f ~", 'f() { rm -rf "$1"; }; f build ~/notes',
+                'f() { rm -rf "${10}"; }; f 1 2 3 4 5 6 7 8 9 build'):
         a = analyze(cmd)
         assert not a.catastrophic, (cmd, a.catastrophic_reason)
+
+
+def test_literal_home_paths_count_as_home():
+    """模型常从 pwd 的输出里抄来绝对路径：rm -rf /Users/me 和 rm -rf ~ 一样拒绝，别的账户的家目录同样。"""
+    import pwd
+
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    for cmd in (f"rm -rf {home}", f"rm -rf {home}/projects", f"D={home}; rm -rf $D", "rm -rf /Users/other",
+                "rm -rf /home/u/x", "rm -rf /root", f"find {home} -delete"):
+        a = analyze(cmd)
+        assert a.catastrophic, (cmd, a.reasons)
+    assert not analyze(f"rm -rf {home}/projects/app/build").catastrophic
+    assert not analyze("source env.sh; D=~/x/y; rm -rf $D").catastrophic   # ~ 赋值时已展开，按 / 拆开不是 ~
 
 
 def test_deep_alias_and_function_chains_fail_closed():
@@ -726,3 +745,4 @@ def test_truncated_values_are_checked_against_the_current_directory():
     assert a.catastrophic and "组合太多" in a.catastrophic_reason, a.reasons
     a = analyze(f"cd /tmp; {many_a}; A=../*; {many_b}; B=y7; rm -rf $A $B")   # ../* 排在第 57 种之后
     assert a.catastrophic and "../*" in a.catastrophic_reason, a.reasons
+
