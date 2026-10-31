@@ -26,8 +26,11 @@ function posture(s) {
       why: P.on_ask === "allow" ? "需要审批的操作会直接执行（--yes），只应在一次性沙箱里使用" : `无人处理的审批 ${fmt.dur(P.approval_timeout)} 后按拒绝处理` },
     { tone: "ok", icon: "shieldCheck", label: "托管基线", value: `${P.baseline} 条规则`,
       why: "读写凭证位置、灾难性命令在任何模式下都拒绝，完全放行也不例外" },
-    { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `macOS Seatbelt${sb.network === "deny" ? " · 禁止联网" : ""}`,
-      why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos 开启" : "凭证位置不可读，写入只限工作区与临时目录" },
+    sb.level === "off" && sb.network !== "allow"
+      ? { tone: "bad", icon: "box", label: "命令沙箱", value: "未启用，bash 会被拒绝",
+          why: `配置了网络策略 ${sb.network}，它要靠系统沙箱执行；没有沙箱时 bash 一律拒绝，不悄悄联网。请同时设置 permissions.sandbox` }
+      : { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `macOS Seatbelt · ${NET[sb.network]}`,
+          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos 开启" : "凭证位置不可读，写入只限工作区与临时目录" },
     { tone: P.strip_secret_env ? "ok" : "warn", icon: "eye", label: "密钥剥离", value: P.strip_secret_env ? "已启用" : "已关闭",
       why: P.strip_secret_env ? "bash 子进程看不到名字像密钥的环境变量，模型执行 env 也读不到" : "bash 子进程继承全部环境变量，包括 API Key" },
     { tone: s.snapshots ? "ok" : "warn", icon: "history", label: "写前快照", value: s.snapshots ? "已启用" : "已关闭",
@@ -35,6 +38,15 @@ function posture(s) {
     { tone: openHooks ? "warn" : "ok", icon: "hook", label: "Hooks", value: s.hooks.length ? `${s.hooks.length} 个` : "未配置",
       why: openHooks ? `${openHooks} 个 pre_tool_use hook 出错时放行（fail_closed = false）` : s.hooks.length ? "pre_tool_use hook 出错或超时即拒绝执行（fail-closed）" : "可在 flywhl.toml 里用命令 hook 拦截或改写工具调用" },
   ];
+}
+
+const NET = { allow: "网络不限", deny: "禁止联网", allowlist: "出站白名单" };
+/** 沙箱网络一栏：白名单要把放行了哪些主机写出来，空白名单等于禁止联网 */
+function netLabel(sb) {
+  if (sb.level === "off") return sb.network === "allow" ? none("不限（沙箱未启用）") : `${esc(NET[sb.network])}<div class="muted">未生效：沙箱未启用，bash 命令会被拒绝</div>`;
+  if (sb.network === "deny") return "禁止对外连接（含 DNS 查询与本机套接字）";
+  if (sb.network === "allowlist") return sb.allow.length ? `只经出站代理连接：${sb.allow.map(code).join(" ")}` : "白名单为空，等同禁止联网";
+  return "不限";
 }
 
 const kv = (rows) => `<dl class="kv wide">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
@@ -63,7 +75,7 @@ function render(inner, s, app) {
         ["自定义规则", P.rules.length ? `<ul class="rule-list">${P.rules.map((r) => `<li>${code(r)}</li>`).join("")}</ul>` : none("无，使用模式默认值")]]),
         `${esc(s.tools)} 个工具`)}
       ${card("terminal", "命令执行", kv([["系统沙箱", s.sandbox.level === "off" ? none("未启用") : esc(s.sandbox.level)],
-        ["沙箱网络", s.sandbox.level === "off" ? none("沙箱未启用时不生效") : s.sandbox.network === "deny" ? "禁止对外连接" : "允许"],
+        ["沙箱网络", netLabel(s.sandbox)],
         ["密钥剥离", P.strip_secret_env ? "已启用" : "已关闭"], ["写前快照", s.snapshots ? "已启用" : "已关闭"],
         ["完成验收", s.verify_command ? code(s.verify_command) : none("未配置")]]))}
       ${card("lock", "访问控制", kv([["访问令牌", s.access.token ? "已启用" : "已关闭"],

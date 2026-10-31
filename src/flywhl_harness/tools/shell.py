@@ -13,13 +13,15 @@ bash 是最强也最危险的工具。这里的工程要点：
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **可选的系统沙箱**：``sandbox="macos"`` 时命令跑在 sandbox-exec 里，凭证位置不可读、写操作限制在工作区与临时目录，
-  见 ``tools/sandbox.py``。
+  见 ``tools/sandbox.py``；网络可以全断，或只经出站代理连白名单里的主机（``tools/egress.py``）。
+  网络策略离不开沙箱：配置了 ``deny`` / ``allowlist`` 却没有开沙箱时拒绝执行，不悄悄连外网。
 """
 
 from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import os
 import re
 import signal
@@ -29,6 +31,7 @@ from typing import Any
 from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
+from .egress import EgressProxy, local_ports, parse_rules
 from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, sandbox_argv
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
@@ -104,15 +107,18 @@ class BashTool(Tool):
     manages_timeout = True
 
     def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off",
-                 sandbox_network: str = "allow"):
+                 sandbox_network: str = "allow", network_allow: list[str] | None = None):
         if sandbox not in SANDBOX_LEVELS:
             raise ValueError(f"未知的沙箱档位 {sandbox!r}（可选：{' | '.join(SANDBOX_LEVELS)}）")
         if sandbox_network not in SANDBOX_NETWORK:
             raise ValueError(f"未知的沙箱网络策略 {sandbox_network!r}（可选：{' | '.join(SANDBOX_NETWORK)}）")
+        if not isinstance(network_allow or [], list):
+            raise ValueError(f"network_allow 必须是字符串列表，实际是 {network_allow!r}")
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
         self.sandbox = sandbox
         self.sandbox_network = sandbox_network
+        self.network_allow = parse_rules(network_allow or [])   # 写法不对在启动时报错
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         level = analyze(str(args.get("command", "")), workspace).level
@@ -139,43 +145,53 @@ class BashTool(Tool):
         started = time.monotonic()
         spawn = dict(cwd=str(ctx.workspace.root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                      stdin=asyncio.subprocess.DEVNULL, start_new_session=True, env=_clean_env(self.strip_secret_env))
-        if self.sandbox == "macos":
-            try:
-                argv = sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network != "deny")
-            except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
-                return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
-                                  details={"command": command, "sandbox": self.sandbox})
-            # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变：取消、超时照样能整组终止
-            proc = await asyncio.create_subprocess_exec(*argv, **spawn)
-        else:
-            proc = await asyncio.create_subprocess_shell(
-                command, executable="/bin/bash" if os.path.exists("/bin/bash") else None, **spawn)
+        if self.sandbox == "off" and self.sandbox_network != "allow":   # fail-closed：网络限制要靠沙箱执行
+            return ToolResult(content=f"命令未执行：sandbox_network = {self.sandbox_network!r} 要在系统沙箱里才能生效，"
+                                      "当前 sandbox = \"off\"。请同时设置 permissions.sandbox", is_error=True,
+                              details={"command": command, "sandbox": self.sandbox, "sandbox_network": self.sandbox_network})
         chunks: list[bytes] = []
         timed_out = False
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        proxy: EgressProxy | None = None
+        async with contextlib.AsyncExitStack() as stack:   # 出站代理与命令同生共死
+            if self.sandbox == "macos":
+                if self.sandbox_network == "allowlist":
+                    proxy = await stack.enter_async_context(EgressProxy(self.network_allow))
+                    spawn["env"] = {**spawn["env"], **proxy.env()}
+                try:
+                    argv = sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network,
+                                        local_ports=[str(proxy.port), *local_ports(self.network_allow)] if proxy else ())
+                except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
+                    return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
+                                      details={"command": command, "sandbox": self.sandbox})
+                # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变：取消、超时照样能整组终止
+                proc = await asyncio.create_subprocess_exec(*argv, **spawn)
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    command, executable="/bin/bash" if os.path.exists("/bin/bash") else None, **spawn)
 
-        async def pump() -> None:
-            assert proc.stdout is not None
-            while True:
-                data = await proc.stdout.read(4096)
-                if not data:
-                    tail = decoder.decode(b"", final=True)
-                    if tail:
-                        ctx.emit({"output": tail})
-                    break
-                chunks.append(data)
-                text = decoder.decode(data)  # 增量解码：被分块切开的多字节字符留到下一块再输出
-                if text:
-                    ctx.emit({"output": text})
+            async def pump() -> None:
+                assert proc.stdout is not None
+                while True:
+                    data = await proc.stdout.read(4096)
+                    if not data:
+                        tail = decoder.decode(b"", final=True)
+                        if tail:
+                            ctx.emit({"output": tail})
+                        break
+                    chunks.append(data)
+                    text = decoder.decode(data)  # 增量解码：被分块切开的多字节字符留到下一块再输出
+                    if text:
+                        ctx.emit({"output": text})
 
-        try:
-            await asyncio.wait_for(asyncio.gather(pump(), proc.wait()), timeout)
-        except asyncio.TimeoutError:
-            timed_out = True
-            await _terminate(proc)
-        except asyncio.CancelledError:
-            await _terminate(proc)  # 被取消：杀掉整棵进程树后再把取消向上传播
-            raise
+            try:
+                await asyncio.wait_for(asyncio.gather(pump(), proc.wait()), timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                await _terminate(proc)
+            except asyncio.CancelledError:
+                await _terminate(proc)  # 被取消：杀掉整棵进程树后再把取消向上传播
+                raise
 
         output = b"".join(chunks).decode("utf-8", errors="replace")
         body, cut, total = truncate_tail(output, OUT_LINES, OUT_BYTES)
@@ -188,6 +204,9 @@ class BashTool(Tool):
         if self.sandbox != "off":
             details["sandbox"] = self.sandbox
             details["sandbox_network"] = self.sandbox_network
+        if proxy and proxy.denied:
+            details["egress_denied"] = sorted(set(proxy.denied))
+            body += f"\n[出站白名单拦下了 {'、'.join(details['egress_denied'])}；确实需要的话加进 permissions.network_allow]"
         if cut:
             ref = ctx.blobs.put(ctx.session_id, output)
             details["full_output_ref"] = ref

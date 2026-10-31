@@ -15,7 +15,7 @@
 | `flywhl export <会话ID> [-o 文件] [--injected]` | 会话导出为 Markdown；`--injected` 附带注入给模型的提醒 |
 | `flywhl tools` / `flywhl doctor [模型…]` | 工具与副作用等级 / 模型接入自检 |
 
-通用参数：`-w` 工作区，`-c` 可信配置文件，`--trust` 信任项目配置，`--model`、`--provider`，`--env-file`，`--mode`，`-y` 自动批准，`--sandbox macos`，`--thinking` 显示思考过程。
+通用参数：`-w` 工作区，`-c` 可信配置文件，`--trust` 信任项目配置，`--model`、`--provider`，`--env-file`，`--mode`，`-y` 自动批准，`--sandbox macos`，`--network deny|allowlist`，`--net-allow 主机`（可重复，隐含 allowlist），`--thinking` 显示思考过程。
 
 终端内命令：`/new` 新会话，`/mode <模式>` 切换权限，`/compact` 手动压缩，`/tree` 会话树，`/branch <entry_id>` 切换分支，`/exit` 退出。
 

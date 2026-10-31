@@ -412,7 +412,7 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 ## macOS sandbox-exec 档位
 
 `permissions.sandbox = "macos"`（或 `flywhl chat --sandbox macos`）让 bash 工具的每条命令跑在 `sandbox-exec` 里（`tools/sandbox.py`）。
-它是原型：从 `(allow default)` 起步，收紧文件访问，可选断网。生成的配置大致是：
+它是原型：从 `(allow default)` 起步，收紧文件访问，可选断网或只放行白名单里的主机。生成的配置大致是：
 
 ```scheme
 (version 1)
@@ -423,8 +423,11 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 (deny file-write* (require-not (require-any (subpath "<工作区>") (subpath "<临时目录>") (literal "/dev/null") ...)))
 ; harness 自己的状态与配置，与托管基线一致
 (deny file-write* (subpath "<工作区>/.flywhl") (literal "<工作区>/flywhl.toml"))
-; sandbox_network = "deny" 时追加：禁止对外连接（回环地址上的 TCP 也算），本机 Unix 套接字不受影响
+; sandbox_network = "deny" / "allowlist" 时追加：对外 IP 连接（回环地址上的 TCP 也算）与本机 Unix 套接字一律拒绝
 (deny network-outbound (remote ip))
+(deny network-outbound (remote unix-socket))
+; "allowlist" 再放行本机出站代理的端口；放行必须写在两条拒绝之后，否则不生效
+(allow network-outbound (remote ip "localhost:<代理端口>"))
 ```
 
 凭证清单与文件工具、命令分析共用 `policy/sensitive.py` 那一份，区别在于内核按 **真实路径** 判定，不管命令怎么写：
@@ -436,12 +439,41 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
 | 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
 | 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
-| 网络外发（`curl`、`nc`） | — | 默认不限制；`sandbox_network = "deny"` 时拒绝 |
+| 网络外发（`curl`、`nc`、DNS 查询、`docker.sock`） | — | 默认不限制；`deny` 时全部拒绝；`allowlist` 时只能经出站代理连白名单里的主机 |
 | 钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
 | 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
 
 `tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
 沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界，`tests/test_hardening.py::test_sandbox_network_deny_blocks_outbound_connections` 核对断网。
+
+### 出站白名单
+
+整体断网太粗：装依赖、拉代码都要联网，于是只能整体放开，被注入的内容驱动外发时就没有最后一道防线。
+`sandbox_network = "allowlist"` 只放行 `network_allow` 里的主机：
+
+```toml
+[permissions]
+sandbox = "macos"
+sandbox_network = "allowlist"
+network_allow = ["pypi.org", "files.pythonhosted.org", "*.githubusercontent.com", "localhost:5432"]
+```
+
+Seatbelt 的网络规则只认 `localhost` 或 `*` 加端口，写不了主机名，所以分两层（`tools/egress.py`）：
+
+1. **内核层**：对外连接一律拒绝，只放行到本机出站代理的端口。Unix 套接字同样拒绝，因为 DNS 查询走 mDNSResponder 的套接字，
+   数据可以编码进域名带出去；`docker.sock` 能起一个带网络的容器。这两条在 `deny` 档同样生效；
+2. **代理层**：每条命令启动一个只监听 127.0.0.1 临时端口的代理，命令的 `HTTPS_PROXY` 等变量指向它。HTTPS 走 `CONNECT` 隧道，
+   代理只看主机名和端口、不解密；主机不在白名单里就回 403，并在命令结果末尾注明被拦下的主机。主机名由代理解析，沙箱里不需要 DNS。
+
+白名单写法：`pypi.org` 只匹配这个主机的 80、443 端口；`*.github.com` 匹配子域名、不含 `github.com` 本身；
+`registry.local:5000`、`example.com:*` 限定或放开端口；`localhost:5432` 这类本机端口还在内核层直接放行，给不支持 HTTP 代理的客户端用。
+写法不对在启动时报错。命令行可以临时指定：`flywhl run --sandbox macos --net-allow pypi.org --net-allow files.pythonhosted.org "装依赖并跑测试"`。
+
+不走代理的连接都连不出去：SSH（包括 `git@github.com:` 和被 `insteadOf` 改写成 SSH 的地址）、`git://`、不读代理环境变量的程序。
+失败是预期的，不会绕过白名单。还有两处边界：代理不解密 TLS，只按 `CONNECT` 的主机名判定，同一 CDN 上可以借域前置访问别的站点，
+所以白名单只放必要的主机；代理自己直连目标，不经过环境里的上游 HTTP 代理，必须经企业代理出网的环境暂不支持。网络策略离不开沙箱：配置了 `deny` 或 `allowlist` 却没开沙箱时，bash 拒绝执行并说明原因，
+不会悄悄连外网；设置页同样标红。`tests/test_backlog.py` 里的出站白名单用例核对了五件事：白名单内经代理和 `CONNECT` 可达、
+白名单外回 403、绕过代理直连本机端口被拒、直连外部地址被拒、Unix 套接字被拒。
 
 代价与边界：
 
@@ -453,7 +485,8 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
   不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
 - **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
   非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
-- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`，改回 `allow` 要先信任。
+- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`；
+  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目同样要信任。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）
 
@@ -582,7 +615,8 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
 - macOS sandbox-exec 档位是本项目唯一的系统级隔离（原型）：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
-  可选整体断网（`sandbox_network = "deny"`），没有出口白名单；“只在沙箱档位下允许 bypass”还是设计草案。
+  可选整体断网（`sandbox_network = "deny"`）或出站白名单（`allowlist`，经本机代理按主机名放行，DNS 与本机套接字一并拒绝）；
+  “只在沙箱档位下允许 bypass”还是设计草案。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash 与 MCP 服务器共用）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

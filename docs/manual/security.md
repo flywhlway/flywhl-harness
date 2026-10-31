@@ -87,7 +87,7 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 - 文件工具经 `Workspace.resolve()` 解析路径并跟随符号链接，越出工作区即拒绝。
 - 写操作前打影子 git 快照（`.flywhl/shadow.git`，不碰你自己的 `.git`），可在 Web 的“历史”页回滚。
-- macOS 上设 `sandbox = "macos"`，bash 跑在 sandbox-exec 里：凭证位置由内核拒绝，写入限于工作区与临时目录；再设 `sandbox_network = "deny"` 可断网。它是原型级隔离，生产环境请用容器或 microVM。
+- macOS 上设 `sandbox = "macos"`，bash 跑在 sandbox-exec 里：凭证位置由内核拒绝，写入限于工作区与临时目录；再设 `sandbox_network = "deny"` 可断网，设 `"allowlist"` 并在 `network_allow` 里列出主机，就只能连这些主机。它是原型级隔离，生产环境请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。
 
 深入阅读：[16 Hooks](/governance/hooks)、[17 权限与人审](/governance/permissions-hitl)、[18 Workspace 与沙箱](/governance/workspace-sandbox)、[19 安全](/governance/security)。

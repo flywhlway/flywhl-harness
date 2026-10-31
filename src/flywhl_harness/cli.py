@@ -189,6 +189,11 @@ def _config(args: argparse.Namespace) -> HarnessConfig:
         cfg.permissions.on_ask = "allow"
     if getattr(args, "sandbox", None):
         cfg.permissions.sandbox = args.sandbox
+    if getattr(args, "net_allow", None):   # 给了白名单主机就是要白名单：没写 --network 时按 allowlist
+        cfg.permissions.network_allow = [*cfg.permissions.network_allow, *args.net_allow]
+        cfg.permissions.sandbox_network = "allowlist"
+    if getattr(args, "network", None):
+        cfg.permissions.sandbox_network = args.network
     return cfg
 
 
@@ -442,6 +447,9 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
     common.add_argument("--sandbox", choices=["off", "macos"], help="bash 的系统沙箱（macos：sandbox-exec，原型）")
+    common.add_argument("--network", choices=["allow", "deny", "allowlist"], help="沙箱里的网络策略（要求开启沙箱）")
+    common.add_argument("--net-allow", action="append", metavar="HOST",
+                        help="出站白名单主机，可重复，如 pypi.org、*.github.com、registry.local:5000")
     common.add_argument("--thinking", action="store_true", help="显示模型的思考过程")
     sub = p.add_subparsers(dest="cmd")
 
