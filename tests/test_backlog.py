@@ -1229,6 +1229,65 @@ def test_auto_approve_needs_trust_and_valid_rules():
             PermissionConfig(auto_approve=bad)
 
 
+def test_untrusted_on_ask_deny_cannot_switch_on_auto_approval(tmp_path, monkeypatch):
+    """用户配置里有 auto_approve 规则时，项目配置的 on_ask = "deny" 等于替人打开自动批准，要先信任。"""
+    from flywhl_harness.config import UntrustedConfigWarning, split_untrusted
+
+    assert split_untrusted({"permissions": {"on_ask": "deny"}})[1] == []                    # 没有规则：只是更严
+    assert split_untrusted({"permissions": {"on_ask": "deny", "auto_approve": []}}, auto_approve=["write(*)"])[1] == []
+    assert "auto_approve" in split_untrusted({"permissions": {"on_ask": "deny"}}, auto_approve=["write(*)"])[1][0]
+    home, proj = tmp_path / "flywhl-home", tmp_path / "proj"
+    home.mkdir(exist_ok=True)
+    proj.mkdir()
+    (home / "config.toml").write_text('[permissions]\nauto_approve = ["bash(npm test*)"]\n', encoding="utf-8")
+    (proj / "flywhl.toml").write_text('[permissions]\non_ask = "deny"\n', encoding="utf-8")
+    monkeypatch.chdir(proj)
+    with pytest.warns(UntrustedConfigWarning, match="auto_approve"):
+        assert HarnessConfig.load().permissions.on_ask == "wait"
+    assert HarnessConfig.load(trust=lambda req: True).permissions.on_ask == "deny"
+
+
+def test_allow_rules_match_where_the_path_lands(tmp_path):
+    """allow 规则、会话授权、auto_approve 按文件实际落点匹配：src/../ 与指向别处的软链接原样能被 src/** 匹配上，
+    落点却不归这条规则管。只做判定，不读写文件。"""
+    from flywhl_harness.policy.permissions import PermissionPolicy, grant_for
+    from flywhl_harness.runtime.workspace import Workspace
+    from flywhl_harness.tools import default_tools
+
+    ws, out = tmp_path / "ws", tmp_path / "out"
+    (ws / "src").mkdir(parents=True)
+    (ws / "docs").mkdir()
+    out.mkdir()
+    (ws / "src" / "away").symlink_to(out)              # 仓库可以带进来的软链接：指向工作区外
+    (ws / "src" / "aside").symlink_to(ws / "docs")     # 指向工作区里别的目录
+    (tmp_path / "alias").symlink_to(out)               # 工作区之外的软链接，类似 macOS 的 /tmp
+    tools = default_tools(HarnessConfig())
+    p = PermissionPolicy("default", ["allow:write(src/**)", f"allow:read({tmp_path}/alias/**)"],
+                         workspace=Workspace(ws, snapshots=False), auto_approve=["edit(src/**)", "read(*)"])
+
+    def perm(tool, path):
+        args = {"path": path, "content": ""}
+        return args, p.evaluate(tools.get(tool), args)
+
+    def decide(tool, path):
+        return perm(tool, path)[1].decision
+
+    def auto(tool, path):
+        args, res = perm(tool, path)
+        rule, why = p.auto_approval(tools.get(tool), args, res)
+        return str(rule) if rule else why
+
+    assert decide("write", "src/a.py") == decide("write", "./src/a.py") == "allow"
+    assert decide("write", "src/../docs/a.md") == decide("write", "src/aside/a.md") == "ask"
+    assert decide("read", "src/../../out/x") == decide("read", "src/away/x") == "ask"      # 落在工作区之外
+    assert decide("read", f"{tmp_path}/alias/x") == "allow"
+    assert auto("edit", "src/a.py") == "allow:edit(src/**)"
+    assert auto("edit", "src/aside/a.md") == "没有匹配的 auto_approve 规则"
+    assert auto("read", "src/away/x") == auto("read", str(out / "x")) == "工作区之外的路径不自动批准"
+    g = grant_for(tools.get("write"), {"path": "src/*", "content": ""})
+    assert str(g) == "allow:write(src/[*])" and g.matches("write", ["src/*"]) and not g.matches("write", ["src/a.py"])
+
+
 def test_cli_approve_means_unattended(tmp_path):
     import argparse
 

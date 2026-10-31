@@ -108,6 +108,11 @@ _RULE_RE = re.compile(r"^\s*(allow|ask|deny)\s*:\s*([\w*?\-\[\]]+)\s*(?:\((.*)\)
 
 `fnmatch` 的 `*` 会跨越 `/`，所以 `src/**` 与 `src/*` 等价——写规则时不要指望 `*` 只匹配一层目录。
 
+放行一侧（allow 规则、会话授权、`auto_approve`）对文件工具只认文件实际落在哪里：解析后的绝对路径和相对工作区路径。
+原始路径只有在不含 `..`、也没经过工作区里的软链接时才参与匹配。否则 `src/../../etc/hosts`、指向工作区外的 `src/link/hosts`
+原样都能被 `allow:read(src/**)` 匹配上，读到的却是工作区外的文件。工作区之外的软链接（macOS 的 `/tmp`）不是仓库能放进来的，
+`allow:read(/tmp/**)` 照常命中。deny / ask 是收紧方向，仍然三个目标串都匹配，宁可多命中。
+
 **优先级：deny → ask → allow，先命中者生效。** 规则按来源分为 managed / project / user / session，但来源不参与排序：
 任何来源的 deny 都排在所有 allow 之前评估，所以用户规则里的 `allow:bash` 推翻不了托管基线的 deny。
 `tests/test_policy.py::test_rule_priority_deny_over_allow` 用 `["allow:bash", "deny:bash(rm -rf*)"]` 验证了这一点：
@@ -647,7 +652,7 @@ def preview(self, args: dict[str, Any], ctx: ToolContext) -> str | None:
 | 工具 | 生成的授权 | 例子 |
 |---|---|---|
 | bash | 前两个词 + `*` | `pytest -q tests` → `allow:bash(pytest -q*)` |
-| 文件工具 | 具体路径 | `allow:write(src/a.py)` |
+| 文件工具 | 具体路径，按字面（路径里的 `*` 不当通配符） | `allow:write(src/a.py)` |
 | 其它 | 整个工具 | `allow:send_notification` |
 
 粒度越窄越安全，但窄到每次都要重新批就失去意义。“前两个词”是一个折中，它的边界值得了解：
@@ -693,10 +698,13 @@ bash 复合命令同样要每一段都被覆盖。
 | 命令分析为高危（`git push --force`、`curl … \| sh`） | 与疲劳提示同一口径：高危命令在任何授权下都要人看 |
 | 实际执行的程序不在命令文本里（命令替换、仓库配置） | 规则按文本匹配，担保不了文本之外的东西 |
 | 托管基线要求确认的（密钥线索、`.git/` 内部、flywhl 配置） | 这些位置被改写的后果会延续到之后的运行 |
+| 文件工具读写工作区之外的路径 | 无人值守的运行不出工作区，规则写得再宽也一样 |
 | PreToolUse hook 要求确认的 | 守卫明确要人看 |
 | 读过不可信内容之后的外部副作用（网络、通知、推送） | 提示注入要把数据送出去，走的就是这条路；工作区内的写入不受影响 |
 
 项目配置里的 `auto_approve` 和放宽的 allow 规则一样要先信任：无人值守时多批准什么，不能由仓库自己说了算。
+`on_ask = "deny"` 平时只会更严，项目配置可以直接写；但用户配置里已有 `auto_approve` 规则时，它会把交互运行里的
+“等人审”换成“按这些规则替人批准”，这时同样要先信任（项目配置同时写了 `auto_approve = []` 的除外）。
 
 ## 审批疲劳如何量化
 

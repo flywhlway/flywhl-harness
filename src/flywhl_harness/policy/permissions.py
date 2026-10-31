@@ -54,9 +54,11 @@ bypass          全部放行（deny 规则、灾难性命令、凭证位置仍�
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..tools.base import Effect, Tool
@@ -250,7 +252,9 @@ class PermissionPolicy:
         return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source)
 
     def _allowed_by(self, tool: Tool, targets: list[str], rules: list[Rule]) -> Rule | None:
-        """放行这次调用的第一条规则。bash 复合命令每一段都要被其中某条覆盖，防止 "git status && rm -rf x" 搭便车。"""
+        """放行这次调用的第一条规则。bash 复合命令每一段都要被其中某条覆盖，防止 "git status && rm -rf x" 搭便车；
+        文件工具按实际落点匹配，见 ``_landing``。"""
+        targets = self._landing(tool, targets)
         segs = targets[1:] or targets[:1]
         for r in rules:
             if tool.name == "bash" and r.pattern and not all(any(r2.matches(tool.name, [s]) for r2 in rules) for s in segs):
@@ -258,6 +262,21 @@ class PermissionPolicy:
             if r.matches(tool.name, targets):
                 return r
         return None
+
+    def _landing(self, tool: Tool, targets: list[str]) -> list[str]:
+        """放行一侧（allow 规则、会话授权、auto_approve）给文件工具匹配的目标串：文件实际落在哪里——解析后的绝对路径与
+        工作区相对路径。原始路径只在不含 ``..``、也没经过工作区里的软链接时才算：``src/../../etc/hosts``、
+        指向工作区外的 ``src/link/hosts`` 原样能被 ``read(src/**)`` 匹配上，落点却不归这条规则管。
+        工作区之外的软链接（macOS 的 ``/tmp``）不是仓库能放进来的，``allow:read(/tmp/**)`` 照常命中。
+        deny / ask 是收紧方向，仍对原始路径和落点都匹配，宁可多命中。"""
+        if tool.name not in _FILE_TOOLS or self.workspace is None or len(targets) != 3:
+            return targets
+        raw, resolved, rel = targets
+        q = Path(os.path.expanduser(raw))
+        q = q if q.is_absolute() else self.workspace.root / q
+        if ".." in q.parts or (q.is_relative_to(self.workspace.root) and str(q) != resolved):
+            return [resolved, rel]
+        return targets
 
     def auto_approval(self, tool: Tool, args: dict[str, Any], perm: PermissionResult, *,
                       tainted: bool = False) -> tuple[Rule | None, str]:
@@ -267,6 +286,7 @@ class PermissionPolicy:
         - 命令分析为高危的（risk = critical）；
         - 实际执行的程序不在命令文本里的（命令替换、仓库配置）：规则按文本匹配，担保不了它们；
         - 托管基线要求确认的（密钥线索、.git 内部、flywhl 配置）；
+        - 文件工具读写工作区之外的路径：无人值守的运行不出工作区，规则写得再宽也一样；
         - 会话读取过不可信内容之后的外部副作用操作：提示注入要把数据送出去，走的就是这条路。
         """
         if not self.auto_rules:
@@ -277,6 +297,8 @@ class PermissionPolicy:
             return None, "命令实际执行的程序不在命令文本里，不自动批准"
         if perm.source == "managed":
             return None, f"托管基线要求确认（{perm.rule}），不自动批准"
+        if self._outside(tool, args):
+            return None, "工作区之外的路径不自动批准"
         if tainted and perm.effect == Effect.EXTERNAL:
             return None, "会话读取过不可信内容，外部副作用操作不自动批准"
         r = self._allowed_by(tool, self._targets(tool, args), self.auto_rules)
@@ -305,6 +327,7 @@ def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
     bash 默认按前两个词授权（``pytest -q*``）。前两个词说明不了实际执行什么的命令只精确授权这一条：
     ``bash -lc '...'``、``python3 -c '...'``、``find . -exec ...`` 的代码在参数里，``timeout 10 ...``、``FOO=1 ...``
     后面跟的才是真正的命令——按前缀授权，批准一次 ``bash -lc 'echo hi'`` 就等于放行之后所有 ``bash -lc``。
+    文件工具按字面授权这一个路径：批准写一个名叫 ``*`` 的文件，不能变成放行之后所有写入。
     """
     target = tool.permission_target(args)
     if tool.name == "bash":
@@ -317,7 +340,7 @@ def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
         prefix = " ".join(words[:2]) if len(words) > 1 else (words[0] if words else "")
         return Rule(Decision.ALLOW, "bash", f"{prefix}*", "session")
     if tool.name in _FILE_TOOLS and target:
-        return Rule(Decision.ALLOW, tool.name, target, "session")
+        return Rule(Decision.ALLOW, tool.name, _glob_literal(target), "session")
     return Rule(Decision.ALLOW, tool.name, None, "session")
 
 

@@ -36,7 +36,7 @@ import tomllib
 import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 
 @dataclass
@@ -194,7 +194,8 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit))
+                data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
+                                     cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
         env_map = {
             "FLYWHL_PROVIDER": "provider",
@@ -285,7 +286,8 @@ _SAFE_KEYS = frozenset({
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
 })
-# permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
+# permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任。
+# on_ask = deny 有一个例外：用户配置里写了 auto_approve 规则时，它会让这些规则替人批准，见 split_untrusted
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
     "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos", "linux"),
     # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
@@ -315,9 +317,13 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
-def split_untrusted(data: dict[str, Any], base: Path | None = None) -> tuple[dict[str, Any], list[str]]:
+def split_untrusted(data: dict[str, Any], base: Path | None = None,
+                    auto_approve: Iterable[str] = ()) -> tuple[dict[str, Any], list[str]]:
     """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是 hook、MCP 服务器实际运行的目录
     （工作区）：命令里的相对路径按它解析，引用的文件与没锁版本的包写进确认提示。
+
+    auto_approve 是前几层（用户配置）已有的自动批准规则。没有它们时 ``on_ask = "deny"`` 只会更严；有了它们，
+    deny 就是把“等人审”换成“按这些规则替人批准”，仓库不能替用户打开，同样要信任。
 
     未知键留在前一部分，交给 ``_merge`` 照常报错——拼写错误不该变成一次信任确认。
     """
@@ -333,6 +339,8 @@ def split_untrusted(data: dict[str, Any], base: Path | None = None) -> tuple[dic
                     risky += [f"permissions.rules: {r!r}" for r in v if r not in perms[k]]
                 elif k in _SAFE_PERMISSIONS and v not in _SAFE_PERMISSIONS[k]:
                     risky.append(f"permissions.{k} = {v!r}")
+                elif k == "on_ask" and v == "deny" and value.get("auto_approve", list(auto_approve)):
+                    risky.append("permissions.on_ask = 'deny'（会按 auto_approve 规则自动批准，不再等人审）")
                 else:
                     perms[k] = v
             safe[key] = perms
@@ -397,7 +405,8 @@ def _run_dir(cfg: HarnessConfig, data: dict[str, Any], explicit: dict[str, Any])
 
 
 def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
-                  trust: Callable[[TrustRequest], bool] | None, base: Path) -> dict[str, Any]:
+                  trust: Callable[[TrustRequest], bool] | None, base: Path,
+                  auto_approve: Iterable[str] = ()) -> dict[str, Any]:
     """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。
 
     hook、MCP 命令里引用的脚本（``python3 scripts/guard.py``）真正执行的是脚本的内容：一并算进哈希，改了脚本同样要
@@ -405,7 +414,7 @@ def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
     另一份脚本，哈希跟着变，要重新确认。"""
     from .policy.supply_chain import config_files, file_digest
 
-    safe, risky = split_untrusted(data, base)
+    safe, risky = split_untrusted(data, base, auto_approve)
     if not risky:
         return data
     digest = hashlib.sha256(raw)
