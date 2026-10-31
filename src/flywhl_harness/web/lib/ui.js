@@ -1,4 +1,4 @@
-// 交互基础组件：提示（toast）、屏幕阅读器播报、对话框、下拉菜单、悬浮说明、命令面板。
+// 交互基础组件：提示（toast）、屏幕阅读器播报、页面标题与桌面通知、对话框、下拉菜单、悬浮说明、命令面板。
 // 共同约定：浮层打开时焦点进入浮层、Esc 关闭、关闭后焦点回到触发它的元素。
 import { $, $$, esc, h, modKey } from "./dom.js";
 import { icon } from "./icons.js";
@@ -14,7 +14,8 @@ export function announce(text) {
 }
 
 const TOAST_ICONS = { success: "checkCircle", warning: "alert", danger: "xCircle", info: "info" };
-export function toast(message, { tone = "info", title = "", timeout = 4200 } = {}) {
+/** action: { label, run } —— 提示里的一个操作（例如“撤销”），点击后执行并关闭提示 */
+export function toast(message, { tone = "info", title = "", timeout = 4200, action = null } = {}) {
   const box = $("#toasts");
   while (box.children.length >= 4) box.firstElementChild.remove();
   const t = h("div", { class: `toast ${tone}`, html: `<span class="ic">${icon(TOAST_ICONS[tone] || "info")}</span>
@@ -22,11 +23,47 @@ export function toast(message, { tone = "info", title = "", timeout = 4200 } = {
   const close = h("button", { class: "btn ghost icon sm", "aria-label": "关闭提示", html: icon("x", "sm") });
   const dismiss = () => { t.classList.add("leaving"); setTimeout(() => t.remove(), 140); };
   close.onclick = dismiss;
+  if (action) {
+    t.classList.add("has-action");
+    const b = h("button", { class: "btn sm", type: "button" }, action.label);
+    b.onclick = () => { dismiss(); action.run(); };
+    t.append(b);
+    timeout = Math.max(timeout, 7000);   // 带操作的提示多留一会儿，来得及点
+  }
   t.append(close);
   box.append(t);
   let timer = setTimeout(dismiss, timeout);
   t.onmouseenter = () => clearTimeout(timer);                       // 悬停时暂停自动消失
   t.onmouseleave = () => (timer = setTimeout(dismiss, 1800));
+}
+
+/** 复制按钮的即时反馈：图标换成对勾、文字换成“已复制”，1.6 秒后复原（读屏同时播报） */
+export function flashCopied(btn) {
+  if (btn.dataset.copied) return;
+  const prev = btn.innerHTML;
+  btn.dataset.copied = "true";
+  btn.innerHTML = `${icon("check", "sm")}${$("span", btn) ? "<span>已复制</span>" : ""}`;
+  announce("已复制到剪贴板");
+  setTimeout(() => { btn.innerHTML = prev; delete btn.dataset.copied; }, 1600);
+}
+
+// ====================================================================== 页面标题与桌面通知
+// 标题前缀显示待审批数：切到别的标签页时也能在标签栏上看到“(2) …”
+let titleBase = document.title, titleCount = 0;
+export function setTitle(text) {
+  titleBase = text;
+  document.title = (titleCount ? `(${titleCount}) ` : "") + text;
+}
+export function setTitleCount(n) { titleCount = n; setTitle(titleBase); }
+
+/** 页面不在前台时发桌面通知（需要用户先在「环境与安全」页开启）；正在看页面时不打扰 */
+export function notify(title, { body = "", tag = "", onClick = null } = {}) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  try {
+    const n = new Notification(title, { body, tag: tag || undefined, icon: "/static/logo.svg" });
+    n.onclick = () => { window.focus(); n.close(); onClick?.(); };
+  } catch { /* 部分浏览器只允许在 Service Worker 里创建通知：忽略 */ }
 }
 
 // ====================================================================== 焦点陷阱
@@ -100,7 +137,8 @@ export function dialog({ title, desc = "", tone = "", iconName = "info", body = 
 
 export const confirmDialog = (opts) => dialog({ iconName: opts.danger ? "alert" : "info", tone: opts.danger ? "danger" : "", ...opts });
 
-export function promptDialog({ title, desc, label, placeholder = "", value = "", multiline = true, confirmText = "确定", danger = false, help = "" }) {
+/** validate(value) 返回非空字符串时，对话框保持打开并显示这段错误 */
+export function promptDialog({ title, desc, label, placeholder = "", value = "", multiline = true, confirmText = "确定", danger = false, help = "", validate = null }) {
   const fid = "pf-" + Math.random().toString(36).slice(2, 8);
   const field = h("div", { class: "field" });
   field.innerHTML = `<label class="field-label" for="${fid}">${esc(label)}</label>`;
@@ -108,7 +146,18 @@ export function promptDialog({ title, desc, label, placeholder = "", value = "",
   input.value = value;
   field.append(input);
   if (help) field.append(h("div", { class: "field-help" }, help));
-  return dialog({ title, desc, body: field, confirmText, danger, tone: danger ? "danger" : "", iconName: danger ? "alert" : "pencil", onConfirm: () => input.value.trim() });
+  if (!multiline) input.addEventListener("keydown", (e) => {   // 单行输入：Enter 直接确认
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); input.closest(".dialog")?.querySelector(".dialog-foot .btn:last-child")?.click(); }
+  });
+  const onConfirm = () => {
+    const v = input.value.trim();
+    const err = validate?.(v);
+    if (err) { input.classList.add("invalid"); input.focus(); throw new Error(err); }
+    return v;
+  };
+  const shown = dialog({ title, desc, body: field, confirmText, danger, tone: danger ? "danger" : "", iconName: danger ? "alert" : "pencil", onConfirm });
+  if (value) input.select();   // 改名这类场景：直接输入就替换原值
+  return shown;
 }
 
 // ====================================================================== 下拉菜单
@@ -134,7 +183,7 @@ export function openMenu(anchor, items, { align = "end", label = "" } = {}) {
   for (const it of items) {
     if (it === "sep") { pop.append(h("div", { class: "menu-sep", role: "separator" })); continue; }
     if (it.head) { pop.append(h("div", { class: "menu-head" }, it.head)); continue; }
-    const b = h("button", { class: `menu-item${it.danger ? " danger" : ""}`, role: it.checked != null ? "menuitemradio" : "menuitem", "aria-checked": it.checked != null ? String(!!it.checked) : null, type: "button" });
+    const b = h("button", { class: `menu-item${it.danger ? " danger" : ""}`, role: it.checked != null ? "menuitemradio" : "menuitem", "aria-checked": it.checked != null ? String(!!it.checked) : null, type: "button", disabled: !!it.disabled });
     b.innerHTML = `<span>${it.icon ? icon(it.icon) : ""}</span><span class="lbl">${esc(it.label)}</span><span class="check-mark">${it.checked ? icon("check") : ""}</span>${it.desc ? `<span class="desc">${esc(it.desc)}</span>` : ""}`;
     b.onclick = () => { closeMenu(); anchor.focus(); it.onSelect?.(); };
     pop.append(b);
@@ -148,7 +197,7 @@ export function openMenu(anchor, items, { align = "end", label = "" } = {}) {
   if (top + hgt > innerHeight - 8) top = Math.max(8, r.top - hgt - 6);
   Object.assign(pop.style, { left: left + "px", top: top + "px" });
   anchor.setAttribute("aria-expanded", "true");
-  const buttons = $$(".menu-item", pop);
+  const buttons = $$(".menu-item:not(:disabled)", pop);
   const current = buttons.findIndex((b) => b.getAttribute("aria-checked") === "true");
   (buttons[current >= 0 ? current : 0])?.focus();
   const onKey = (e) => {

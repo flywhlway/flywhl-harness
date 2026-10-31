@@ -29,7 +29,7 @@ from typing import Any
 from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
 from .base import Effect, Tool, ToolContext, ToolResult
-from .sandbox import SANDBOX_LEVELS, sandbox_argv
+from .sandbox import SANDBOX_LEVELS, SANDBOX_NETWORK, sandbox_argv
 
 _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
                          r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
@@ -38,13 +38,29 @@ OUT_LINES = 400
 OUT_BYTES = 30 * 1024
 
 
+# 只读的 git 命令也会执行仓库配置里的命令：git status 会调用 core.fsmonitor 指定的程序、写索引时触发 post-index-change
+# hook；仓库里“伪装”成裸仓库的目录（自带 HEAD / config / objects）被 git -C 进入时，它的 config 同样生效。
+# 用命令行级配置（优先级最高）关掉 fsmonitor、只认显式指定的裸仓库，并让只读命令不顺手写索引
+_GIT_HARDENING = (("core.fsmonitor", "false"), ("safe.bareRepository", "explicit"))
+_GIT_CONFIG_KEY = re.compile(r"GIT_CONFIG_KEY_\d+")
+
+
 def _clean_env(strip: bool) -> dict[str, str]:
     env = dict(os.environ)
-    if strip:
-        env = {k: v for k, v in env.items() if not (_SECRET_ENV.search(k) or _URL_WITH_PASSWORD.match(v))}
+    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+        env = {k: v for k, v in env.items()
+               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        n = max(0, int(env.get("GIT_CONFIG_COUNT", "0")))   # 接在用户已有的 GIT_CONFIG_* 后面
+    except ValueError:
+        n = 0
+    for i, (key, value) in enumerate(_GIT_HARDENING, start=n):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+    env["GIT_CONFIG_COUNT"] = str(n + len(_GIT_HARDENING))
     return env
 
 
@@ -87,12 +103,16 @@ class BashTool(Tool):
     interruptible = True
     manages_timeout = True
 
-    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off"):
+    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off",
+                 sandbox_network: str = "allow"):
         if sandbox not in SANDBOX_LEVELS:
             raise ValueError(f"未知的沙箱档位 {sandbox!r}（可选：{' | '.join(SANDBOX_LEVELS)}）")
+        if sandbox_network not in SANDBOX_NETWORK:
+            raise ValueError(f"未知的沙箱网络策略 {sandbox_network!r}（可选：{' | '.join(SANDBOX_NETWORK)}）")
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
         self.sandbox = sandbox
+        self.sandbox_network = sandbox_network
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         level = analyze(str(args.get("command", "")), workspace).level
@@ -121,7 +141,7 @@ class BashTool(Tool):
                      stdin=asyncio.subprocess.DEVNULL, start_new_session=True, env=_clean_env(self.strip_secret_env))
         if self.sandbox == "macos":
             try:
-                argv = sandbox_argv(command, ctx.workspace.root)
+                argv = sandbox_argv(command, ctx.workspace.root, network=self.sandbox_network != "deny")
             except RuntimeError as e:  # fail-closed：配置了沙箱却用不了，不能悄悄在沙箱外执行
                 return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
                                   details={"command": command, "sandbox": self.sandbox})
@@ -167,6 +187,7 @@ class BashTool(Tool):
         }
         if self.sandbox != "off":
             details["sandbox"] = self.sandbox
+            details["sandbox_network"] = self.sandbox_network
         if cut:
             ref = ctx.blobs.put(ctx.session_id, output)
             details["full_output_ref"] = ref

@@ -1,10 +1,10 @@
 // 对话时间线的渲染器。每个函数只负责“把一条持久化记录或一个事件画成 DOM”，不持有状态；
 // 交互所需的上下文（工具副作用表、当前会话、回调）通过 ctx 传入。
 import { api } from "../lib/api.js";
-import { $, esc, fmt, h } from "../lib/dom.js";
+import { $, copyText, esc, fmt, h } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { RISK, SYS_KINDS, TOOL_STATUS, USER_KINDS, callSummary, effectBadge, statusBadge, toolIcon } from "../lib/meta.js";
-import { promptDialog, toast } from "../lib/ui.js";
+import { flashCopied, promptDialog, toast } from "../lib/ui.js";
 import { md } from "../md.js";
 
 const blocks = (m, type) => (m.content || []).filter((b) => b.type === type);
@@ -60,13 +60,19 @@ export function assistantItem(m, results, ctx) {
     w.append(tools);
   }
   const u = m.usage;
-  if (u || m.model) {
-    const bits = [];
-    if (m.model) bits.push(`<span>${icon("cpu", "sm")}${esc(m.model)}</span>`);
-    if (u) bits.push(`<span class="tnum" title="输入（含缓存命中）/ 输出 token">${icon("arrowUp", "sm")}${fmt.k(fmt.tokIn(u))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>`);
-    if (u?.cache_read_tokens) bits.push(`<span class="tnum">缓存命中 ${fmt.k(u.cache_read_tokens)}</span>`);
-    if (m.stop_reason === "max_tokens") bits.push(`<span>${icon("alert", "sm")}达到输出长度上限</span>`);
-    w.append(h("div", { class: "msg-meta", html: bits.join("") }));
+  const bits = [];
+  if (m.model) bits.push(`<span>${icon("cpu", "sm")}${esc(m.model)}</span>`);
+  if (u) bits.push(`<span class="tnum" title="输入（含缓存命中）/ 输出 token">${icon("arrowUp", "sm")}${fmt.k(fmt.tokIn(u))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>`);
+  if (u?.cache_read_tokens) bits.push(`<span class="tnum">缓存命中 ${fmt.k(u.cache_read_tokens)}</span>`);
+  if (m.stop_reason === "max_tokens") bits.push(`<span>${icon("alert", "sm")}达到输出长度上限</span>`);
+  if (bits.length || text) {
+    const foot = h("div", { class: "msg-foot" }, h("div", { class: "msg-meta", html: bits.join("") }));
+    if (text) {   // 复制 Markdown 原文：贴进文档、issue 时格式还在
+      const copy = h("button", { class: "btn ghost sm", type: "button", "aria-label": "复制这条回复（Markdown 原文）", html: `${icon("copy", "sm")}<span>复制</span>` });
+      copy.onclick = async () => { if (await copyText(text)) flashCopied(copy); else toast("浏览器拒绝了剪贴板访问", { tone: "warning" }); };
+      foot.append(h("div", { class: "msg-actions" }, copy));
+    }
+    w.append(foot);
   }
   return w;
 }

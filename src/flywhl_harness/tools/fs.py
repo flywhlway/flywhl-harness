@@ -14,15 +14,15 @@ pi 的核心工具只有 read / write / edit / bash 四个，外加 grep / find 
 from __future__ import annotations
 
 import difflib
-import fnmatch
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 from .._utils import truncate_head
-from ..policy.sensitive import sensitivity
-from ..runtime.workspace import IGNORED_DIRS, IGNORED_FILES, PathEscape
+from ..policy.sensitive import CREDENTIAL_GLOBS, SECRET_HINT_GLOBS, sensitivity
+from ..runtime.workspace import IGNORED_DIRS, IGNORED_FILES, CredentialPath, PathEscape
+from . import regex_search
 from .base import Effect, Tool, ToolContext, ToolResult
 
 MAX_LINES = 2000
@@ -77,7 +77,11 @@ def _atomic_write(p: Path, text: str) -> None:
 
 
 def _resolve(ctx: ToolContext, path: str, *, allow_outside: bool = False) -> Path:
-    return ctx.workspace.resolve(path, allow_outside=allow_outside)
+    p = ctx.workspace.resolve(path, allow_outside=allow_outside)
+    # 执行时按真实路径再查一次凭证清单：权限判定之后、真正打开之前，符号链接可能已经被换掉（TOCTOU）
+    if sensitivity(p) == "deny":
+        raise CredentialPath(f"{path} 实际指向凭证位置 {p}，任何模式下都不读写")
+    return p
 
 
 class ReadTool(Tool):
@@ -321,41 +325,26 @@ class GrepTool(Tool):
     effect = Effect.READ
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        flags = re.I if args.get("ignore_case") else 0
         try:
-            rx = re.compile(args["pattern"], re.I if args.get("ignore_case") else 0)
+            re.compile(args["pattern"], flags)   # 先在本进程编译一次：写错的正则立即报错，不必起子进程
         except re.error as e:
             return ToolResult.error(f"正则表达式无效：{e}。如需匹配字面量，请转义特殊字符。")
         root = _resolve(ctx, args.get("path", "."), allow_outside=True)
-        glob = args.get("glob")
         cap = args.get("max_results", 100)
-        hits: list[str] = []
-        files_scanned = withheld = 0
-        targets = [root] if root.is_file() else _iter_files(root)
-        for fp in targets:
-            if glob and not fnmatch.fnmatch(fp.name, glob):
-                continue
-            # 权限层只看得到遍历的根：grep -r 扫过 ~/.kube/config、项目 .env 时逐个文件拦下，要看须显式指定路径走审批
-            if fp is not root and sensitivity(fp.resolve()):
-                withheld += 1
-                continue
-            try:
-                if fp.stat().st_size > 2 * 1024 * 1024:
-                    continue
-                data = fp.read_bytes()
-            except OSError:
-                continue
-            if _is_binary(data):
-                continue
-            files_scanned += 1
-            for i, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
-                if rx.search(line):
-                    hits.append(f"{ctx.workspace.rel(fp)}:{i}: {line.strip()[:300]}")
-                    if len(hits) >= cap:
-                        break
-            if len(hits) >= cap:
-                break
-            ctx.cancel.raise_if_cancelled()
-        note = (f"\n[跳过 {withheld} 个凭证或密钥文件：.env 这类文件可以把 path 指向它、经人工确认后搜索；"
+        try:
+            # 遍历、读文件、匹配都在子进程里做（见 tools/regex_search.py）。权限层只看得到遍历的根：
+            # grep -r 扫过 ~/.kube/config、项目 .env 时逐个文件拦下，要看须显式指定路径走审批
+            found = await regex_search.grep_files(
+                args["pattern"], flags, str(root), glob=args.get("glob"), cap=cap,
+                withhold=(*CREDENTIAL_GLOBS, *SECRET_HINT_GLOBS), ignored_dirs=IGNORED_DIRS, ignored_files=IGNORED_FILES,
+                timeout=min(regex_search.TIMEOUT, ctx.time_left) if ctx.time_left else None)
+        except regex_search.RegexTimeout as e:
+            return ToolResult.error(f"搜索超过 {e.seconds:.0f} 秒被终止：正则可能存在灾难性回溯（如 (a+)+$），"
+                                    "或者搜索范围太大。请简化表达式，或用 path / glob 缩小范围。")
+        hits = [f"{ctx.workspace.rel(p)}:{i}: {line}" for p, i, line in found["hits"]]
+        files_scanned, withheld = found["scanned"], found["withheld"]
+        note =(f"\n[跳过 {withheld} 个凭证或密钥文件：.env 这类文件可以把 path 指向它、经人工确认后搜索；"
                 "~/.ssh、~/.kube 这类凭证任何模式下都不读取]") if withheld else ""
         if not hits:
             return ToolResult(content=f"未找到匹配（扫描了 {files_scanned} 个文件）。{note}",
@@ -363,13 +352,6 @@ class GrepTool(Tool):
         more = f"\n[已达到 max_results={cap}，可能还有更多匹配；请缩小范围]" if len(hits) >= cap else ""
         return ToolResult(content="\n".join(hits) + more + note,
                           details={"count": len(hits), "files_scanned": files_scanned, "withheld": withheld})
-
-
-def _iter_files(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS)
-        for fn in sorted(f for f in filenames if f not in IGNORED_FILES):
-            yield Path(dirpath) / fn
 
 
 def _human(n: int) -> str:

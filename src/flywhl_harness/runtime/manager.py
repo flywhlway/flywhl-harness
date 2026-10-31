@@ -181,7 +181,7 @@ class Harness:
         self.hooks = hooks or HookBus()
         for hc in self.config.hooks:
             self.hooks.add(Hook(hc.event, CommandHook(hc.command, str(self.workspace_root)), name=f"cmd:{hc.command[:30]}",
-                                matcher=hc.matcher, timeout=hc.timeout, fail_closed=hc.fail_closed, source="project"))
+                                matcher=hc.matcher, timeout=hc.timeout, fail_closed=hc.closed, source="project"))
         self.approvals = ApprovalBroker(self.store, on_ask=self.config.permissions.on_ask,
                                         timeout=self.config.permissions.approval_timeout, resolver=approval_resolver)
         self.state = RunStateMachine(self.store)

@@ -10,7 +10,8 @@ bypass 模式下又没有人审，漏掉就是照读。这一档让内核按真�
 刻意留小的范围：
 
 - 只包 bash 工具的子进程；命令 hook、MCP 服务器子进程不在沙箱里；
-- 从 ``(allow default)`` 起步，只收紧文件访问：网络、进程、Mach 服务（含钥匙串查询）都不限制，出口管控要另做；
+- 从 ``(allow default)`` 起步，主要收紧文件访问；进程、Mach 服务（含钥匙串查询）不限制。网络默认不限，
+  ``sandbox_network = "deny"`` 时禁止对外连接（含回环地址上的 TCP；本机 Unix 套接字不受影响），出口白名单要另做；
 - 凭证位置读不到，``ssh``、``git push``（SSH 协议）、``kubectl``、``gh`` 这类要用凭证的命令在沙箱里会失败——这一档用能力换安全；
 - ``sandbox-exec`` 已被 Apple 标为 deprecated，但仍随系统提供。不可用时 **拒绝执行**，不悄悄退回沙箱外。
 """
@@ -27,6 +28,7 @@ from ..policy.sensitive import CREDENTIAL_GLOBS
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 SANDBOX_LEVELS = ("off", "macos")
+SANDBOX_NETWORK = ("allow", "deny")
 # 指向凭证位置的环境变量：值是文件的按文件拒绝，是目录的按整个目录拒绝；KUBECONFIG 可以是冒号分隔的多个文件
 _CREDENTIAL_ENV_FILES = ("KUBECONFIG", "AWS_SHARED_CREDENTIALS_FILE")
 _CREDENTIAL_ENV_DIRS = ("GNUPGHOME", "DOCKER_CONFIG", "CLOUDSDK_CONFIG", "GH_CONFIG_DIR")
@@ -40,9 +42,15 @@ def _str(path: str) -> str:
 
 
 def _glob_regex(glob: str) -> str:
-    """fnmatch 的 ``*`` 可以跨目录，这里同样转成 ``.*``；清单里只用到 ``*`` 和普通字符。"""
-    body = "".join(".*" if c == "*" else ("\\" + c if c in ".^$+?()[]{}|\\" else c) for c in glob)
-    return f'(regex #"^{body}$")'
+    """fnmatch 的 ``*`` 可以跨目录，这里同样转成 ``.*``；清单里只用到 ``*`` 和普通字符。
+    字母写成 ``[aA]``：清单按小写写、匹配不区分大小写（理由见 ``policy/sensitive.py``），磁盘上却是 ``Library/Keychains``。"""
+    def one(c: str) -> str:
+        if c == "*":
+            return ".*"
+        if c.isalpha():
+            return f"[{c.lower()}{c.upper()}]"
+        return "\\" + c if c in ".^$+?()[]{}|\\" else c
+    return f'(regex #"^{"".join(one(c) for c in glob)}$")'
 
 
 def _credential_filters(env: dict[str, str]) -> list[str]:
@@ -61,8 +69,9 @@ def default_writable() -> list[str]:
 
 
 def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = None,
-                     env: dict[str, str] | None = None) -> str:
-    """生成 Seatbelt 配置。``writable`` 为工作区之外允许写的目录，默认是临时目录；``env`` 默认取当前环境。"""
+                     env: dict[str, str] | None = None, network: bool = True) -> str:
+    """生成 Seatbelt 配置。``writable`` 为工作区之外允许写的目录，默认是临时目录；``env`` 默认取当前环境；
+    ``network=False`` 时禁止对外的网络连接（IP 层，回环地址也算）。"""
     ws = os.path.realpath(workspace)
     extra = default_writable() if writable is None else [os.path.realpath(p) for p in writable]
     allowed = " ".join([f"(subpath {_str(ws)})", *(f"(subpath {_str(p)})" for p in extra), *_DEVICES])
@@ -73,16 +82,18 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
         f"(deny file-write* (require-not (require-any {allowed})))",
         f"(deny file-write* (subpath {_str(os.path.join(ws, '.flywhl'))}) (literal {_str(os.path.join(ws, 'flywhl.toml'))}))",
     ]
+    if not network:   # 数据外带、下载执行都要走网络；本机 Unix 套接字（DNS 解析、docker.sock）不在此列
+        lines.append("(deny network-outbound (remote ip))")
     return "\n".join(lines)
 
 
 def sandbox_argv(command: str, workspace: str | Path, *, writable: Iterable[str] | None = None,
-                 executable: str | None = None) -> list[str]:
+                 executable: str | None = None, network: bool = True) -> list[str]:
     """把 bash 命令包进 sandbox-exec。沙箱不可用时抛 ``RuntimeError``，由调用方拒绝执行。"""
     executable = executable or SANDBOX_EXEC
     if sys.platform != "darwin" or not os.path.exists(executable):
         raise RuntimeError(f"sandbox = \"macos\" 需要 macOS 自带的 {executable}，当前环境没有")
-    return [executable, "-p", seatbelt_profile(workspace, writable=writable), "/bin/bash", "-c", command]
+    return [executable, "-p", seatbelt_profile(workspace, writable=writable, network=network), "/bin/bash", "-c", command]
 
 
-__all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "default_writable", "sandbox_argv", "seatbelt_profile"]
+__all__ = ["SANDBOX_EXEC", "SANDBOX_LEVELS", "SANDBOX_NETWORK", "default_writable", "sandbox_argv", "seatbelt_profile"]

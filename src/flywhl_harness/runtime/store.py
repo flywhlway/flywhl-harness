@@ -338,10 +338,12 @@ class Store:
         rows = self._q(f"SELECT * FROM sessions {where} ORDER BY updated_at DESC LIMIT ?", (limit,))
         return [SessionRecord(**_row(r)) for r in rows]  # type: ignore[arg-type]
 
-    def update_session(self, sid: str, **fields: Any) -> None:
+    def update_session(self, sid: str, *, touch: bool = True, **fields: Any) -> None:
+        """``touch=False``：只改标题、归档这类元数据，不刷新 updated_at（会话列表按它排序，改个名不该跳到最前）。"""
         if not fields:
             return
-        fields["updated_at"] = now()
+        if touch:
+            fields["updated_at"] = now()
         cols = ", ".join(f"{k}=?" for k in fields)
         vals = [_dump(v) if k == "meta" else v for k, v in fields.items()]
         self._x(f"UPDATE sessions SET {cols} WHERE id=?", (*vals, sid))

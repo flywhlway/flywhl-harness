@@ -466,6 +466,9 @@ CREDENTIAL_SAMPLES = [
     "~/.config/gcloud/application_default_credentials.json", "~/.azure/msal_token_cache.json", "~/.kube/config",
     "~/.docker/config.json", "~/.netrc", "~/.git-credentials", "~/.config/gh/hosts.yml", "~/.pypirc", "~/.pgpass",
     "~/.vault-token", "~/.gnupg/private-keys-v1.d/a.key", "/etc/shadow", "/etc/master.passwd", "/proc/1/environ",
+    "~/.config/git/credentials", "~/.cargo/credentials.toml", "~/.gem/credentials", "~/.terraform.d/credentials.tfrc.json",
+    "~/.oci/config", "~/.s3cfg", "~/.boto", "~/.config/rclone/rclone.conf", "~/.password-store/work/github.gpg",
+    "~/Library/Keychains/login.keychain-db", "~/.local/share/keyrings/login.keyring", "~/.flywhl/server_token",
     ".kube/config", "deploy/.docker/config.json",       # 凭证就在工作区里：早期版本 read 在 default 模式下直接放行
     # 大小写别名：macOS / Windows 的文件系统不区分大小写，.SSH/config 打开的就是 .ssh/config；早期版本按原样匹配，全部放行
     ".SSH/config", "~/.Kube/config", "~/.AWS/credentials", "deploy/.DOCKER/config.json", "~/keys/ID_RSA",
@@ -567,7 +570,7 @@ def test_every_sensitive_glob_is_exercised_and_known_to_bash():
 
     samples = [os.path.expanduser(p) for p in CREDENTIAL_SAMPLES]
     for g in CREDENTIAL_GLOBS:
-        hit = [p for p in samples if fnmatch.fnmatchcase(p, g)]
+        hit = [p for p in samples if fnmatch.fnmatchcase(p.lower(), g)]   # 清单按小写写，匹配不区分大小写
         assert hit, f"{g} 没有样例"
         assert all(CREDENTIAL_HINTS.search(p) and SECRET_HINTS.search(p) for p in hit), g
     for p in HINT_SAMPLES:  # 两档不串：线索档的样例不能被当成凭证档硬拒绝

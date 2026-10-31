@@ -86,6 +86,7 @@ class PermissionConfig:
     approval_timeout: float = 600.0        # 审批超时，超时默认拒绝
     strip_secret_env: bool = True          # bash 子进程剥离 *KEY*/*TOKEN*/*SECRET* 等环境变量
     sandbox: str = "off"                   # off | macos（bash 跑在 sandbox-exec 里，原型，见 tools/sandbox.py）
+    sandbox_network: str = "allow"         # allow | deny（沙箱内禁止对外网络连接；只在 sandbox = "macos" 时生效）
 
 
 @dataclass
@@ -96,7 +97,13 @@ class HookConfig:
     command: str = ""
     matcher: str = "*"
     timeout: float = 30.0
-    fail_closed: bool = False
+    # 脚本崩溃、超时、输出无法解析时怎么办。None = 按事件决定：pre_tool_use 是守卫，失败即拒绝（fail-closed）；
+    # 其它事件只是观察或补充上下文，失败即放行并给出警告
+    fail_closed: bool | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self.fail_closed if self.fail_closed is not None else self.event == "pre_tool_use"
 
 
 @dataclass
@@ -260,6 +267,7 @@ _SAFE_KEYS = frozenset({
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
     "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos",),
+    "sandbox_network": ("deny",),
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 

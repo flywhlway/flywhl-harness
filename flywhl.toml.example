@@ -60,6 +60,7 @@ on_ask = "wait"                   # wait（等待人审）| allow | deny（无�
 approval_timeout = 600
 strip_secret_env = true
 sandbox = "off"                   # off | macos（bash 跑在 sandbox-exec 里：凭证位置不可读写，写操作限制在工作区与临时目录；原型）
+sandbox_network = "allow"         # allow | deny（只在 sandbox = "macos" 时生效；deny 禁止对外连接，含回环地址上的 TCP，本机 Unix 套接字不受影响）
 rules = [
   "allow:bash(git status*)",
   "allow:bash(git diff*)",
@@ -72,7 +73,7 @@ rules = [
 # event = "pre_tool_use"
 # matcher = "bash"
 # command = "python3 scripts/guard.py"
-# fail_closed = true
+# fail_closed = true             # hook 崩溃或超时时按拒绝处理；不写时 pre_tool_use 为 true，其余事件为 false
 
 # MCP 服务器：工具名会加上 mcp__<名字>__ 前缀
 # [mcp_servers.demo]

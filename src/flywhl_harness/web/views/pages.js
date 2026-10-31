@@ -1,12 +1,12 @@
-// 列表页：运行记录、审批收件箱、工具目录。都是“只读视图 + 定时刷新”，不持有长连接。
+// 列表页：运行记录、审批收件箱、工具目录。都是“只读视图 + 定时刷新”，不持有长连接。页面外壳也供「环境与安全」页复用。
 import { api } from "../lib/api.js";
 import { $, $$, debounce, esc, fmt, h } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { ACTIVE, EFFECT, effectBadge, statusBadge, toolIcon } from "../lib/meta.js";
-import { toast } from "../lib/ui.js";
+import { setTitle, toast } from "../lib/ui.js";
 import { approvalCard } from "./timeline.js";
 
-function pageShell(root, { title, iconName }) {
+export function pageShell(root, { title, iconName }) {
   root.innerHTML = "";
   const header = h("header", { class: "page-header", html: `
     <button class="btn ghost icon menu-toggle" type="button" data-action="open-nav" aria-label="打开导航">${icon("menu")}</button>
@@ -15,7 +15,7 @@ function pageShell(root, { title, iconName }) {
   const inner = h("div", { class: "page-inner" });
   page.append(inner);
   root.append(header, page);
-  document.title = `${title} · flywhl harness`;
+  setTitle(`${title} · flywhl harness`);
   return { header, inner, actions: $("#pg-actions", header) };
 }
 

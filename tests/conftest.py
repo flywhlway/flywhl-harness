@@ -39,8 +39,12 @@ def tool_ends(events) -> list[dict]:
 
 @pytest.fixture(autouse=True)
 def _isolated_flywhl_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """用户配置与信任记录指向临时目录：本机的 ~/.flywhl 不影响测试，测试也不会写它。"""
+    """用户配置与信任记录指向临时目录：本机的 ~/.flywhl 不影响测试，测试也不会写它。
+    HOME 同样换成临时目录：测试会真正执行 bash 命令，防线一旦回归，命令里的 ~ 不能落到开发者的家目录上。"""
     monkeypatch.setenv("FLYWHL_HOME", str(tmp_path / "flywhl-home"))
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture

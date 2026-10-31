@@ -7,8 +7,8 @@
   <title>flywhl harness · Agent 控制台</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg"><!-- 飞轮标识：图形与文档站 logo 相同，配色取控制台品牌蓝 -->
   <link rel="stylesheet" href="/static/style.css">
-  <!-- 首帧就用正确的主题，避免明暗闪烁 -->
-  <script>try { document.documentElement.dataset.theme = localStorage.getItem("flywhl-theme") || "system"; } catch {}</script>
+  <!-- 首帧就用正确的主题，避免明暗闪烁（同步外链脚本：CSP 禁止内联脚本） -->
+  <script src="/static/boot.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主内容</a>
@@ -38,7 +38,10 @@
       <nav class="nav" id="nav" aria-label="页面"></nav>
 
       <div class="sidebar-section">
-        <div class="section-label" id="recent-label">最近会话</div>
+        <div class="section-head">
+          <div class="section-label" id="recent-label">最近会话</div>
+          <button class="section-toggle" id="toggle-archived" type="button" aria-pressed="false" aria-controls="session-list">已归档</button>
+        </div>
         <ul class="session-list" id="session-list" aria-labelledby="recent-label"></ul>
       </div>
 

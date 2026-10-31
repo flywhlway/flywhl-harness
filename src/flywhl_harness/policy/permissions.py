@@ -116,7 +116,8 @@ class Rule:
 
 # 托管基线（排在所有规则与模式之前，bypass 也不例外）：密钥与凭证默认不可读写，最危险的命令直接拒绝；
 # harness 自己的数据目录与项目配置不能被 Agent 改写——.flywhl/ 里是会话库、审批记录、快照与 .flywhl/config.toml，
-# flywhl.toml 会在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权
+# flywhl.toml 会在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权；
+# .git/ 同理：写进 .git/config 的 core.fsmonitor 会在下一次 git status 时执行
 # 敏感路径清单与 bash 命令分析共用（policy/sensitive.py）；grep 会把匹配行原样带回上下文，和 read 一样要拦
 _CONTENT_TOOLS = ("read", "grep", "write", "edit")
 MANAGED_BASELINE = [
@@ -124,6 +125,8 @@ MANAGED_BASELINE = [
     *(f"ask:{t}({g})" for g in SECRET_HINT_GLOBS for t in _CONTENT_TOOLS),
     "deny:write(.flywhl/*)", "deny:edit(.flywhl/*)", "deny:write(*/.flywhl/*)", "deny:edit(*/.flywhl/*)",
     "ask:write(flywhl.toml)", "ask:edit(flywhl.toml)", "ask:write(*/flywhl.toml)", "ask:edit(*/flywhl.toml)",
+    # .git/ 里的 config 与 hooks 会被之后的 git 命令执行（core.fsmonitor、pre-commit……）：accept_edits 也不能自动放行
+    *(f"ask:{t}({g})" for g in (".git", "*/.git", ".git/*", "*/.git/*") for t in ("write", "edit")),
     "ask:bash(*.flywhl*)",
     "deny:bash(rm -rf /)", "deny:bash(rm -rf /*)", "deny:bash(rm -rf ~*)", "deny:bash(mkfs*)", "deny:bash(:(){*)",
 ]
@@ -230,8 +233,8 @@ class PermissionPolicy:
             decision, reason = Decision.ASK, "命令分析为高危：" + "；".join(analysis.reasons)
         if analysis and analysis.opaque and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             # allow 规则（含“本会话总是允许”的授权）按命令前缀匹配：git status "$(rm -rf ~)" 会命中 git status*，
-            # 但替换里的命令不受规则约束——这类命令一律交给人确认
-            decision, reason = Decision.ASK, "命令包含命令替换或进程替换，其中执行的命令不受 allow 规则约束，需要人工确认"
+            # 但替换里的命令不受规则约束；仓库配置给 git diff 挂的 textconv 同理——这类命令一律交给人确认
+            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换或仓库配置），不受 allow 规则约束，需要人工确认"
         if tainted and effect != Effect.READ and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:

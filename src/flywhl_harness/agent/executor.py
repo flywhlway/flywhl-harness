@@ -26,7 +26,7 @@ from ..cancel import RunCancelled
 from ..events import E, Event
 from ..policy.hooks import HookEvent, HookInput
 from ..policy.permissions import Decision, grant_for, strictest
-from ..runtime.workspace import PathEscape
+from ..runtime.workspace import CredentialPath, PathEscape
 from ..tools.base import Effect, Tool, ToolContext, ToolResult, TransientToolError
 from ..tools.schema import format_errors, validate
 from ..types import Message, ToolCall, tool_result_message
@@ -240,6 +240,10 @@ class ToolExecutor:
                         args, errs = validate(tool.parameters, again.updated_input)
                         if errs:
                             return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
+                        # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略，命中拒绝（灾难性命令、凭证、deny 规则）就不执行
+                        final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+                        if final.decision == Decision.DENY:
+                            return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
             if dec.remember:
                 g = grant_for(tool, args)
                 rc.grants.append(g)
@@ -316,7 +320,8 @@ class ToolExecutor:
                 tried = f"共尝试 {attempt} 次" if retryable else "非幂等工具不自动重试"
                 return ToolResult.error(f"工具暂时不可用（{tried}）：{e}"), "error"
             except PathEscape as e:
-                return ToolResult.error(f"{e}。只能操作工作区内的文件。"), "denied"
+                hint = "" if isinstance(e, CredentialPath) else "只能操作工作区内的文件。"
+                return ToolResult.error(f"{e}。{hint}"), "denied"
             except RunCancelled as e:  # 例如 task：父 Run 被取消时子代理向上传播的取消
                 return ToolResult.error(f"已取消：{e}"), "cancelled"
             except Exception as e:

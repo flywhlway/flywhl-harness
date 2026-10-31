@@ -35,8 +35,12 @@ CREDENTIAL_GLOBS: tuple[str, ...] = (
     "*/.aws/*", "*/.config/gcloud/*", "*/.azure/*",            # 云厂商凭证与 SSO 缓存令牌
     "*/.kube/*",                                               # kubeconfig：集群证书与令牌
     "*/.docker/config.json",                                   # 镜像仓库登录凭证
-    "*/.netrc", "*/.git-credentials", "*/.config/gh/*",        # HTTP 基本认证、Git 与 GitHub CLI 令牌
+    "*/.netrc", "*/.git-credentials", "*/.config/git/credentials", "*/.config/gh/*",   # HTTP 基本认证、Git 与 GitHub CLI 令牌
     "*/.pypirc", "*/.pgpass", "*/.vault-token", "*/.gnupg/*",  # 发包令牌、数据库口令、Vault 令牌、GPG 私钥环
+    "*/.cargo/credentials*", "*/.gem/credentials", "*/.terraform.d/credentials.tfrc.json",   # crates.io / RubyGems / Terraform 令牌
+    "*/.oci/*", "*/.s3cfg", "*/.boto", "*/.config/rclone/rclone.conf",   # 其它云与对象存储凭证
+    "*/.password-store/*", "*/library/keychains/*", "*/.local/share/keyrings/*",   # pass、macOS 钥匙串、GNOME 钥匙环
+    "*/.flywhl/server_token",                                  # Web 控制台的访问令牌：拿到它就能替用户批准一切
     "*/etc/shadow", "*/etc/master.passwd",                     # 系统口令哈希：Linux / macOS（/etc 解析为 /private/etc）
     "/proc/*/environ",                                         # 进程环境变量
 )
@@ -54,8 +58,11 @@ SECRET_HINT_GLOBS: tuple[str, ...] = ("*.env", "*/.env.*", "*/.npmrc", "*_histor
 # 两档各自要覆盖对应 glob 的每个位置，测试逐项核对，也核对线索档的样例不会落进凭证档
 _SEG_START, _SEG_END = r"(?<![\w.-])", r"(?![\w.-])"   # 前后不能紧挨着名字字符：整段匹配
 CREDENTIAL_HINTS = re.compile(
-    rf"{_SEG_START}\.(ssh|aws|azure|kube|gnupg){_SEG_END}|\.config/(gcloud|gh){_SEG_END}"
+    rf"{_SEG_START}\.(ssh|aws|azure|kube|gnupg|oci|password-store){_SEG_END}|\.config/(gcloud|gh){_SEG_END}"
     r"|id_rsa|id_ed25519|\.docker/config\.json|\.netrc\b|\.git-credentials|\.pypirc|\.pgpass|\.vault-token"
+    rf"|\.config/git/credentials|\.cargo/credentials|\.gem/credentials|\.terraform\.d/credentials"
+    rf"|{_SEG_START}\.(s3cfg|boto){_SEG_END}|\.config/rclone/rclone\.conf|library/keychains{_SEG_END}"
+    rf"|\.local/share/keyrings{_SEG_END}|\.flywhl/server_token"
     r"|/etc/shadow|/etc/master\.passwd|/proc/[^/\s]+/environ"
     r"|\b(find-generic-password|find-internet-password|dump-keychain)\b"
     r"|\$\{?(KUBECONFIG|GNUPGHOME|DOCKER_CONFIG|CLOUDSDK_CONFIG|GH_CONFIG_DIR|AWS_SHARED_CREDENTIALS_FILE)\b"
