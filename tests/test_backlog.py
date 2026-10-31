@@ -107,3 +107,22 @@ async def test_settings_show_mcp_annotation_policy(ws):
             m = (await c.get("/api/settings")).json()["mcp"][0]
     assert m == {"name": "demo", "transport": "stdio", "tools": 2, "trust_annotations": False, "read_only": [],
                  "ignored_hints": 1}
+
+
+@pytest.mark.parametrize("bad", [{"read_only_tools": "safe_*"}, {"read_only_tools": [1]}, {"trust_annotations": "yes"},
+                                 {"env": {"A": 1}}, {"args": "srv.js"}, {"read_only_tool": ["x"]}])
+def test_mcp_server_config_types_are_strict(bad):
+    """类型写错就报错：read_only_tools = "safe_*" 若按字符拆开，"*" 会放行全部工具，确认提示里却显示 'safe_*'。"""
+    from flywhl_harness.config import _merge, split_untrusted
+
+    spec = {"command": "node", **bad}
+    with pytest.raises(ValueError, match="mcp_servers.x"):
+        _merge(HarnessConfig(), {"mcp_servers": {"x": spec}})
+    assert "加载时同样会报错" in split_untrusted({"mcp_servers": {"x": spec}})[1][0]
+
+
+def test_hook_env_types_are_strict():
+    with pytest.raises(ValueError, match="hooks.pass_env"):
+        HookConfig(command="true", pass_env="OPENAI_API_KEY")
+    with pytest.raises(ValueError, match="hooks.env"):
+        HookConfig(command="true", env={"LEVEL": 2})

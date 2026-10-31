@@ -27,6 +27,7 @@ import json
 from fnmatch import fnmatchcase
 from typing import Any
 
+from ..config import check_mcp_server
 from .base import Effect, Tool, ToolContext, ToolResult
 from .shell import _clean_env
 
@@ -187,11 +188,12 @@ async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = N
     """
     clients, tools = [], []
     for name, conf in servers.items():
+        check_mcp_server(name, conf)   # 代码里直接构造的配置不经过 HarnessConfig.load，这里再校验一次
         c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd)
         await c.start()
         clients.append(c)
-        trust = conf.get("trust_annotations") is True
-        ro = [p for p in conf.get("read_only_tools") or [] if isinstance(p, str)]
+        trust = conf.get("trust_annotations", False)
+        ro = conf.get("read_only_tools", [])
         for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：保证工具顺序稳定
             tools.append(MCPTool(c, spec, trust_annotations=trust, read_only=any(fnmatchcase(spec["name"], p) for p in ro)))
     return clients, tools

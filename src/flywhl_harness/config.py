@@ -104,6 +104,10 @@ class HookConfig:
     env: dict[str, str] = field(default_factory=dict)
     pass_env: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        _check_env("hooks.env", self.env)
+        _check_str_list("hooks.pass_env", self.pass_env)
+
     @property
     def closed(self) -> bool:
         return self.fail_closed if self.fail_closed is not None else self.event == "pre_tool_use"
@@ -346,8 +350,10 @@ def _describe_env(spec: dict[str, Any]) -> str:
 
 
 def _describe_mcp(name: str, spec: Any) -> str:
-    if not isinstance(spec, dict):
-        return f"mcp_servers.{name} = {spec!r}"
+    try:
+        check_mcp_server(name, spec)
+    except ValueError as e:
+        return f"{e}（信任后加载时同样会报错）"
     line = f"mcp_servers.{name}: 启动 {' '.join(map(str, [spec.get('command'), *spec.get('args', [])]))!r}"
     if spec.get("cwd"):
         line += f"（目录 {spec['cwd']!r}）"
@@ -405,6 +411,44 @@ def record_trust(req: TrustRequest) -> None:
     os.replace(tmp, f)      # 原子替换：并发写入最坏丢一条记录，不会留下半个文件
 
 
+# ---------------------------------------------------------------------- 类型校验
+# 放宽权限的设置一律按声明的类型严格校验，写错就报错，不做宽松转换：read_only_tools = "safe_*" 若按字符拆开，
+# 其中的 "*" 会放行全部工具，而信任确认里显示的却是 'safe_*'——确认的内容必须就是生效的内容
+MCP_SERVER_KEYS = ("command", "args", "env", "cwd", "read_only_tools", "trust_annotations")
+
+
+def _check_str_list(where: str, value: Any) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ValueError(f"{where} 必须是字符串列表，实际是 {value!r}")
+    return value
+
+
+def _check_env(where: str, value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError(f"{where} 必须是“变量名 = 字符串”的表，实际是 {value!r}")
+    return value
+
+
+def check_mcp_server(name: str, spec: Any) -> dict[str, Any]:
+    """校验一个 ``[mcp_servers.<name>]``，有误抛 ``ValueError``。配置加载与 ``load_mcp_tools`` 都会调用。"""
+    where = f"mcp_servers.{name}"
+    if not isinstance(spec, dict):
+        raise ValueError(f"{where} 必须是表，实际是 {spec!r}")
+    unknown = sorted(set(spec) - set(MCP_SERVER_KEYS))
+    if unknown:
+        raise ValueError(f"{where} 有未知配置项：{', '.join(unknown)}（可选：{', '.join(MCP_SERVER_KEYS)}）")
+    if not isinstance(spec.get("command"), str) or not spec["command"]:
+        raise ValueError(f"{where}.command 必须是非空字符串")
+    _check_str_list(f"{where}.args", spec.get("args", []))
+    _check_env(f"{where}.env", spec.get("env", {}))
+    if not isinstance(spec.get("cwd", ""), str):
+        raise ValueError(f"{where}.cwd 必须是字符串")
+    _check_str_list(f"{where}.read_only_tools", spec.get("read_only_tools", []))
+    if not isinstance(spec.get("trust_annotations", False), bool):
+        raise ValueError(f"{where}.trust_annotations 必须是 true 或 false，实际是 {spec['trust_annotations']!r}")
+    return spec
+
+
 def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
     """把字典递归合并进 dataclass；未知键直接报错，避免配置拼写错误被静默忽略。
 
@@ -422,5 +466,9 @@ def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
             setattr(dc, key, current + hooks if layer else hooks)
         elif key == "rules" and layer and isinstance(value, list):
             setattr(dc, key, current + value)
+        elif key == "mcp_servers":
+            if not isinstance(value, dict):
+                raise ValueError(f"mcp_servers 必须是表，实际是 {value!r}")
+            setattr(dc, key, {name: check_mcp_server(name, spec) for name, spec in value.items()})
         else:
             setattr(dc, key, value)
