@@ -771,6 +771,16 @@ def test_unpinned_packages_are_recognized(command, loose):
 _DIGEST = "@sha256:" + "a" * 64
 
 
+def _scripts(d):
+    """PEP 723 内联依赖：uv run / pipx run 运行脚本前现装。"""
+    head = "# /// script\n# dependencies = [\n"
+    (d / "loose.py").write_text(head + '#   "requests<3",\n# ]\n# ///\nprint(1)\n', encoding="utf-8")
+    (d / "tight.py").write_text(head + '#   "requests==2.31.0",\n#   "rich == 13.7.1 ; python_version >= \'3.8\'",\n'
+                                       "# ]\n# ///\n", encoding="utf-8")
+    (d / "broken.py").write_text("# /// script\n# dependencies = [\n# ///\n", encoding="utf-8")
+    (d / "plain.py").write_text("print(1)\n", encoding="utf-8")
+
+
 @pytest.mark.parametrize("command", [
     "docker run --cgroupns host evil/img",                     # 带值的选项认得出，镜像仍是 evil/img
     f"docker run --frobnicate mcp/a{_DIGEST} evil/img",        # 认不出的选项：分不清哪个才是镜像
@@ -793,10 +803,17 @@ _DIGEST = "@sha256:" + "a" * 64
     "uv run --with mcp[cli] mcp run server.py",                # uv run 只拉取 --with 给出的包
     "pipx --verbose run black",
     "docker --frobnicate run x",
+    "uv run https://example.com/s.py",                         # 远程脚本：每次都可能拿到不同的内容
+    "pipx run https://example.com/s.py",
+    "uv run loose.py",                                         # 内联依赖没锁版本
+    "uv run --script loose.py",
+    "pipx run loose.py",
+    "uv run broken.py",                                        # 内联依赖解析不了
 ])
 def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import unpinned_packages
 
+    _scripts(tmp_path)
     (tmp_path / "pkgdir").mkdir()
     (tmp_path / "req.txt").write_text("requests\n", encoding="utf-8")
     assert unpinned_packages(command, tmp_path)
@@ -815,10 +832,15 @@ def test_ambiguous_or_unbound_sources_count_as_unpinned(command, tmp_path):
     "uv run --with mcp==1.2.0 mcp run server.py",
     "pnpm -w dlx some@1.0.0",
     "npm --frobnicate test",                                   # 不拉取代码的子命令，认不出的选项无关紧要
+    "uv run tight.py",
+    "uv run plain.py",
+    "pipx run tight.py",
+    "uv run python loose.py",                                  # 脚本交给 python 运行时，uv 不读内联依赖
 ])
 def test_pinned_sources_stay_pinned(command, tmp_path):
     from flywhl_harness.policy.supply_chain import referenced_files, unpinned_packages
 
+    _scripts(tmp_path)
     (tmp_path / "pkg.tgz").write_bytes(b"")
     (tmp_path / "dist").mkdir()
     (tmp_path / "dist" / "tool-1.0-py3-none-any.whl").write_bytes(b"")

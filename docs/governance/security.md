@@ -316,7 +316,7 @@ MCP 服务器、技能包、hook 脚本有一个共同点：**它们是在你机
 - MCP 服务器子进程以 `env={**_clean_env(True), **self.env}` 启动：密钥类变量被剥离，服务器需要的凭证只能在 `flywhl.toml` 的 `env` 里
   显式给出，第三方服务器拿到了什么，从配置里一眼可见；
 - 启动目录 `flywhl.toml` 里的 `mcp_servers` 要先信任这份配置才会启动；信任哈希包含启动参数里写出的脚本；
-- 经 `npx`、`bunx`、`npm exec`、`pnpm dlx`、`yarn dlx`、`uvx`、`uv run --with`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）。判断锁没锁要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数：认不出的选项（分不清下一个词是它的值还是包名、镜像名，`npm --registry x exec 包` 这类写在子命令前面的全局选项同样要认得）、本地目录、内容没有按引用文件绑定的本地文件、compose 文件与依赖清单里的版本，一律按没锁处理；设置页只给包名，URL 里的账号与查询串去掉；
+- 经 `npx`、`bunx`、`npm exec`、`pnpm dlx`、`yarn dlx`、`uvx`、`uv run --with`、`pipx run`、`docker run` 临时拉取、又没锁到确切版本的包（镜像没带 `@sha256:` 摘要），`uv run` / `pipx run` 直接运行的远程脚本，以及脚本里 PEP 723 内联声明、没锁版本的依赖，在信任确认与设置页里标出；`permissions.require_pinned = true` 时直接拒绝启动（`policy/supply_chain.py`）。判断锁没锁要先找出拉取的是哪个包，而包管理器按自己的选项表解析参数：认不出的选项（分不清下一个词是它的值还是包名、镜像名，`npm --registry x exec 包` 这类写在子命令前面的全局选项同样要认得）、本地目录、内容没有按引用文件绑定的本地文件、compose 文件与依赖清单里的版本，一律按没锁处理；设置页只给包名，URL 里的账号与查询串去掉；
 - 服务器发来的请求（MCP 允许服务器反向请求客户端）只回复 `ping`，其它一律返回 `-32601`——服务器无法借 sampling 之类的能力反过来驱动模型；
 - annotations 的缺省值取保守一侧，服务器声明的放宽默认不采信，要在配置里写明 `trust_annotations` 或 `read_only_tools`，见上文；
 - 没有签名与权限声明机制。

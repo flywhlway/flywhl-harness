@@ -21,6 +21,7 @@ import hashlib
 import os
 import re
 import shlex
+import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
@@ -30,6 +31,9 @@ _SYSTEM_DIRS = ("/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/opt/", "/
 _SEMVER = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _COMMIT = re.compile(r"[#@][0-9a-f]{40}$")
 _DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+_PEP723 = re.compile(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
+_SCRIPT_LIMIT = 1 << 20
 
 
 def argv_of(command: str | Iterable[str]) -> list[str]:
@@ -189,13 +193,14 @@ def _runner(name: str, rest: list[str], where: _Where) -> list[str]:
             return i
         if rest[i:i + 2] == ["tool", "run"]:
             return _python("uv tool run", rest[i + 2:], where, _UV_VALUES, _UV_FLAGS, _UV_SPECS)
-        if rest[i] == "run":    # uv run --with x 命令：操作数是要运行的命令，拉取的只有 --with 给出的包
-            return _python("uv run", rest[i + 1:], where, _UV_VALUES, _UV_FLAGS, _UV_SPECS, operand=False)
+        if rest[i] == "run":    # uv run --with x 命令：操作数是要运行的命令或脚本，不是包
+            return _python("uv run", rest[i + 1:], where, _UV_VALUES, _UV_FLAGS, _UV_SPECS, operand=False,
+                           scripts=True)
         return []
     if name == "pipx":
         i = _subcommand(name, rest, _PIPX_VALUES, _PIPX_FLAGS, ("run",))
         return i if isinstance(i, list) else _python("pipx run", rest[i + 1:], where, _PIPX_VALUES, _PIPX_FLAGS,
-                                                     ("--spec",))
+                                                     ("--spec",), scripts=True)
     if name in ("docker", "podman", "nerdctl"):
         return _container(name, rest)
     if name in ("docker-compose", "podman-compose"):
@@ -271,16 +276,57 @@ def _npm(runner: str, args: list[str], where: _Where, values: frozenset[str], fl
 
 
 def _python(runner: str, args: list[str], where: _Where, values: frozenset[str], flags: frozenset[str],
-            spec_opts: tuple[str, ...], *, operand: bool = True) -> list[str]:
-    """要装的包：spec_opts 给出的，再加上没被 ``--from`` / ``--spec`` 顶替的第一个操作数。"""
+            spec_opts: tuple[str, ...], *, operand: bool = True, scripts: bool = False) -> list[str]:
+    """要装的包：spec_opts 给出的，再加上没被 ``--from`` / ``--spec`` 顶替的第一个操作数。scripts：操作数也可能是
+    直接运行的脚本（uv run、pipx run 认本地 .py 文件与 URL），这时它不是包。"""
     opts, i, unknown = _scan(args, values, flags)
     if unknown:
         return [_unknown(runner, unknown)]
     specs = [v for o, v in opts if o in spec_opts]
-    if operand and i < len(args) and not any(o in ("--from", "--spec") for o, _ in opts):
-        specs.append(args[i])
+    target = args[i] if i < len(args) else ""
+    script = bool(scripts and target and (_URL.match(target) or _bound(target, where)))
+    if operand and target and not script and not any(o in ("--from", "--spec") for o, _ in opts):
+        specs.append(target)
     out = [f"{runner} 依赖清单 {_shown(v)}（里面的版本这里核对不到）" for o, v in opts if o == "--with-requirements"]
+    if script:
+        out += _script(runner, target, where)
     return out + [d for s in specs if s and (d := _check(runner, s, where, npm=False))]
+
+
+def _bound(target: str, where: _Where) -> Path | None:
+    """target 指向内容已按引用文件绑定的本地文件时，返回它的真实路径。"""
+    p = Path(os.path.expanduser(_without_scheme(target)))
+    try:
+        real = (p if p.is_absolute() else where.base / p).resolve()
+    except OSError:
+        return None
+    return real if real in where.bound else None
+
+
+def _script(runner: str, target: str, where: _Where) -> list[str]:
+    """直接运行的脚本：远程 URL 每次都可能拿到不同的内容；本地脚本的内容按引用文件绑定，但 PEP 723 内联依赖
+    （``# /// script`` 块里的 dependencies）会在运行前现装，同样要锁版本。"""
+    if _URL.match(target):
+        return [f"{runner} 远程脚本 {_shown(target)}（每次运行都可能拿到不同的内容）"]
+    real = _bound(target, where)
+    try:
+        if real is None or real.stat().st_size > _SCRIPT_LIMIT:
+            return [] if real is None else [f"{runner} 脚本 {target} 太大，内联依赖这里核对不到"]
+        text = real.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return [f"{runner} 脚本 {target} 读不了，内联依赖这里核对不到"]
+    m = _PEP723.search(text)
+    if not m:
+        return []
+    body = "".join(line[2:] if line.startswith("# ") else line[1:] for line in m.group("content").splitlines(True))
+    try:
+        deps = tomllib.loads(body).get("dependencies", [])
+    except tomllib.TOMLDecodeError:
+        deps = None
+    if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+        return [f"{runner} 脚本 {target} 的内联依赖解析不了，这里核对不到版本"]
+    return [f"{runner} 脚本 {target} 的内联依赖 {_shown(d.strip())}" for d in deps
+            if not _version_pinned(re.sub(r"\s+", "", d.split(";")[0]), npm=False)]
 
 
 def _container(name: str, args: list[str]) -> list[str]:
@@ -306,15 +352,17 @@ def _check(runner: str, spec: str, where: _Where, *, npm: bool) -> str:
     local = _local(spec, where)
     if local is not None:
         return "" if local else f"{runner} 包 {_shown(spec)}（本地目录或不存在的路径，内容没有按内容绑定；打包成文件再引用）"
+    return "" if _version_pinned(spec, npm=npm) else f"{runner} 包 {_shown(spec)}"
+
+
+def _version_pinned(spec: str, *, npm: bool) -> bool:
     if _COMMIT.search(spec):
-        return ""           # git 地址锁到了提交
+        return True         # git 地址锁到了提交
     if npm:
         m = re.fullmatch(r"(@[^/@]+/)?[^/@]+@(.+)", spec)
-        ok = bool(m and _SEMVER.fullmatch(m.group(2)))
-    else:
-        m = re.fullmatch(r"[A-Za-z0-9._-]+(?:\[[^\]]*\])?(?:==|@)(.+)", spec)
-        ok = bool(m and re.fullmatch(r"\d[\w.+!-]*", m.group(1)))
-    return "" if ok else f"{runner} 包 {_shown(spec)}"
+        return bool(m and _SEMVER.fullmatch(m.group(2)))
+    m = re.fullmatch(r"[A-Za-z0-9._-]+(?:\[[^\]]*\])?(?:==|@)(.+)", spec)
+    return bool(m and re.fullmatch(r"\d[\w.+!-]*", m.group(1)))
 
 
 def _local(spec: str, where: _Where) -> bool | None:
