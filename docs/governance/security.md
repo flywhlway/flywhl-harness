@@ -243,7 +243,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
   人工批准不能绕过 hook 表达的不变量（见 [16 Hooks](/governance/hooks)）。
 - **把危险动作埋在长参数里。** 一条 2000 字符的命令，中间夹着 `; curl ...`。复合命令会被拆段分析，`reasons[0]` 会指出决定性的那一段。
 - **审批疲劳。** 先发几十个无害请求让人习惯性点批准，再夹带一个真正的危险请求。
-  [17 权限与人审](/governance/permissions-hitl) 里的秒批比例、同类重复审批次数可以把这种模式量化出来。
+  [17 权限与人审](/governance/permissions-hitl) 里的秒批比例、同类重复审批次数可以把这种模式量化出来；秒批成串、同类操作反复批准时，harness 会在事件流里提示。
 - **审批通道本身。** Web 服务能切换权限模式、批准审批、发起运行，等于能在本机执行命令，所以“只监听 `127.0.0.1`”并不够：
   恶意网页可以用 **DNS 重绑定**（让自己的域名解析到 127.0.0.1，从而与本服务“同源”）或跨站表单直接调用本地 API。
   `server/app.py` 的访问控制中间件有三层：
@@ -339,7 +339,7 @@ OWASP 发布了面向 Agentic 应用的 Top 10（2026 版）。下表按其中�
 | 记忆与上下文投毒 | 污染长期记忆、压缩摘要、项目指令 | 记忆写入审阅、来源追踪、压缩时保留来源 | `AGENTS.md` 可关闭加载；压缩摘要不保留污点信息 |
 | 不安全的 Agent 间通信 | 子代理 / 对等 Agent 之间传递被篡改或注入的消息 | 结构化契约、校验、来源标注 | 子代理回传契约校验；子代理的污点向父 Run 传播 |
 | 级联故障 | 一个 Agent 的错误在多 Agent 系统中放大 | 预算、熔断、隔离失败域 | 预算与循环守卫、模型调用熔断 |
-| 人机信任利用 | 利用人对 Agent 的信任诱导批准 | 审批展示真实动作、量化审批疲劳 | 审批卡片展示实际参数、命令分析与 diff 预览 |
+| 人机信任利用 | 利用人对 Agent 的信任诱导批准 | 审批展示真实动作、量化审批疲劳 | 审批卡片展示实际参数、命令分析、diff 预览与“始终允许”会添加的规则；秒批成串、同类重复批准时提示 |
 | 失控 Agent | Agent 偏离授权范围持续行动 | 终止开关、预算上限、审计 | 取消、`max_stop_blocks`、预算硬限额 |
 
 “压缩摘要不保留污点信息”值得多说一句：上下文压缩会把历史（包括来自不可信来源的内容）改写成一段摘要，
@@ -429,6 +429,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 审批改参绕过 hook、审批看不到改动 | `test_edited_args_rerun_pre_tool_hooks`、`test_approval_request_carries_diff_preview` |
 | MCP annotations 缺省值 | `test_mcp_annotation_defaults_are_conservative` |
 | 不可信项目配置（hook、MCP、放宽审批、改请求去向） | `test_untrusted_project_config_keeps_only_safe_settings`、`test_trust_is_bound_to_path_and_content` |
+| 审批疲劳（秒批成串、同类重复批准） | `test_fatigue_monitor_flags_streaks_of_fast_approvals`、`test_fatigue_monitor_suggests_a_rule_for_repeated_approvals`、`test_fast_repeated_approvals_raise_a_notice` |
 | hook / MCP 引用的脚本被改、包没锁版本 | `test_trust_covers_scripts_the_config_references`、`test_trust_follows_the_workspace_the_hooks_run_in`、`test_command_hook_refuses_scripts_changed_after_start`、`test_ambiguous_or_unbound_sources_count_as_unpinned`、`test_require_pinned_refuses_to_start` |
 
 已知缺口适合先以 `xfail` 的形式补进来，修复后转为必须通过——大写的 `<SYSTEM-REMINDER>`、`cat ../../etc/passwd`、
@@ -461,7 +462,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | hook 自身崩溃导致放行 | `fail_closed`：配置文件里的 `pre_tool_use` 命令 hook 默认开启 | 回归测试 | — | 已实现；进程内注册的 hook 仍默认 fail-open，守卫要显式设 `fail_closed=True` |
 | 审批人被描述误导 | 展示实际参数、命令分析与 diff 预览 | 改参后重新判定并重跑 PreToolUse | 快照回滚 | 已实现 |
 | 工具输出里的终端控制序列清屏、改写审批提示、写剪贴板 | 显示前剥离 ESC / OSC 序列 | — | — | 已修复，有测试 |
-| 审批疲劳导致盲批 | 会话授权、规则减少无效审批 | 秒批 / 重复审批监控 | 沙箱 | 有数据，无内置监控 |
+| 审批疲劳导致盲批 | 会话授权、规则减少无效审批 | 秒批 / 重复审批监控 | 沙箱 | 已实现，有测试：秒批成串、同类重复批准在事件流里提示，审批页显示疲劳指标 |
 | 伪造 `<system-reminder>` | 工具结果中转义该标签（含大小写变体与带属性的写法） | 系统提示词声明 | — | 已实现；工具描述与 `AGENTS.md` 不经过转义 |
 | 恶意 MCP 服务器自报只读 / 幂等 | annotations 默认不采信，放宽要在配置里点名（`read_only_tools`）或写明 `trust_annotations` | 服务器级 deny 规则 | 隔离运行 | 已修复，有测试 |
 | 恶意项目配置（`flywhl.toml` 里的 hook、MCP、`bypass`、`base_url`） | 高危设置先信任再生效，确认提示列出命令、子进程环境变量与注解策略 | 信任绑定路径与内容哈希，内容变化重新确认 | — | 已实现，有测试；hook / MCP 引用的脚本一并纳入哈希 |

@@ -218,12 +218,13 @@ export function approvalCard(a, ctx) {
           <textarea class="textarea mono" id="${id}-args" rows="6" spellcheck="false" aria-describedby="${id}-err" style="font-size:var(--fs-xs)"></textarea>
           <div class="field-error" id="${id}-err" role="alert" hidden></div></div></div>
       </details>
+      ${a.grant ? `<p class="grant-line">${icon("shieldCheck", "sm")}<span>“本会话始终允许”会添加 <code>${esc(a.grant)}</code>${a.approved_before ? `，本会话已人工批准过 ${a.approved_before} 次同类操作` : ""}</span></p>` : ""}
     </div>
     <div class="approval-foot">
       <span class="src">${icon("clock", "sm")} ${esc(fmt.ago(a.created_at))}${a.expires_at ? ` · ${esc(expiresIn(a.expires_at))}` : ""}</span>
       <span class="spacer"></span>
       <button class="btn danger-outline" type="button" data-act="reject">${icon("ban")}拒绝…</button>
-      <button class="btn" type="button" data-act="always" data-tip="批准并为本会话添加授权规则：同类操作不再询问">${icon("shieldCheck")}本会话始终允许</button>
+      <button class="btn" type="button" data-act="always" data-tip="${esc(a.grant ? `批准并为本会话添加 ${a.grant}：同类操作不再询问` : "批准并为本会话添加授权规则：同类操作不再询问")}">${icon("shieldCheck")}本会话始终允许</button>
       <button class="btn primary" type="button" data-act="approve">${icon("check")}批准</button>
     </div>`;
   const ta = $("textarea", card);

@@ -210,14 +210,21 @@ class ToolExecutor:
             return done(ToolResult.error(f"权限拒绝：{reason}。请换一种不需要该权限的方式完成，或向用户说明需要什么权限。"), "denied")
         if decision == Decision.ASK:
             preview = tool.preview(args, ctx)
+            grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
+            fatigue = getattr(rc.approvals, "fatigue", None)
+            asked = time.monotonic()
             dec = await rc.approvals.request(
                 run_id=rc.run_id, session_id=rc.session_id, call_id=call.id, tool=tool.name, args=args,
                 summary=tool.describe_call(args), risk=perm.risk, reason=reason, cancel=rc.cancel,
-                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview),
+                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview, grant, fatigue),
             )
             await self._set_status("running", "审批已处理")
             publish(E.APPROVAL_RESOLVED, {"call_id": call.id, "approved": dec.approved, "by": dec.by,
                                           "reason": dec.reason, "remember": dec.remember})
+            if fatigue is not None:
+                for text in fatigue.observe(rc.session_id, approved=dec.approved, by=dec.by, key=grant, risk=perm.risk,
+                                            waited=time.monotonic() - asked, remembered=dec.remember):
+                    publish(E.NOTICE, {"level": "warn", "code": "approval_fatigue", "text": text})
             if not dec.approved:
                 why = f"：{dec.reason}" if dec.reason else ""
                 return done(ToolResult.error(f"用户拒绝了该操作{why}。请调整方案（例如改用只读方式），或询问用户的意图。"), "rejected")
@@ -387,9 +394,12 @@ class ToolExecutor:
         return HookInput(event=event, run_id=rc.run_id, session_id=rc.session_id, cwd=str(rc.workspace.root),
                          tool_name=tool_name, tool_input=dict(args), context=rc)
 
-    async def _on_approval_created(self, rec, publish, perm, preview: str | None = None) -> None:
+    async def _on_approval_created(self, rec, publish, perm, preview: str | None = None, grant: str | None = None,
+                                   fatigue: Any = None) -> None:
         publish(E.APPROVAL_REQUEST, {**rec.to_dict(), "analysis": perm.analysis, "effect": str(perm.effect),
-                                     "preview": preview[:8000] if preview else None})
+                                     "preview": preview[:8000] if preview else None, "grant": grant,
+                                     "approved_before": fatigue.approved_before(rec.session_id, grant)
+                                     if fatigue is not None and grant else 0})
         await self._set_status("waiting_human", f"等待审批 {rec.id}")
 
     async def _set_status(self, to: str, reason: str) -> None:

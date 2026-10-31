@@ -736,6 +736,10 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 14px 16px; display: grid; gap: 4px; }
 .stat .k { font-size: var(--fs-xs); color: var(--text-3); display: flex; gap: 6px; align-items: center; }
 .stat .v { font-size: var(--fs-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat .v small { font-size: var(--fs-sm); font-weight: 500; color: var(--text-3); margin-left: 6px; }
+.stat.warn { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
+.stat.warn .v { color: var(--warning); }
+.ap-fatigue { display: grid; gap: var(--sp-2); }
 
 .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
 .table-scroll { overflow-x: auto; }
@@ -778,6 +782,9 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .plain-list .row1 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); }
 .warn-line { display: flex; align-items: flex-start; gap: 4px; color: var(--warning); font-size: var(--fs-xs); margin-top: 2px; }
 .warn-line .i { flex: none; margin-top: 1px; }
+.grant-line { display: flex; align-items: flex-start; gap: 6px; font-size: var(--fs-xs); color: var(--text-3); line-height: 1.6; margin: 0; }
+.grant-line .i { flex: none; margin-top: 3px; }
+.grant-line code { font-size: var(--fs-xs); background: var(--surface-3); padding: 1px 5px; border-radius: var(--r-sm); overflow-wrap: anywhere; color: var(--text-2); }
 .plain-list .cmd { margin-top: 6px; padding: 6px 8px; border-radius: var(--r-md); background: var(--surface-2); font: var(--fs-xs)/1.5 var(--font-mono); color: var(--text-2); overflow-wrap: anywhere; }
 
 .posture { list-style: none; margin: -1px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); }

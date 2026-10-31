@@ -1045,3 +1045,110 @@ async def test_settings_show_supply_chain(ws):
     assert d["hooks"][1]["unpinned"] == ["npx 包 lint-hook"]
     assert d["permissions"]["require_pinned"] is False
 
+
+# ---------------------------------------------------------------------- 审批疲劳
+def test_fatigue_monitor_flags_streaks_of_fast_approvals():
+    """单次秒批不提示；最近的决定里秒批成串才提示，提示过后至少再过 WINDOW 次决定才会再提示。"""
+    from flywhl_harness.policy.fatigue import WINDOW, FatigueMonitor
+
+    m = FatigueMonitor()
+
+    def fast(i, **kw):
+        return m.observe("s", **{"approved": True, "by": "web-user", "waited": 0.4, "key": f"k{i}", "risk": "medium",
+                                 "remembered": False, **kw})
+
+    assert fast(0) == [] and fast(1) == []
+    assert "2 秒内批准" in fast(2)[0]
+    assert all(fast(i) == [] for i in range(3, 3 + WINDOW - 1))
+    assert fast(99)
+    slow, auto = FatigueMonitor(), FatigueMonitor()
+    assert not any(slow.observe("s", approved=True, by="web-user", waited=8, key=f"k{i}", risk="low", remembered=False)
+                   for i in range(10))
+    assert not any(auto.observe("s", approved=True, by=by, waited=0, key="k", risk="low", remembered=False)
+                   for by in ["policy:auto_allow", "system:timeout", "system:cancel"] * 4)   # 不是人做的决定
+
+
+def test_fatigue_monitor_suggests_a_rule_for_repeated_approvals():
+    from flywhl_harness.policy.fatigue import FatigueMonitor
+
+    m, key = FatigueMonitor(), "allow:bash(npm test*)"
+    kw = {"by": "terminal-user", "waited": 6, "risk": "medium", "remembered": False}
+    assert m.observe("s", approved=True, key=key, **kw) == []
+    assert m.observe("s", approved=False, key=key, **kw) == []                          # 拒绝不算
+    assert m.observe("s", approved=True, key=key, **{**kw, "remembered": True}) == []    # 已经选了始终允许
+    assert m.observe("s", approved=True, key=key, **kw) == []
+    out = m.observe("s", approved=True, key=key, **kw)
+    assert len(out) == 1 and key in out[0] and "3 次" in out[0] and "permissions.rules" in out[0]
+    assert m.observe("s", approved=True, key=key, **kw) == []                           # 每个键只提示一次
+    assert m.approved_before("s", key) == 4 and m.approved_before("other", key) == 0
+    critical = {**kw, "risk": "critical"}                                               # 任何授权下都要问，不建议
+    assert not any(m.observe("s", approved=True, key="allow:bash(rm -rf*)", **critical) for _ in range(5))
+    high = FatigueMonitor()
+    out = [high.observe("s", approved=True, key="allow:bash(git push*)", **{**kw, "risk": "high"}) for _ in range(3)]
+    assert "外部副作用" in out[-1][0]
+
+
+def test_approval_stats_from_records():
+    from flywhl_harness.policy.fatigue import approval_stats
+    from flywhl_harness.runtime.store import ApprovalRecord
+
+    def rec(i, status, by, wait, summary="ls"):
+        return ApprovalRecord(id=f"a{i}", run_id="r", session_id="s", call_id=f"c{i}", tool="bash", args={},
+                              summary=summary, risk="medium", reason="", status=status, decided_by=by, created_at=100.0,
+                              decided_at=None if status == "pending" else 100.0 + wait)
+
+    recs = [rec(0, "approved", "web-user", 0.5, "npm test"), rec(1, "approved", "web-user", 1.0, "npm test"),
+            rec(2, "approved", "terminal-user", 30, "npm test"), rec(3, "rejected", "web-user", 5),
+            rec(4, "expired", "system:timeout", 600), rec(5, "approved", "policy:auto_allow", 0),
+            rec(6, "pending", None, 0)]
+    st = approval_stats(recs, lambda a: f"allow:bash({a.summary}*)")
+    assert (st["human"], st["approved"], st["rejected"], st["timeouts"], st["pending"]) == (4, 3, 1, 1, 1)
+    assert st["approve_rate"] == 0.75 and st["fast"] == 2 and st["fast_rate"] == round(2 / 3, 3)
+    assert (st["wait_p50"], st["wait_p90"]) == (5, 30)
+    assert st["repeated"] == [{"key": "allow:bash(npm test*)", "count": 3}]
+    assert approval_stats([], lambda a: None)["approve_rate"] is None
+
+
+async def test_fast_repeated_approvals_raise_a_notice(ws):
+    """连着秒批三次同一个文件的写入：事件流里出现疲劳提示，审批请求带着“始终允许”会添加的规则与已批准次数，
+    统计接口给出同样的数字。"""
+    from flywhl_harness.events import E
+    from flywhl_harness.policy.approvals import ApprovalDecision
+    from flywhl_harness.server.app import create_app
+
+    from .test_security import with_resolver
+
+    write = {"tool_calls": [{"name": "write", "args": {"path": "a.txt", "content": "x"}}]}
+    h = make_harness(ws, [write, write, write, "好"])
+    with_resolver(h, lambda rec: ApprovalDecision(True))
+    res = await h.run("写三次")
+    reqs = [e.data for e in res.events if e.type == E.APPROVAL_REQUEST]
+    assert [r["grant"] for r in reqs] == ["allow:write(a.txt)"] * 3 and [r["approved_before"] for r in reqs] == [0, 1, 2]
+    notes = [e.data["text"] for e in res.events if e.type == E.NOTICE and e.data.get("code") == "approval_fatigue"]
+    assert len(notes) == 2 and "秒内批准" in notes[0] and "allow:write(a.txt)" in notes[1]
+    h.store.append_event_next(res.run_id, E.NOTICE, {"level": "info", "code": "steer_queued", "text": "插话已排队"})
+    async with _client(create_app(h, auto_recover=False)) as c:
+        st = (await c.get("/api/approvals/stats")).json()
+        kept = (await c.get(f"/api/sessions/{res.session_id}")).json()["notices"]
+    assert (st["human"], st["approved"], st["fast"]) == (3, 3, 3)
+    assert st["repeated"] == [{"key": "allow:write(a.txt)", "count": 3}]
+    # 运行结束后时间线按历史重绘：疲劳提示随会话详情补回，排队这类过程性提示不留
+    assert [n["text"] for n in kept[res.run_id]] == notes
+
+
+async def test_trajectory_of_an_unknown_run_is_404(ws):
+    from flywhl_harness.server.app import create_app
+
+    async with _client(create_app(make_harness(ws, ["好"]), auto_recover=False)) as c:
+        assert (await c.get("/api/runs/r_nope/trajectory")).status_code == 404
+
+
+def test_list_approvals_can_take_only_the_latest():
+    from flywhl_harness.runtime.store import ApprovalRecord, Store
+
+    st = Store()
+    for i in range(5):
+        st.create_approval(ApprovalRecord(id=f"a{i}", run_id="r", session_id="s", call_id=f"c{i}", tool="bash", args={},
+                                          summary="", risk="low", reason="", status="pending", created_at=float(i)))
+    assert [a.id for a in st.list_approvals(None, limit=2)] == ["a3", "a4"]
+    assert [a.id for a in st.list_approvals(None)] == [f"a{i}" for i in range(5)]

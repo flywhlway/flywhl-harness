@@ -6,7 +6,8 @@
 - **CAS 决定一次**：批准、拒绝、超时、取消并发到达时，只有第一个生效（store.resolve_approval）；
 - **超时默认拒绝**：拒绝理由作为 is_error 的工具结果回给模型，让它调整方案；
 - **防 TOCTOU**：批准时可修改参数，修改后的参数要 **重新做 schema 校验与权限判定**（在执行层完成）；
-- **防审批疲劳**：低风险自动放行；“本会话总是允许”生成一条窄粒度的会话级授权规则。
+- **防审批疲劳**：低风险自动放行；“本会话总是允许”生成一条窄粒度的会话级授权规则；秒批与同类重复批准
+  由 ``fatigue.FatigueMonitor`` 记下，出现时在事件流里提示（见 fatigue.py）。
 - **无人值守**：``on_ask=allow|deny`` 用于 CI / 批处理，此时不创建审批对象。
 """
 
@@ -19,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from .._utils import new_id, now
 from ..cancel import CancelToken, RunCancelled
 from ..runtime.store import ApprovalRecord, Store
+from .fatigue import FatigueMonitor
 
 
 @dataclass
@@ -39,6 +41,7 @@ class ApprovalBroker:
         self.on_ask = on_ask
         self.timeout = timeout
         self.resolver = resolver          # 交互式 CLI 在终端里问用户；Web UI 则通过 API 调用 resolve()
+        self.fatigue = FatigueMonitor()
         self._waiters: dict[str, asyncio.Future[ApprovalDecision]] = {}
 
     async def request(

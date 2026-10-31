@@ -51,7 +51,8 @@ from ..agent.context import ContextManager
 from ..observe.export import session_markdown
 from ..observe.trace import export_trajectory
 from ..policy.bash_analyzer import analyze
-from ..policy.permissions import MANAGED_BASELINE
+from ..policy.fatigue import approval_stats
+from ..policy.permissions import MANAGED_BASELINE, grant_for
 from ..policy.supply_chain import mcp_argv, mcp_base, referenced_files, unpinned_packages
 from ..runtime.manager import Harness
 from ..runtime.state import TERMINAL, RunStatus
@@ -66,6 +67,12 @@ class RevalidatingStaticFiles(StaticFiles):
         resp = super().file_response(*args, **kwargs)
         resp.headers["Cache-Control"] = "no-cache"
         return resp
+
+
+# 运行结束后仍值得在时间线上看到的提示：审批疲劳、新加的会话授权、hook 告警、执行中混入的不可信内容、模型降级与切换、
+# 恢复时的重新执行。排队、暂停这类过程性提示不留
+KEPT_NOTICES = frozenset({"approval_fatigue", "grant", "hook_warning", "tainted", "fallback", "server_fallback",
+                          "model_switched", "recover_reexecute"})
 
 
 class NewSession(BaseModel):
@@ -234,8 +241,16 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             raise HTTPException(404, f"会话不存在：{sid}")
         return s
 
+    def grant_key(a) -> str | None:
+        """一条审批的“本会话始终允许”规则（工具已不在时算不出）。"""
+        if a.tool not in h.tools:
+            return None
+        with contextlib.suppress(Exception):
+            return str(grant_for(h.tools.get(a.tool), a.args))
+        return None
+
     def approval_dict(a) -> dict[str, Any]:
-        """审批对象 + 审批人做决定需要的上下文：所属会话、变更预览（diff）、命令分析。
+        """审批对象 + 审批人做决定需要的上下文：所属会话、变更预览（diff）、命令分析、“始终允许”会添加的规则。
 
         预览按 **当前** 工作区内容现算：页面刷新、在审批收件箱里处理时，看到的与实时事件里的一致。
         """
@@ -248,6 +263,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                 d["preview"] = h.tools.get(a.tool).preview(a.args, SimpleNamespace(workspace=ws))
             if a.tool == "bash":
                 d["analysis"] = analyze(str(a.args.get("command", "")), str(ws.root)).reasons
+        d["grant"] = grant_key(a)
+        d["approved_before"] = h.approvals.fatigue.approved_before(a.session_id, d["grant"]) if d["grant"] else 0
         return d
 
     # ------------------------------------------------------------------ 信息
@@ -326,6 +343,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         s = session_or_404(sid)
         log = h.log(sid)
         view = log.context()
+        runs = h.store.list_runs(sid, limit=50)
         return {
             "session": {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k != "system_prompt"}},
             "messages": [m.to_dict() for m in log.messages()],
@@ -335,7 +353,9 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                          for e in log.path()],
             "context_ids": view.entry_ids,
             "compaction": view.compaction.payload if view.compaction else None,
-            "runs": [r.to_dict() for r in h.store.list_runs(sid, limit=50)],
+            "runs": [r.to_dict() for r in runs],
+            # 时间线按历史重绘时，值得留下的提示按运行补回（实时提示只在运行进行中出现）
+            "notices": h.store.list_notices([r.id for r in runs], KEPT_NOTICES),
             "active_run": run_dict(ar) if (ar := h.active_run_of(sid)) else None,
             "approvals": [approval_dict(a) for a in h.store.list_approvals("pending")],
         }
@@ -503,6 +523,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
 
     @app.get("/api/runs/{rid}/trajectory")
     async def trajectory(rid: str) -> JSONResponse:
+        if h.store.get_run(rid) is None:
+            raise HTTPException(404, "Run 不存在")
         return JSONResponse(export_trajectory(h.store, rid), headers={
             "Content-Disposition": f'attachment; filename="trajectory-{rid}.json"'})
 
@@ -560,6 +582,11 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
     @app.get("/api/approvals")
     async def approvals(status: str = "pending") -> list[dict[str, Any]]:
         return [approval_dict(a) for a in h.store.list_approvals(status or None)]
+
+    @app.get("/api/approvals/stats")
+    async def approvals_stats() -> dict[str, Any]:
+        """审批疲劳指标：最近 500 条审批记录现算（同类重复批准要逐条生成授权规则，不能无限制地往前翻）。"""
+        return approval_stats(h.store.list_approvals(None, limit=500), grant_key)
 
     @app.post("/api/approvals/{aid}")
     async def decide(aid: str, body: ApprovalBody) -> dict[str, Any]:

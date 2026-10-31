@@ -469,15 +469,19 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const runs = Object.fromEntries(d.runs.map((r) => [r.id, r]));
     let prev = null;
     const frag = document.createDocumentFragment();
+    const closeRun = (id) => {   // 一次运行的条目结束：补上它留下的提示，结束了的再加小结
+      for (const n of d.notices?.[id] || []) frag.append(T.noticeItem(n));
+      if (runs[id] && TERMINAL.has(runs[id].status)) frag.append(T.runSummary(runs[id]));
+    };
     for (const it of d.timeline) {
-      if (prev && it.run_id && it.run_id !== prev && runs[prev] && TERMINAL.has(runs[prev].status)) frag.append(T.runSummary(runs[prev]));
+      if (prev && it.run_id && it.run_id !== prev) closeRun(prev);
       prev = it.run_id || prev;
       if (it.kind === "compaction") { frag.append(T.compactionDivider(it.payload)); continue; }
       const m = it.message;
       if (m.role === "user") frag.append(T.userItem(m));
       else if (m.role === "assistant") frag.append(T.assistantItem(m, results, ctx));
     }
-    if (prev && runs[prev] && TERMINAL.has(runs[prev].status)) frag.append(T.runSummary(runs[prev]));
+    if (prev) closeRun(prev);
     inner.append(frag);
     for (const a of d.approvals) if (a.session_id === V.sid || V.running) attachApproval(a);
     stick = true;
