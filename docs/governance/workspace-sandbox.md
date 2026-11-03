@@ -2,7 +2,7 @@
 
 前两章回答“这个动作能不能做”，本章回答另一半：**动作落在哪里，出了错能退回到哪里，最坏情况下能伤到什么。**
 Workspace 是 Agent 的工作现场，沙箱是这个现场的围墙。flywhl-harness 实现了前者的路径约束、漂移检测和影子 git 快照；
-后者只有一个只包 bash 的 macOS sandbox-exec 档位原型。本章最后说明这个档位的范围，以及怎样把 bash 接到远程沙箱上。
+后者只有两个只包 bash、默认关闭的原型档位：macOS sandbox-exec 与 Linux bubblewrap。本章最后说明这两个档位的范围，以及怎样把 bash 接到远程沙箱上。
 
 ## Workspace 是什么
 
