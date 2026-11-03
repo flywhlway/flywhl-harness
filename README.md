@@ -4,7 +4,7 @@
 
 > **Agent = Model + Harness.** 模型负责“想”，harness 负责其余的一切。
 
-一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 10K 行（其中大量是中文注释），
+一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 1.5 万行（其中大量是中文注释），
 把 harness 工程里最关键的机制都做成了 **可运行、可测试、可替换** 的代码，并配一个 Agent 控制台（Web UI）与一套系列教程。
 
 ```
@@ -23,7 +23,7 @@
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
 | **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
 | **生命周期** | 14 态状态机 + CAS 迁移（接管时钉住观察到的版本）；协作式取消（可中断/不可中断/结果未知）；暂停恢复 + 漂移说明；失败重试；心跳租约 + 周期性崩溃接管（kill -9 后副作用恰好一次）；关闭服务时暂停、重启后继续 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` |
-| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；可选的 macOS sandbox-exec 档位（原型）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
+| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；可选的系统沙箱（macOS sandbox-exec、Linux bubblewrap 两档，原型，默认关闭；可断网，macOS 档可只放行白名单主机）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
 | **执行环境** | 路径约束与逃逸检测；影子 git 快照 / 回滚；密钥不进子进程；端云幂等指令下发 | `runtime/workspace.py`、`runtime/dispatch.py` |
 | **多 Agent** | 子代理（隔离上下文 + 回传契约 + 违约修正）；DAG 调度（并发配额、失败策略、关键路径） | `agent/subagent.py`、`runtime/scheduler.py` |
 | **度量** | 轨迹导出 + OTel GenAI 风格 span；确定性回放 / 反事实分叉；评测（Wilson 区间、McNemar 检验、过早停止率） | `observe/` |
