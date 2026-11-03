@@ -111,6 +111,30 @@ def test_runner_collects_coverage_in_the_writable_root(tmp_path, monkeypatch):
     assert r.pytest_command(["-q"], cov=True) == [py, "-m", "coverage", "run", "-m", "pytest", "-q"]
 
 
+def test_runner_rebinds_interpreter_symlinks_under_home(tmp_path, monkeypatch):
+    """uv 的布局：.venv/bin/python → <家目录>/uv/cpython-3.12（次版本链接）/bin/python3.12 → 真实安装目录。
+    家目录在 bwrap 里换成空目录，只挂回真实目录时链接位置不存在，第一段连解释器都启动不了。"""
+    r = _runner()
+    home = tmp_path.resolve() / "home"   # macOS 的临时目录在 /var 下，/var 本身是链接
+    real = home / "uv" / "cpython-3.12.16"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3.12").write_text("")
+    (home / "uv" / "cpython-3.12").symlink_to(real)
+    venv_bin = home / "repo" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(home / "uv" / "cpython-3.12" / "bin" / "python3.12")
+    link = str(home / "uv" / "cpython-3.12")
+    assert r.links_along(str(venv_bin / "python")) == [str(venv_bin / "python"), link]
+
+    monkeypatch.setattr(r, "real_home", lambda: str(home))
+    monkeypatch.setattr(r.sys, "executable", str(venv_bin / "python"))
+    monkeypatch.setattr(r, "_readable", lambda root, cwd: [str(home / "repo"), str(real), str(root)])
+    argv = r.bwrap_argv(tmp_path / "root", home / "repo")
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--ro-bind"]
+    assert link in binds                       # 链接位置挂回来了
+    assert str(venv_bin / "python") not in binds   # 仓库已经整体挂回，里面的链接不再单独挂
+
+
 def test_runner_path_drops_unreadable_home_entries(tmp_path):
     r = _runner()
     path = r.test_path(tmp_path, ROOT).split(os.pathsep)

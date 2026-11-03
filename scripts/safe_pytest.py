@@ -128,15 +128,40 @@ def seatbelt_profile(root: Path, cwd: Path) -> str:
     ])
 
 
+def links_along(path: str, limit: int = 40) -> list[str]:
+    """解析 path 时逐级经过的符号链接，记的是链接本身的位置。
+
+    uv 的虚拟环境里，``.venv/bin/python`` 经 ``cpython-3.12-<平台>`` 这个次版本链接指向真实安装目录。
+    家目录换成空目录后只挂回真实路径，链接所在的位置就不存在了，exec 解释器时报 No such file or directory。
+    """
+    links: list[str] = []
+    pending = list(Path(os.path.abspath(path)).parts)
+    cur = pending.pop(0)
+    while pending and len(links) < limit:
+        nxt = os.path.join(cur, pending.pop(0))
+        if not os.path.islink(nxt):
+            cur = nxt
+            continue
+        links.append(nxt)
+        target = Path(os.path.join(cur, os.readlink(nxt)))   # 绝对目标时 join 直接取目标
+        cur, pending = target.parts[0], [*target.parts[1:], *pending]
+    return links
+
+
 def bwrap_argv(root: Path, cwd: Path) -> list[str]:
     home = real_home()
     # 新的 PID 命名空间与 /proc：测试进程看不到开发者其它进程的 /proc/<pid>/environ
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--tmpfs", "/tmp"]
     if os.path.isdir(home):
         argv += ["--tmpfs", home]   # 家目录换成空目录；仓库与 Python 在家目录下时，下面再只读挂回来
-    for p in _readable(root, cwd):
+    keep = _readable(root, cwd)
+    for p in keep:
         if p.startswith(home + os.sep) and p != os.path.realpath(root):
             argv += ["--ro-bind", p, p]
+    # 链接位置上挂它的真实目标，解释器路径照常可解析；已经挂回来的目录里的链接（如 .venv/bin/python）本来就在
+    for link in links_along(sys.executable):
+        if _within(link, home) and not any(_within(link, k) for k in keep):
+            argv += ["--ro-bind", link, link]
     return [*argv, "--bind", str(root), str(root), "--die-with-parent", "--chdir", str(cwd)]
 
 
@@ -169,12 +194,20 @@ def pytest_command(args: list[str], *, cov: bool) -> list[str]:
 
 
 def combine_coverage(root: Path, cwd: Path) -> None:
-    """两段（以及被测到的子进程）各写一份数据，合并到当前目录；临时目录随后就删。"""
+    """两段各写一份数据，合并到当前目录；临时目录随后就删。
+
+    合并在外层沙箱之外运行，所以和第二段同一条件：被测代码不是本仓库就不合并。``-I`` 不把当前目录放进 sys.path，
+    配置只读本仓库的 pyproject（coverage 的插件配置会导入模块）。
+    """
+    if cwd.resolve() != REPO:
+        print("覆盖率不合并：被测代码不是本仓库，合并要在外层沙箱之外运行", file=sys.stderr)
+        return
     parts = root / "coverage"
     if not any(parts.glob(".coverage.*")):
         print("警告：没有收集到覆盖率数据", file=sys.stderr)
         return
-    subprocess.call([sys.executable, "-m", "coverage", "combine", "-q", "--data-file", str(cwd / ".coverage"), str(parts)])
+    subprocess.call([sys.executable, "-I", "-m", "coverage", "combine", "-q", "--rcfile", str(REPO / "pyproject.toml"),
+                     "--data-file", str(cwd / ".coverage"), str(parts)])
 
 
 def cleanup(root: Path) -> None:
