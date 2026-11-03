@@ -98,6 +98,19 @@ def test_runner_exit_codes_and_cleanup_target(monkeypatch):
     assert not mine.exists()
 
 
+def test_runner_collects_coverage_in_the_writable_root(tmp_path, monkeypatch):
+    r = _runner()
+    monkeypatch.delenv("COVERAGE_FILE", raising=False)
+    monkeypatch.delenv(r.COVERAGE, raising=False)
+    assert "COVERAGE_FILE" not in r.isolated_env(tmp_path, ROOT, "seatbelt")
+    monkeypatch.setenv(r.COVERAGE, "1")
+    # 第一段的沙箱里只有临时目录可写，数据先落在那里，两段跑完再合并出来
+    assert r.isolated_env(tmp_path, ROOT, "seatbelt")["COVERAGE_FILE"] == str(tmp_path / "coverage" / ".coverage")
+    py = r.sys.executable
+    assert r.pytest_command(["-q"], cov=False) == [py, "-m", "pytest", "-q"]
+    assert r.pytest_command(["-q"], cov=True) == [py, "-m", "coverage", "run", "-m", "pytest", "-q"]
+
+
 def test_runner_path_drops_unreadable_home_entries(tmp_path):
     r = _runner()
     path = r.test_path(tmp_path, ROOT).split(os.pathsep)

@@ -41,3 +41,42 @@ jobs:
         run: uv run pytest -q
       - name: 演示：kill -9 后另一个进程接管并完成
         run: uv run python examples/11_kill9_cli_recover.py
+
+  # 覆盖率与依赖漏洞：只出报告、不设门禁，结果写进作业摘要并作为产物上传
+  coverage-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 安装依赖（按 uv.lock 锁定版本）
+        run: uv sync --locked --all-extras
+      - name: 离线测试并收集覆盖率（scripts/safe_pytest.py 两段收集后合并）
+        run: FLYWHL_COVERAGE=1 uv run pytest -q
+      - name: 覆盖率报告
+        if: always()
+        run: |
+          uv run coverage report --sort=cover > coverage.txt
+          uv run coverage xml -o coverage.xml
+          { echo "## 覆盖率"; uv run coverage report --sort=cover --format=markdown; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 依赖漏洞扫描（运行时依赖：核心 + anthropic 扩展）
+        if: always()
+        continue-on-error: true   # 只报告；发现漏洞时 pip-audit 退出码非 0，作业仍算通过
+        run: |
+          uv export --frozen --no-dev --extra anthropic --no-emit-project --format requirements-txt -o requirements-runtime.txt
+          rc=0
+          # 没有漏洞时 pip-audit 不写 -o 指定的文件，只在 stderr 打一行结论，所以两路输出都收进文件
+          uvx -q pip-audit@2.10.1 -r requirements-runtime.txt --disable-pip --progress-spinner off -f markdown > pip-audit.md 2>&1 || rc=$?
+          { echo "## 依赖漏洞（pip-audit）"; cat pip-audit.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-and-audit
+          path: |
+            coverage.txt
+            coverage.xml
+            pip-audit.md

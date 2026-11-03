@@ -143,6 +143,7 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 
 `pytest` 会自动转到 `scripts/safe_pytest.py`，在系统沙箱里分两段运行。测试进程和它启动的命令只能写一个临时目录，
 读不到真实家目录，原因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
+要看覆盖率：`FLYWHL_COVERAGE=1 .venv/bin/python -m pytest -q`，再运行 `.venv/bin/python -m coverage report`。
 
 2026-10-31 的复现结果：
 

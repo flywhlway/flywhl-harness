@@ -13,6 +13,8 @@ docs/quality-audit/incident-2026-10-31.md）。HOME 隔离、无害载荷都是�
   2. ``os_sandbox`` 用例测的就是 bash 工具的系统沙箱档位，它们执行的命令本身已经在沙箱里。第二段在外层沙箱之外运行，
      而且只在被测代码就是本仓库时运行；拿这个脚本去跑别处导出的旧代码，第二段直接跳过。
 - 两段都把 HOME、TMPDIR、XDG_* 指向临时目录；根目录 conftest.py 里还有执行绊线，在子进程启动前拦下灾难性命令。
+- **覆盖率**：设 ``FLYWHL_COVERAGE=1`` 时两段都在 coverage 下运行。第一段的沙箱里仓库只读，数据先写进临时目录，
+  两段跑完再合并成当前目录的 ``.coverage``，之后用 ``coverage report`` / ``coverage xml`` 出报告。
 
 调试时可以设 ``FLYWHL_TEST_SANDBOX=off`` 直接运行 pytest，不经过本入口（仍有 HOME 隔离和执行绊线）。
 """
@@ -31,6 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 MARK = "os_sandbox"
 FLAG = "FLYWHL_TEST_SANDBOX"
+COVERAGE = "FLYWHL_COVERAGE"
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 NO_TESTS = 5   # pytest 的退出码：没有收集到用例
 _DEVICES = ('(literal "/dev/null")', '(literal "/dev/zero")', '(literal "/dev/dtracehelper")',
@@ -107,6 +110,9 @@ def isolated_env(root: Path, cwd: Path, mode: str) -> dict[str, str]:
     env["PATH"] = test_path(root, cwd)
     env["PYTHONDONTWRITEBYTECODE"] = "1"   # 仓库在沙箱里只读：不写 __pycache__，也不写 .pytest_cache
     env["PYTEST_ADDOPTS"] = (env.get("PYTEST_ADDOPTS", "") + " -p no:cacheprovider").strip()
+    if os.environ.get(COVERAGE) == "1":
+        (root / "coverage").mkdir(exist_ok=True)
+        env["COVERAGE_FILE"] = str(root / "coverage" / ".coverage")   # pyproject 设了 parallel，每个进程各写一份
     return env
 
 
@@ -158,6 +164,19 @@ def combine(codes: list[int]) -> int:
     return next((c for c in real if c != 0), 0)
 
 
+def pytest_command(args: list[str], *, cov: bool) -> list[str]:
+    return [sys.executable, *(["-m", "coverage", "run"] if cov else []), "-m", "pytest", *args]
+
+
+def combine_coverage(root: Path, cwd: Path) -> None:
+    """两段（以及被测到的子进程）各写一份数据，合并到当前目录；临时目录随后就删。"""
+    parts = root / "coverage"
+    if not any(parts.glob(".coverage.*")):
+        print("警告：没有收集到覆盖率数据", file=sys.stderr)
+        return
+    subprocess.call([sys.executable, "-m", "coverage", "combine", "-q", "--data-file", str(cwd / ".coverage"), str(parts)])
+
+
 def cleanup(root: Path) -> None:
     if os.environ.get("FLYWHL_KEEP_TEST_ROOT"):
         print(f"保留测试临时目录：{root}", file=sys.stderr)
@@ -173,22 +192,27 @@ def main(argv: list[str]) -> int:
     args, expr = split_marker(argv)
     if expr is None:
         expr = default_marker(cwd)
-    pytest_cmd = [sys.executable, "-m", "pytest", *args]
+    cov = os.environ.get(COVERAGE) == "1"
+    pytest_cmd = pytest_command(args, cov=cov)
     root = Path(tempfile.mkdtemp(prefix="flywhl-test-"))
     try:
         mode, wrap = outer_sandbox(root, cwd)
         if not wrap:
             print("警告：没有可用的操作系统沙箱（macOS sandbox-exec / Linux bubblewrap），只隔离了 HOME、TMPDIR 等环境变量",
                   file=sys.stderr, flush=True)
-            return subprocess.call([*pytest_cmd, *(["-m", expr] if expr else [])], env=isolated_env(root, cwd, mode))
-        print(f"== 第一段：{mode} 外层沙箱，只能写 {root}", flush=True)
-        codes = [subprocess.call([*wrap, *pytest_cmd, "-m", phase_marker(expr, inside=True)], env=isolated_env(root, cwd, mode))]
-        if cwd.resolve() != REPO:
-            print(f"== 第二段跳过：被测代码不是本仓库，{MARK} 用例不在外层沙箱之外运行", flush=True)
+            codes = [subprocess.call([*pytest_cmd, *(["-m", expr] if expr else [])], env=isolated_env(root, cwd, mode))]
         else:
-            print(f"== 第二段：{MARK} 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）", flush=True)
-            codes.append(subprocess.call([*pytest_cmd, "-m", phase_marker(expr, inside=False)],
-                                         env=isolated_env(root, cwd, "outside")))
+            print(f"== 第一段：{mode} 外层沙箱，只能写 {root}", flush=True)
+            codes = [subprocess.call([*wrap, *pytest_cmd, "-m", phase_marker(expr, inside=True)],
+                                     env=isolated_env(root, cwd, mode))]
+            if cwd.resolve() != REPO:
+                print(f"== 第二段跳过：被测代码不是本仓库，{MARK} 用例不在外层沙箱之外运行", flush=True)
+            else:
+                print(f"== 第二段：{MARK} 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）", flush=True)
+                codes.append(subprocess.call([*pytest_cmd, "-m", phase_marker(expr, inside=False)],
+                                             env=isolated_env(root, cwd, "outside")))
+        if cov:
+            combine_coverage(root, cwd)
         return combine(codes)
     finally:
         cleanup(root)
