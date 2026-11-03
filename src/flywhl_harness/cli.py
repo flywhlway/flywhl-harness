@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import secrets
 import signal
 import sys
@@ -36,6 +37,7 @@ from .config import HarnessConfig, TrustRequest, flywhl_home, load_dotenv, read_
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
+from .policy.permissions import auto_approve_rule
 from .runtime.manager import Harness
 
 C = {"dim": "\033[2m", "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m", "blue": "\033[34m",
@@ -50,6 +52,16 @@ def _c(color: str, text: str) -> str:
 
 def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.1f}K" if n >= 1000 else str(n)
+
+
+# 模型输出、工具输出、会话标题都可能夹带终端控制序列：ESC[2J 清屏、\r 回到行首改写已打印的内容、
+# OSC 52 写剪贴板、OSC 8 伪装链接——足以把审批提示改写成另一条命令的样子。打印前去掉 C0 / C1 控制字符
+# （保留换行与制表符）和 Unicode 双向控制符（让显示顺序与实际顺序不同的 “Trojan Source” 手法）
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _safe(text: Any) -> str:
+    return _CONTROL.sub("", str(text))
 
 
 class TerminalRenderer:
@@ -72,24 +84,24 @@ class TerminalRenderer:
             if d["kind"] == "text":
                 if self.in_thinking:
                     self._nl()
-                print(d["delta"], end="", flush=True)
+                print(_safe(d["delta"]), end="", flush=True)
                 self.in_text = True
             elif d["kind"] == "thinking" and self.show_thinking:
-                print(_c("dim", d["delta"]), end="", flush=True)
+                print(_c("dim", _safe(d["delta"])), end="", flush=True)
                 self.in_thinking = True
         elif t == E.TOOL_START:
             self._nl()
-            print(_c("cyan", f"⚙ {d.get('summary') or d['name']}") + _c("dim", f"  [{d.get('effect')}]"))
+            print(_c("cyan", f"⚙ {_safe(d.get('summary') or d['name'])}") + _c("dim", f"  [{d.get('effect')}]"))
         elif t == E.TOOL_UPDATE:
             up = d.get("update") or {}
             if up.get("output"):
-                print(_c("dim", up["output"].rstrip("\n")), flush=True)
+                print(_c("dim", _safe(up["output"].rstrip("\n"))), flush=True)
             elif (sub := up.get("subagent")) and (sub.get("event") or {}).get("type") == E.TOOL_START:
                 # 子代理的事件包在父 Run 的 tool_update 里透传：CLI 只显示它调用了哪些工具
                 sd = sub["event"].get("data") or {}
-                print(_c("dim", f"    ↳ [{sub.get('description')}] {sd.get('summary') or sd.get('name')}"), flush=True)
+                print(_c("dim", _safe(f"    ↳ [{sub.get('description')}] {sd.get('summary') or sd.get('name')}")), flush=True)
         elif t == E.TOOL_END:
-            first = (d.get("content") or "").strip().splitlines()[:1]
+            first = _safe(d.get("content") or "").strip().splitlines()[:1]
             mark = _c("red", "  ✗") if d.get("is_error") else _c("green", "  ✓")
             print(f"{mark} {_c('dim', str(d.get('status')))} {_c('dim', (first[0] if first else '')[:120])}"
                   + _c("dim", f"  {d.get('duration_ms', 0)}ms"))
@@ -101,7 +113,7 @@ class TerminalRenderer:
                                 f"（摘要了 {d['summarized']} 条消息）"))
         elif t == E.NOTICE:
             self._nl()
-            print(_c("yellow", f"! {d.get('text')}"))
+            print(_c("yellow", f"! {_safe(d.get('text'))}"))
         elif t == E.MODEL_RETRY:
             self._nl()
             print(_c("yellow", f"↻ 模型调用重试 #{d.get('attempt')}（{d.get('kind')}），{d.get('delay')}s 后重试"))
@@ -111,7 +123,7 @@ class TerminalRenderer:
             color = "green" if d["status"] == "completed" else "yellow"
             tin = u.get("input_tokens", 0) + u.get("cache_read_tokens", 0) + u.get("cache_write_tokens", 0)
             cache = f"（缓存命中 {_fmt_tokens(u['cache_read_tokens'])}）" if u.get("cache_read_tokens") else ""
-            print(_c(color, f"■ {d['status']}") + _c("dim", f"  {d.get('reason', '')} · {d.get('turns', 0)} 轮 · "
+            print(_c(color, f"■ {d['status']}") + _c("dim", f"  {_safe(d.get('reason', ''))} · {d.get('turns', 0)} 轮 · "
                   f"输入 {_fmt_tokens(tin)}{cache} / 输出 {_fmt_tokens(u.get('output_tokens', 0))} tokens"
                   f" · ${u.get('cost_usd', 0):.4f}"))
 
@@ -119,8 +131,8 @@ class TerminalRenderer:
 async def terminal_approval(rec) -> ApprovalDecision:
     """终端审批：展示真实动作与参数（而不是模型的自我描述）。"""
     print()
-    print(_c("bold", f"⚠ 需要审批：{rec.summary}") + _c("dim", f"  [风险 {rec.risk}] {rec.reason}"))
-    print(_c("dim", json.dumps(rec.args, ensure_ascii=False, indent=2)[:1500]))
+    print(_c("bold", f"⚠ 需要审批：{_safe(rec.summary)}") + _c("dim", f"  [风险 {rec.risk}] {_safe(rec.reason)}"))
+    print(_c("dim", _safe(json.dumps(rec.args, ensure_ascii=False, indent=2)[:1500])))
     ans = (await asyncio.to_thread(input, "  [y] 允许  [n] 拒绝  [a] 本会话总是允许 > ")).strip().lower()
     if ans in ("y", "yes", "a", "是"):
         return ApprovalDecision(True, by="terminal-user", remember=ans == "a")
@@ -178,6 +190,21 @@ def _config(args: argparse.Namespace) -> HarnessConfig:
         cfg.permissions.on_ask = "allow"
     if getattr(args, "sandbox", None):
         cfg.permissions.sandbox = args.sandbox
+    if getattr(args, "net_allow", None):   # 给了白名单主机就是要白名单：没写 --network 时按 allowlist
+        cfg.permissions.network_allow = [*cfg.permissions.network_allow, *args.net_allow]
+        cfg.permissions.sandbox_network = "allowlist"
+    if getattr(args, "network", None):
+        cfg.permissions.sandbox_network = args.network
+    if getattr(args, "approve", None):
+        if cfg.permissions.on_ask == "allow":
+            raise SystemExit("--approve 不能和 --yes（或配置里的 on_ask = \"allow\"）一起用：后者已经放行所有需要审批的操作")
+        for r in args.approve:
+            try:
+                auto_approve_rule(r)
+            except ValueError as e:
+                raise SystemExit(f"--approve：{e}") from None
+        cfg.permissions.auto_approve = [*cfg.permissions.auto_approve, *args.approve]
+        cfg.permissions.on_ask = "deny"     # 给了自动批准规则就是无人值守：其余需要审批的一律拒绝
     return cfg
 
 
@@ -280,18 +307,19 @@ async def cmd_chat(args: argparse.Namespace) -> int:
 async def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    from .server.app import create_app
+    from .server.app import LOOPBACK_HOSTS, create_app
 
-    from .server.app import LOOPBACK_HOSTS
-
+    loopback = args.host in LOOPBACK_HOSTS
+    if args.no_token and not loopback:   # 局域网里的任何人都能访问：不能关
+        print(_c("red", f"--no-token 只能用于回环地址（127.0.0.1 / localhost / ::1），当前监听 {args.host}"), file=sys.stderr)
+        return 2
     cfg = _config(args)
     h = Harness(cfg)
-    loopback = args.host in LOOPBACK_HOSTS
-    # 监听非回环地址时，局域网里的任何人都能访问：必须带访问令牌
-    token = args.token or (None if loopback else secrets.token_urlsafe(24))
+    token = None if args.no_token else (args.token or server_token())
     allow = list(args.allow_host or []) + ([] if loopback else ["*" if args.host in ("0.0.0.0", "::") else args.host])
     app = create_app(h, token=token, allowed_hosts=allow)
-    url = f"http://{args.host}:{args.port}/" + (f"?token={token}" if token else "")
+    host = f"[{args.host}]" if ":" in args.host else args.host
+    url = f"http://{host}:{args.port}/" + (f"?token={token}" if token else "")
     print(_c("bold", f"flywhl-harness {__version__}") + f"  {url}  "
           + _c("dim", f"({h.provider.name}/{h.model}，工作区 {h.workspace_root})"))
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
@@ -299,12 +327,31 @@ async def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def server_token() -> str:
+    """Web 控制台的访问令牌：持久化在 ``~/.flywhl/server_token``（0600），重启后书签与 cookie 照常可用。
+    回环地址也默认启用——同一台机器上的其他用户、其他程序都能连上 127.0.0.1，而这个服务能批准命令、切换权限。
+    令牌文件在凭证清单里（``policy/sensitive.py``），Agent 的工具读不到它。"""
+    path = flywhl_home() / "server_token"
+    try:
+        token = path.read_text().strip()
+    except FileNotFoundError:
+        token = ""
+    if len(token) < 16:
+        token = secrets.token_urlsafe(24)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)   # 新建而不是覆盖：旧文件的宽松权限不会沿用到新令牌上
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(token + "\n")
+    os.chmod(path, 0o600)
+    return token
+
+
 async def cmd_sessions(args: argparse.Namespace) -> int:
     h = Harness(_config(args))
     for s in h.store.list_sessions():
         runs = h.store.list_runs(s.id, limit=1)
         st = runs[0].status if runs else "-"
-        print(f"{s.id}  {st:<16} {time.strftime('%m-%d %H:%M', time.localtime(s.updated_at))}  {s.title}")
+        print(f"{s.id}  {st:<16} {time.strftime('%m-%d %H:%M', time.localtime(s.updated_at))}  {_safe(s.title)}")
     return 0
 
 
@@ -313,7 +360,7 @@ async def cmd_runs(args: argparse.Namespace) -> int:
     for r in h.store.list_runs(args.session, limit=50):
         u = r.usage or {}
         print(f"{r.id}  {r.status:<16} attempt={r.attempt} v={r.version}  tokens={u.get('input_tokens', 0)}+"
-              f"{u.get('output_tokens', 0)}  {(r.prompt or '')[:40]}")
+              f"{u.get('output_tokens', 0)}  {_safe((r.prompt or '')[:40])}")
     return 0
 
 
@@ -362,6 +409,23 @@ async def cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_export(args: argparse.Namespace) -> int:
+    from .observe.export import session_markdown
+
+    h = Harness(_config(args))
+    try:
+        text = session_markdown(h.store, args.session_id, include_injected=args.injected)
+    except KeyError:
+        print(_c("red", f"会话不存在：{args.session_id}"), file=sys.stderr)
+        return 1
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"已导出到 {args.output}")
+    else:
+        print(_safe(text), end="")
+    return 0
+
+
 async def cmd_tools(args: argparse.Namespace) -> int:
     async with Harness(_config(args)) as h:
         for t in h.tools:
@@ -393,20 +457,27 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
-    common.add_argument("--sandbox", choices=["off", "macos"], help="bash 的系统沙箱（macos：sandbox-exec，原型）")
+    common.add_argument("--sandbox", choices=["off", "macos", "linux"],
+                        help="bash 的系统沙箱（macos：sandbox-exec；linux：bubblewrap；原型）")
+    common.add_argument("--network", choices=["allow", "deny", "allowlist"], help="沙箱里的网络策略（要求开启沙箱）")
+    common.add_argument("--net-allow", action="append", metavar="HOST",
+                        help="出站白名单主机，可重复，如 pypi.org、*.github.com、registry.local:5000")
     common.add_argument("--thinking", action="store_true", help="显示模型的思考过程")
     sub = p.add_subparsers(dest="cmd")
 
     sp = sub.add_parser("serve", parents=[common], help="启动 Web UI")
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8765)
-    sp.add_argument("--token", help="访问令牌（监听非回环地址时默认自动生成）")
+    sp.add_argument("--token", help="自定义访问令牌（默认使用 ~/.flywhl/server_token，没有就生成）")
+    sp.add_argument("--no-token", action="store_true", help="关闭访问令牌（仅限回环地址，且确认本机没有其他用户）")
     sp.add_argument("--allow-host", action="append", help="额外信任的 Host 主机名（反向代理、自定义域名），可重复")
     sp.set_defaults(fn=cmd_serve)
     sub.add_parser("chat", parents=[common], help="终端交互").set_defaults(fn=cmd_chat)
     sp = sub.add_parser("run", parents=[common], help="一次性执行")
     sp.add_argument("prompt")
     sp.add_argument("--json", action="store_true", help="输出 JSONL 事件流")
+    sp.add_argument("--approve", action="append", metavar="规则",
+                    help="无人值守时自动批准的操作，如 'bash(npm test*)'、'write(src/**)'，可重复；其余需要审批的一律拒绝")
     sp.set_defaults(fn=cmd_run)
     sub.add_parser("sessions", parents=[common], help="列出会话").set_defaults(fn=cmd_sessions)
     sp = sub.add_parser("runs", parents=[common], help="列出运行")
@@ -427,6 +498,11 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("run_id")
     sp.add_argument("-o", "--output")
     sp.set_defaults(fn=cmd_trace)
+    sp = sub.add_parser("export", parents=[common], help="把会话导出为 Markdown 对话记录")
+    sp.add_argument("session_id")
+    sp.add_argument("-o", "--output")
+    sp.add_argument("--injected", action="store_true", help="同时导出 harness 注入给模型的提醒与指令")
+    sp.set_defaults(fn=cmd_export)
     sub.add_parser("tools", parents=[common], help="列出工具").set_defaults(fn=cmd_tools)
     sp = sub.add_parser("doctor", parents=[common], help="模型接入自检")
     sp.add_argument("models", nargs="*", help="要检查的模型（默认：每个配置了密钥的供应商的默认模型）")

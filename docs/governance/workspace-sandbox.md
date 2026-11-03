@@ -78,8 +78,9 @@ def resolve(self, path: str, *, allow_outside: bool = False) -> Path:
 
 - **bash 不经过它。** 命令分析器对 bash 做了一层近似：参数里出现工作区外的绝对路径、`~`、`$HOME` 时，即使是 `cat /etc/hosts` 这样的只读命令
   也判为 external，default 模式下要确认、plan 模式下拒绝（见 [17 权限与人审](/governance/permissions-hitl)）；用 `..` 爬出工作区的相对路径
-  （`cat ../../etc/hosts`）按 `normpath` 识别，花括号先展开再判断，以变量开头的路径（`D=/etc; cat $D/hosts`）按越界处理。
-  但它只看字符串，整个路径都放在变量里（`F=/etc/hosts; cat $F`）、符号链接都识别不到、直接放行，
+  （`cat ../../etc/hosts`）按 `normpath` 识别，花括号先展开再判断，以变量开头的路径（`D=/etc; cat $D/hosts`）按越界处理，
+  命令里赋过值的变量按取值展开（`F=/etc/hosts; cat $F`），参数按真实路径再查一次凭证清单。
+  但它终究只看命令文本：值要到运行时才知道的路径（`F=$(cat list.txt)`）、脚本与解释器里拼出来的路径都认不出，
   和 `resolve()` 的“先解析再比较”不是一个强度。
 - **硬链接。** 工作区内一个指向外部文件的硬链接，`resolve()` 看到的就是工作区内路径。`read` 会读到外部文件的内容；
   `write` / `edit` 因为走原子写（见下文），替换的是工作区里的目录项，外部文件不受影响——但 bash 里的 `echo >> link` 仍会改到它。
@@ -366,26 +367,31 @@ MCP 调用经过代理，由代理从 vault 取凭据，沙箱里的代码拿不
 本项目的最小实现是 bash 子进程剥离密钥环境变量（`src/flywhl_harness/tools/shell.py::_clean_env`）：
 
 ```python
-_SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.I)
+_SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE"
+                         r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
+_URL_WITH_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@", re.I)
 
 def _clean_env(strip: bool) -> dict[str, str]:
     env = dict(os.environ)
-    if strip:
-        env = {k: v for k, v in env.items() if not _SECRET_ENV.search(k)}
+    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+        env = {k: v for k, v in env.items()
+               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
+    # …… 再用 GIT_CONFIG_* 追加命令行级配置：core.fsmonitor=false、safe.bareRepository=explicit
     return env
 ```
 
-harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `env`、`printenv` 看不到它。这是按 **变量名** 剥离，边界很清楚：
+harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `env`、`printenv` 看不到它。剥离看 **变量名**，外加一种值的形态（带密码的 URL），边界很清楚：
 
 | 情况 | 是否被剥离 |
 |---|---|
-| `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY` | 是 |
+| `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`MYSQL_PWD` | 是 |
 | `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是 bash 里的 git 无法使用 ssh-agent |
-| `DATABASE_URL=postgres://user:pass@host/db` | **否**，密码藏在值里 |
-| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但变量拼接等混淆写法认不出，要靠下文的 sandbox-exec 档位由内核拒绝 |
+| `DATABASE_URL=postgres://user:pass@host/db` | 是，值是带密码的 URL |
+| `PGCONN="host=db password=…"`、JSON 配置里的密码 | **否**，名字和值的形态都认不出 |
+| `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但运行时才拼出来的路径等混淆写法认不出，要靠下文的沙箱档位由内核拒绝 |
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
 需要的凭证必须在 `flywhl.toml` 该服务器的 `env` 里显式给出——第三方 MCP 服务器拿到什么，从配置里一眼可见。
@@ -401,13 +407,13 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 - **禁止访问内网。** 浏览器能访问的地址，等于被注入页面能让 Agent 访问的地址；内网管理后台、元数据端点都应屏蔽。
 - **下载隔离。** 下载的文件落在沙箱内的专用目录，不自动打开、不进入工作区。
 - **页面内容是不可信输入。** 页面文本、DOM 属性、截图里的文字都可能是注入。在本项目里，如果通过 MCP 接入浏览器工具，
-  `tools/mcp.py` 按规范把未声明 `openWorldHint` 的工具视为开放世界、输出标为污点，后续副作用操作会升级为人审；
-  要警惕的反而是服务器把浏览器类工具声明成 `openWorldHint: false`——注解由服务器自己填写，接入第三方服务器前应核对。
+  `tools/mcp.py` 默认把所有 MCP 工具的输出标为污点，后续副作用操作会升级为人审。服务器把浏览器类工具声明成
+  `openWorldHint: false` 也不会改变这一点：注解由服务器自己填写，只有配置里写明 `trust_annotations = true` 才采信。
 
 ## macOS sandbox-exec 档位
 
 `permissions.sandbox = "macos"`（或 `flywhl chat --sandbox macos`）让 bash 工具的每条命令跑在 `sandbox-exec` 里（`tools/sandbox.py`）。
-它是原型：从 `(allow default)` 起步，只收紧文件访问。生成的配置大致是：
+它是原型：从 `(allow default)` 起步，收紧文件访问与本机进程间通信，可选断网或只放行白名单里的主机。生成的配置大致是：
 
 ```scheme
 (version 1)
@@ -418,6 +424,18 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 (deny file-write* (require-not (require-any (subpath "<工作区>") (subpath "<临时目录>") (literal "/dev/null") ...)))
 ; harness 自己的状态与配置，与托管基线一致
 (deny file-write* (subpath "<工作区>/.flywhl") (literal "<工作区>/flywhl.toml"))
+; 本机 IPC：钥匙串、剪贴板、LaunchServices / Apple 事件，以及 launchd 任务
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc") ...
+                  (global-name "com.apple.pasteboard.1") (global-name-regex #"^com\.apple\.coreservices\."))
+(deny job-creation)
+; Unix 套接字任何网络策略下都先整体拒绝
+(deny network-outbound (remote unix-socket))
+; sandbox_network = "deny" / "allowlist" 时追加：对外 IP 连接（回环地址上的 TCP 也算）一律拒绝
+(deny network-outbound (remote ip))
+; 放行必须写在拒绝之后，否则不生效："allowlist" 放行本机出站代理的端口；
+; "allow" 放行 DNS（mDNSResponder）与系统日志的套接字；unix_sockets 里列出的任何档位都放行
+(allow network-outbound (remote ip "localhost:<代理端口>"))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 ```
 
 凭证清单与文件工具、命令分析共用 `policy/sensitive.py` 那一份，区别在于内核按 **真实路径** 判定，不管命令怎么写：
@@ -425,27 +443,152 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 | 动作 | 命令分析（字符串） | sandbox-exec（内核） |
 |---|---|---|
 | `cat ~/.kube/config` | deny | 拒绝 |
-| `D=$HOME/.ku; cat ${D}be/config`、glob、编码过的路径 | 认不出，bypass 下放行 | 拒绝 |
+| `D=$(echo $HOME/.ku); cat ${D}be/config`（运行时才拼出来）、glob、编码过的路径 | 认不出，bypass 下放行 | 拒绝 |
 | 解释器里拼出路径再读（`python3 -c "..."`） | 无法静态分析，bypass 下放行 | 拒绝 |
 | 写工作区外（`echo x >> ~/.zshrc`） | external，bypass 下放行 | 拒绝（临时目录除外） |
 | 改 `.flywhl/`、`flywhl.toml` | 托管 ask | 拒绝 |
-| 网络外发、钥匙串查询（`security find-generic-password`）、进程与 Mach 服务 | — | **不限制** |
+| 网络外发（`curl`、`nc`、DNS 查询） | — | 默认不限制；`deny` 时全部拒绝；`allowlist` 时只能经出站代理连白名单里的主机 |
+| 连本机守护进程（`docker.sock`、tmux、ssh-agent） | — | 拒绝，`unix_sockets` 列出的除外 |
+| 钥匙串（`security`、`git credential-osxkeychain`）、剪贴板 | 导出口令的 `security` 子命令 deny | 拒绝 |
+| 让沙箱外的进程替它执行（`open`、`osascript`、`launchctl`） | `launchctl` 判为高危 | 拒绝 |
+| 回环地址上的本机 TCP 服务、其余 Mach 服务 | — | `allow` 档**不限制** |
 | 命令 hook、MCP 服务器子进程 | — | **不在沙箱里** |
 
-`tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条变量拼接的命令跑两遍：
-沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界。
+`tests/test_security.py::test_sandbox_blocks_credential_reads_static_analysis_misses` 在 bypass 模式下把同一条运行时拼出凭证路径的命令跑两遍：
+沙箱关闭时读到了测试用的假凭证，打开后读不到，工作区照常可写。`test_macos_sandbox_confines_writes` 核对写操作的边界，`tests/test_hardening.py::test_sandbox_network_deny_blocks_outbound_connections` 核对断网。
 
 代价与边界：
 
 - **要用凭证的命令会失败。** `ssh`、`git push`（SSH 协议）、`kubectl`、`gh`、`docker login` 读不到自己的凭证文件——
-  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。
+  这一档就是拿这些能力换“读不到”（bash 本来也剥离了 `SSH_AUTH_SOCK`）。`docker` 整个用不了：放行 `docker.sock`
+  就等于放弃沙箱。
+- **`allow` 档只管 Unix 套接字，不管回环地址上的 TCP 服务。** 没开认证的本机服务（Jupyter、数据库、调试端口）照样连得上；
+  要连这些一并拦住，用 `deny` 或 `allowlist`。
 - **写全局缓存的工具可能失败或退化。** 默认只放开工作区和临时目录，`~/.cache`、`~/Library/Caches`、`~/.npm` 写不进去；
   原型没有做可配置的白名单（`sandbox_argv()` 的 `writable` 参数留了口子）。
 - **fail-closed。** 配置了 `macos` 但 sandbox-exec 不可用（Linux、文件被删）时，命令不执行、返回错误，
   不会退回沙箱外运行（`test_sandbox_fails_closed_when_unavailable`）。
 - **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
   非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
-- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。
+- 项目配置可以直接打开它；关掉（`sandbox = "off"`）属于放宽，要先信任，见 [19 安全](/governance/security)。`sandbox_network` 同理：项目配置可以设成 `deny`；
+  `allow` 与 `allowlist` 都要先信任，因为不知道用户配置里原来是哪一档，`allowlist` 相对 `deny` 是放宽。`network_allow` 的条目、`unix_sockets` 放行的套接字同样要信任。
+
+### 本机 IPC：沙箱外的进程替它执行
+
+文件规则只管这个进程自己读写什么。可它还能请本机别的进程代劳，那些进程不在沙箱里：
+
+- `docker.sock`：`docker run -v ~:/h alpine rm -rf /h`，删的是真实的家目录，写入边界形同虚设；
+- tmux、screen 的套接字：往一个开着的终端里敲命令；ssh-agent 的套接字：不读私钥文件也能用私钥登录；
+- LaunchServices 与 Apple 事件：`open` 拉起任意程序，`osascript` 让终端执行命令；launchd：`launchctl` 提交后台任务；
+- 钥匙串与剪贴板：`git credential-osxkeychain get` 吐出 GitHub 令牌，`pbpaste` 读到用户刚复制的口令。
+
+这些通道都在实机上做过对照实验：探针只在临时目录里 touch 一个标记文件，钥匙串只查锁定设置、不碰口令。
+
+| 通道 | 不加限制时 | 加了规则之后 |
+|---|---|---|
+| `docker.sock` | 连得上守护进程 | `permission denied` |
+| ssh-agent | 列出已加载的私钥 | `Operation not permitted` |
+| `open` 拉起探针程序 | 标记文件出现，程序在沙箱外运行 | 拉不起来；`coreservices` 下的服务单独拒绝哪一个都还有退路，只能整组拒绝 |
+| `launchctl submit` / `bootstrap` | 沙箱外执行成功 | 沙箱里本来就被 launchd 拒绝，`(deny job-creation)` 写明而不依赖它 |
+| 钥匙串、剪贴板 | 读得到 | 读不到 |
+
+规则加上之后，DNS 解析、`curl` / `git` / Python / Node 的 HTTPS、`xcrun`、`brew`、`osascript` 本地计算照常可用：
+TLS 证书校验走 `trustd`，不受影响。`tests/test_backlog.py` 核对 Unix 套接字（三种网络策略，含 `unix_sockets` 放行）与钥匙串。
+
+本机数据库常用 Unix 套接字连接。沙箱里要用的，逐个列出：
+
+```toml
+[permissions]
+unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]
+```
+
+列出的套接字任何网络策略下都放行，所以它和白名单条目一样，写在项目配置里要先信任。放行位置有两条限制：
+
+- **启动时定下，之后不再解析。** 目录部分解析符号链接，最后一级保留原样。每条命令都重新解析的话，命令可以先把那个位置换成指向 `docker.sock` 的符号链接。内核按解析后的真实路径判定连接（实测），放行位置上被换成的符号链接连不过去；
+- **不能在沙箱可写的目录里**（工作区、临时目录），否则拒绝执行。符号链接挡得住，硬链接挡不住：命令在那里建一个 `docker.sock` 的硬链接，或者把上层目录整个换掉，路径照样对得上，连到的却是 Docker。
+
+Homebrew 的 PostgreSQL 默认把套接字放在 `/tmp`，不能直接放行：把 `unix_socket_directories` 改到临时目录之外，或者改用本机 TCP 端口（`allowlist` 档写 `localhost:5432`）。
+
+### 出站白名单
+
+整体断网太粗：装依赖、拉代码都要联网，于是只能整体放开，被注入的内容驱动外发时就没有最后一道防线。
+`sandbox_network = "allowlist"` 只放行 `network_allow` 里的主机：
+
+```toml
+[permissions]
+sandbox = "macos"
+sandbox_network = "allowlist"
+network_allow = ["pypi.org", "files.pythonhosted.org", "*.githubusercontent.com", "localhost:5432"]
+```
+
+Seatbelt 的网络规则只认 `localhost` 或 `*` 加端口，写不了主机名，所以分两层（`tools/egress.py`）：
+
+1. **内核层**：对外连接一律拒绝，只放行到本机出站代理的端口。Unix 套接字同样拒绝，因为 DNS 查询走 mDNSResponder 的套接字，
+   数据可以编码进域名带出去；`docker.sock` 能起一个带网络的容器。这两条在 `deny` 档同样生效；
+2. **代理层**：每条命令启动一个只监听 127.0.0.1 临时端口的代理，命令的 `HTTPS_PROXY` 等变量指向它。HTTPS 走 `CONNECT` 隧道，
+   代理只看主机名和端口、不解密；主机不在白名单里就回 403，并在命令结果末尾注明被拦下的主机。主机名由代理解析，沙箱里不需要 DNS。
+
+代理跑在沙箱外，它能连到的地方比沙箱多，所以还有三条规则：
+
+- **解析出的地址再核一遍。** 被放行的域名解析到 127.0.0.1 或云元数据地址（169.254.169.254），就等于借代理绕过了内核层。
+  回环地址只认 `localhost:端口` 这类本机规则，链路本地与保留地址一律不连，内网地址只认写全名的规则（通配子域名里可能有别人控制的名字）；
+  连接用的就是核过的 IP，不再按名字解析第二次，DNS 重绑定换不了目标。TUN 模式代理软件用的 fake-ip 网段（198.18.0.0/15）按公网处理；
+- **纯 HTTP 的 Host 头换成判定过的主机。** 否则连的是放行的服务器，请求的却是同一台机器上的别的站点；
+- **命令结束时清理它的进程组。** 代理随命令关闭，沙箱放行的那个端口号之后可能被别的服务占用，留在后台的进程会连到占用者那里。
+  自己另起会话（`setsid`）的进程不在组里，管不到。
+
+白名单写法：`pypi.org` 只匹配这个主机的 80、443 端口；`*.github.com` 匹配子域名、不含 `github.com` 本身；
+`registry.local:5000`、`example.com:*` 限定或放开端口；`localhost:5432` 这类本机端口还在内核层直接放行，给不支持 HTTP 代理的客户端用。
+写法不对在启动时报错。命令行可以临时指定：`flywhl run --sandbox macos --net-allow pypi.org --net-allow files.pythonhosted.org "装依赖并跑测试"`。
+
+边界：
+
+- 不走代理的连接都连不出去：SSH（包括 `git@github.com:` 和被 `insteadOf` 改写成 SSH 的地址）、`git://`、不读代理环境变量的程序。
+  失败是预期的，不会绕过白名单；
+- 代理不解密 TLS，只按 `CONNECT` 的主机名判定。同一 CDN 上可以借域前置访问别的站点（TLS 里的 Host 与外层主机名不同，
+  检查 SNI 也拦不住），所以白名单只放必要的主机；
+- 代理自己直连目标，不经过环境里的上游 HTTP 代理，必须经企业代理出网的环境暂不支持；
+- 网络策略离不开沙箱：配置了 `deny` 或 `allowlist` 却没开沙箱时，bash 拒绝执行并说明原因，不会悄悄连外网；设置页同样标红。
+
+`tests/test_backlog.py` 里的出站白名单用例在真实 Seatbelt 下核对：白名单内经代理和 `CONNECT` 可达、白名单外回 403、
+绕过代理直连本机端口被拒、直连外部地址被拒、Unix 套接字被拒、命令结束后后台进程被清理；另有不经沙箱的用例核对地址复核与 Host 头重写。
+
+### Linux：bubblewrap 档位
+
+`sandbox = "linux"` 用 bubblewrap（`bwrap`）实现同样的边界，`bwrap_argv()` 生成的参数大致是：
+
+```text
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --unshare-ipc --die-with-parent --new-session
+      --tmpfs /run                                   # docker.sock、D-Bus、XDG_RUNTIME_DIR 里的套接字都不出现
+      [--unshare-net]                                # sandbox_network = "deny"
+      --bind <本会话私有目录> /tmp --tmpfs /var/tmp     # X11、tmux、ssh-agent 的套接字不出现；/tmp 在命令之间照样共用
+      --bind <工作区> <工作区>                          # 可写：工作区
+      --ro-bind <工作区>/.flywhl <工作区>/.flywhl     # harness 状态与项目配置再只读挂回去
+      --tmpfs ~/.ssh --ro-bind /dev/null <工作区>/sub/.netrc ...  # 凭证位置：目录换成空目录，文件换成空文件
+      --ro-bind /dev/null ~/.docker/run/docker.sock ...  # 其余看得见的宿主套接字（来自 /proc/net/unix）
+      --bind /run/postgresql/.s.PGSQL.5432 /var/run/postgresql/.s.PGSQL.5432   # unix_sockets 列出的挂回来
+      --setenv TMPDIR /tmp --chdir <工作区> /bin/bash -c '<命令>'
+```
+
+和 macOS 档的差别都来自 bubblewrap 只能按路径挂载、不能按模式拒绝：
+
+| 方面 | macOS（Seatbelt） | Linux（bubblewrap） |
+|---|---|---|
+| 凭证位置 | 按清单正则拒绝，任何路径都算 | 家目录按清单查，工作区逐层遍历（超过 5 万个条目拒绝执行）；`node_modules`、`.venv`、`.git` 这类依赖与缓存目录不进去——每条命令都走一遍太慢，里面也不是用户放凭证的地方，放在那里的凭证认不出。工作区与家目录之外散落的私钥文件同样认不出 |
+| 其它进程的环境变量 | 清单里的 `/proc/*/environ` | 新 PID 命名空间，看不到别的进程 |
+| 新建 `flywhl.toml` | 拒绝 | 已存在的只读；还不存在的拦不住新建，新建的项目配置仍要经过信任确认 |
+| Unix 套接字 | 按连接拒绝，`unix_sockets` 列出的放行 | 只读挂载挡不住连接，只能让它们不出现：`/run`、`/var/run`、`/var/tmp` 换成空目录，`/tmp` 换成本会话私有的目录（进程退出时删除）；其余位置上的（包括挂回 `/tmp` 下面的工作区）按 `/proc/net/unix` 逐个盖成 `/dev/null`。那里记的是绑定时写的路径：经符号链接绑定的按真实位置遮住，绑定后改过名的按原目录找出来。列出的再挂回来，只挂真的套接字。认不出的：按相对路径绑定的、所在目录被整个挪走的、被宿主进程硬链接到别处的、命令开始之后才出现的；`allow` 档与宿主共用网络命名空间，抽象命名空间里的套接字（部分 X11、D-Bus）仍然连得上 |
+| 钥匙串、`open` 一类 | 拒绝对应的 Mach 服务 | 没有对应物；桌面会话的 D-Bus 在 `/run` 里，一并遮住 |
+| `deny` 网络 | 拒绝 IP 连接与 Unix 套接字 | 新网络命名空间，抽象套接字也隔开了 |
+| `allowlist` 网络 | 支持 | 未实现，配置了就拒绝执行 |
+
+没有 bubblewrap、或它因为用户命名空间被禁用而跑不起来时，命令同样拒绝执行。在 Docker 容器里使用要放开两处默认限制：
+seccomp 会拦下 bubblewrap 需要的 `unshare`（`--security-opt seccomp=unconfined`）；`/proc` 部分路径被遮住，挂新的 `/proc`
+会失败（`--security-opt systempaths=unconfined`），这时 bash 的输出以 `bwrap:` 开头并附上指向本节的提示。不想放开的话，
+直接把容器本身当作沙箱。
+`tests/test_backlog.py` 的 `needs_bwrap` 用例核对凭证遮蔽（含工作区子目录）、`.flywhl/` 只读、写入边界、宿主套接字不可见与断网，
+它们只在有可用 bubblewrap 的 Linux 上运行。
+这些用例和外层 bwrap 沙箱下的全量测试在 `python:3.12-slim` 一次性容器里跑过（不挂载宿主目录，代码用 tar 流传进去，普通用户运行）。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）
 
@@ -567,14 +710,15 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 ## 小结
 
 - Workspace 是代码、依赖、执行环境、元数据组成的现场；本项目实现了创建、使用、快照、恢复，分叉与归档留给生产实现。
-- 路径约束先 resolve 再比较，能识别 `../` 和符号链接逃逸；bash 只有按字面参数的近似检查，硬链接和竞态管不到——它是门，不是墙。
+- 路径约束先 resolve 再比较，能识别 `../` 和符号链接逃逸，文件工具执行前还按真实路径复查凭证清单；bash 按字面参数做近似检查（工作区里的链接按目标判定），硬链接管不到——它是门，不是墙。
 - 漂移检测用大小 + mtime 清单，在恢复时告诉模型哪些文件变了。
 - 影子 git 不碰用户的 `.git`，按工作区分仓库，每次写操作前快照，回滚时删除新增文件并留下 restore 记录；它回滚的是工作区文件，不是外部世界。
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
-- macOS sandbox-exec 档位是本项目唯一的系统级隔离（原型）：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
-  不管网络；“只在沙箱档位下允许 bypass”还是设计草案。
-- 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash 与 MCP 服务器共用）只是最小实现。
+- 系统级隔离只有 macOS sandbox-exec 与 Linux bubblewrap 两个原型档位：只包 bash，凭证位置不可读写、写操作限制在工作区与临时目录，
+  可选整体断网（`sandbox_network = "deny"`）或出站白名单（`allowlist`，仅 macOS：经本机代理按主机名放行，DNS 与本机套接字一并拒绝）；
+  “只在沙箱档位下允许 bypass”还是设计草案。
+- 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash、MCP 服务器、命令 hook 共用一套规则）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

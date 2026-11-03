@@ -26,7 +26,7 @@ from ..cancel import RunCancelled
 from ..events import E, Event
 from ..policy.hooks import HookEvent, HookInput
 from ..policy.permissions import Decision, grant_for, strictest
-from ..runtime.workspace import PathEscape
+from ..runtime.workspace import CredentialPath, PathEscape
 from ..tools.base import Effect, Tool, ToolContext, ToolResult, TransientToolError
 from ..tools.schema import format_errors, validate
 from ..types import Message, ToolCall, tool_result_message
@@ -185,6 +185,7 @@ class ToolExecutor:
         # ---- 权限 + PreToolUse hooks ----
         perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
         decision, reason = perm.decision, perm.reason
+        hook_asked = False
         if rc.hooks.has(HookEvent.PRE_TOOL_USE):
             out = await rc.hooks.run(HookEvent.PRE_TOOL_USE, self._hook_input(HookEvent.PRE_TOOL_USE, call.name, args))
             for w in out.warnings:
@@ -197,6 +198,7 @@ class ToolExecutor:
                 perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 改写后必须重新判定
                 decision, reason = perm.decision, perm.reason
             if out.decision in ("allow", "ask", "deny"):
+                hook_asked = out.decision == "ask"      # 守卫要人确认：无人值守时也不按规则自动批准
                 # hook 只能收紧、不能放宽：hook 说 allow 也绕不过规则的 ask/deny
                 stricter = strictest(decision, out.decision)
                 if stricter != decision:
@@ -210,14 +212,26 @@ class ToolExecutor:
             return done(ToolResult.error(f"权限拒绝：{reason}。请换一种不需要该权限的方式完成，或向用户说明需要什么权限。"), "denied")
         if decision == Decision.ASK:
             preview = tool.preview(args, ctx)
+            grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
+            fatigue = getattr(rc.approvals, "fatigue", None)
+            asked = time.monotonic()
+            auto_rule, auto_why = None, ""
+            if getattr(rc.approvals, "on_ask", "wait") == "deny":   # 无人值守：auto_approve 规则命中的自动批准
+                auto_rule, auto_why = (None, "PreToolUse hook 要求确认，不自动批准") if hook_asked \
+                    else rc.permissions.auto_approval(tool, args, perm, tainted=rc.tainted)
             dec = await rc.approvals.request(
                 run_id=rc.run_id, session_id=rc.session_id, call_id=call.id, tool=tool.name, args=args,
                 summary=tool.describe_call(args), risk=perm.risk, reason=reason, cancel=rc.cancel,
-                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview),
+                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview, grant, fatigue),
+                auto_rule=str(auto_rule) if auto_rule else None, auto_why=auto_why,
             )
             await self._set_status("running", "审批已处理")
             publish(E.APPROVAL_RESOLVED, {"call_id": call.id, "approved": dec.approved, "by": dec.by,
                                           "reason": dec.reason, "remember": dec.remember})
+            if fatigue is not None:
+                for text in fatigue.observe(rc.session_id, approved=dec.approved, by=dec.by, key=grant, risk=perm.risk,
+                                            waited=time.monotonic() - asked, remembered=dec.remember):
+                    publish(E.NOTICE, {"level": "warn", "code": "approval_fatigue", "text": text})
             if not dec.approved:
                 why = f"：{dec.reason}" if dec.reason else ""
                 return done(ToolResult.error(f"用户拒绝了该操作{why}。请调整方案（例如改用只读方式），或询问用户的意图。"), "rejected")
@@ -240,6 +254,10 @@ class ToolExecutor:
                         args, errs = validate(tool.parameters, again.updated_input)
                         if errs:
                             return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
+                        # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略，命中拒绝（灾难性命令、凭证、deny 规则）就不执行
+                        final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+                        if final.decision == Decision.DENY:
+                            return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
             if dec.remember:
                 g = grant_for(tool, args)
                 rc.grants.append(g)
@@ -316,7 +334,8 @@ class ToolExecutor:
                 tried = f"共尝试 {attempt} 次" if retryable else "非幂等工具不自动重试"
                 return ToolResult.error(f"工具暂时不可用（{tried}）：{e}"), "error"
             except PathEscape as e:
-                return ToolResult.error(f"{e}。只能操作工作区内的文件。"), "denied"
+                hint = "" if isinstance(e, CredentialPath) else "只能操作工作区内的文件。"
+                return ToolResult.error(f"{e}。{hint}"), "denied"
             except RunCancelled as e:  # 例如 task：父 Run 被取消时子代理向上传播的取消
                 return ToolResult.error(f"已取消：{e}"), "cancelled"
             except Exception as e:
@@ -382,9 +401,12 @@ class ToolExecutor:
         return HookInput(event=event, run_id=rc.run_id, session_id=rc.session_id, cwd=str(rc.workspace.root),
                          tool_name=tool_name, tool_input=dict(args), context=rc)
 
-    async def _on_approval_created(self, rec, publish, perm, preview: str | None = None) -> None:
+    async def _on_approval_created(self, rec, publish, perm, preview: str | None = None, grant: str | None = None,
+                                   fatigue: Any = None) -> None:
         publish(E.APPROVAL_REQUEST, {**rec.to_dict(), "analysis": perm.analysis, "effect": str(perm.effect),
-                                     "preview": preview[:8000] if preview else None})
+                                     "preview": preview[:8000] if preview else None, "grant": grant,
+                                     "approved_before": fatigue.approved_before(rec.session_id, grant)
+                                     if fatigue is not None and grant else 0})
         await self._set_status("waiting_human", f"等待审批 {rec.id}")
 
     async def _set_status(self, to: str, reason: str) -> None:

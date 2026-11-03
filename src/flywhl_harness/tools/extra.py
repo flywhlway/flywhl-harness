@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import regex_search
 from .base import Effect, Tool, ToolContext, ToolResult
 
 TODO_STATUSES = ["pending", "in_progress", "completed", "cancelled"]
@@ -122,13 +123,17 @@ class SearchRefTool(Tool):
         if data is None:
             return ToolResult.error(f"句柄 {args['ref']} 不存在、已过期或不属于当前会话。")
         try:
-            rx = re.compile(args["pattern"])
+            re.compile(args["pattern"])
         except re.error as e:
             return ToolResult.error(f"正则无效：{e}")
-        hits = [f"{i}: {ln[:300]}" for i, ln in enumerate(data.splitlines(), 1) if rx.search(ln)]
         cap = args.get("max_results", 50)
-        more = f"\n[共 {len(hits)} 处匹配，仅显示前 {cap} 处]" if len(hits) > cap else ""
-        return ToolResult(content="\n".join(hits[:cap]) + more if hits else "未找到匹配。", details={"count": len(hits)})
+        try:   # 匹配放进可终止的子进程：灾难性回溯不能卡住事件循环（见 tools/regex_search.py）
+            found = await regex_search.grep_text(args["pattern"], data, cap=cap)
+        except regex_search.RegexTimeout as e:
+            return ToolResult.error(f"搜索超过 {e.seconds:.0f} 秒被终止：正则可能存在灾难性回溯（如 (a+)+$），请简化表达式。")
+        hits, total = [f"{i}: {ln}" for i, ln in found["hits"]], found["total"]
+        more = f"\n[共 {total} 处匹配，仅显示前 {cap} 处]" if total > cap else ""
+        return ToolResult(content="\n".join(hits) + more if hits else "未找到匹配。", details={"count": total})
 
 
 def latest_todos(messages: list[Any]) -> list[dict[str, Any]] | None:

@@ -11,6 +11,9 @@
 例外：命令分析判定为 **灾难性**（删根目录/家目录、格式化磁盘、写块设备、fork 炸弹）或 **碰到凭证位置** 时，
 在一切规则与模式之前直接 deny——bypass 模式、会话授权、allow 规则都不能放行。
 
+无人值守（``on_ask="deny"``）时，判定为 ask 的调用默认拒绝；``auto_approve`` 规则命中的改为自动批准，
+见 ``PermissionPolicy.auto_approval``。
+
 bash 与凭证位置
 ---------------
 文件工具对凭证位置（``policy/sensitive.py`` 的 ``CREDENTIAL_GLOBS``）在任何模式下都拒绝；bash 早期只把命中升为 dangerous，
@@ -30,8 +33,9 @@ default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。�
 线索档（``.env``、``credentials`` 字样、shell 历史）维持高危要确认，bypass 下不升级：
 ``cp .env.example .env``、``pytest tests/test_credentials.py`` 都会命中，硬拒绝会误伤日常命令。
 
-字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（``D=$HOME/.ku; cat ${D}be/config``、
-glob、编码）。后者要靠系统沙箱：``permissions.sandbox = "macos"`` 让 bash 跑在 sandbox-exec 里，由内核按真实路径拒绝。
+字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（运行时才拼出来的
+``D=$(echo $HOME/.ku); cat ${D}be/config``、glob、编码）。后者要靠系统沙箱：
+``permissions.sandbox = "macos"`` / ``"linux"`` 让 bash 跑在 sandbox-exec / bubblewrap 里，由内核按真实路径拒绝。
 
 四种模式
 --------
@@ -50,9 +54,11 @@ bypass          全部放行（deny 规则、灾难性命令、凭证位置仍�
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..tools.base import Effect, Tool
@@ -116,7 +122,8 @@ class Rule:
 
 # 托管基线（排在所有规则与模式之前，bypass 也不例外）：密钥与凭证默认不可读写，最危险的命令直接拒绝；
 # harness 自己的数据目录与项目配置不能被 Agent 改写——.flywhl/ 里是会话库、审批记录、快照与 .flywhl/config.toml，
-# flywhl.toml 会在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权
+# flywhl.toml 会在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权；
+# .git/ 同理：写进 .git/config 的 core.fsmonitor 会在下一次 git status 时执行
 # 敏感路径清单与 bash 命令分析共用（policy/sensitive.py）；grep 会把匹配行原样带回上下文，和 read 一样要拦
 _CONTENT_TOOLS = ("read", "grep", "write", "edit")
 MANAGED_BASELINE = [
@@ -124,6 +131,8 @@ MANAGED_BASELINE = [
     *(f"ask:{t}({g})" for g in SECRET_HINT_GLOBS for t in _CONTENT_TOOLS),
     "deny:write(.flywhl/*)", "deny:edit(.flywhl/*)", "deny:write(*/.flywhl/*)", "deny:edit(*/.flywhl/*)",
     "ask:write(flywhl.toml)", "ask:edit(flywhl.toml)", "ask:write(*/flywhl.toml)", "ask:edit(*/flywhl.toml)",
+    # .git/ 里的 config 与 hooks 会被之后的 git 命令执行（core.fsmonitor、pre-commit……）：accept_edits 也不能自动放行
+    *(f"ask:{t}({g})" for g in (".git", "*/.git", ".git/*", "*/.git/*") for t in ("write", "edit")),
     "ask:bash(*.flywhl*)",
     "deny:bash(rm -rf /)", "deny:bash(rm -rf /*)", "deny:bash(rm -rf ~*)", "deny:bash(mkfs*)", "deny:bash(:(){*)",
 ]
@@ -140,16 +149,27 @@ class PermissionResult:
     effect: Effect = Effect.READ
     rule: str | None = None
     analysis: list[str] | None = None
+    source: str | None = None       # 命中规则的来源（managed、session……），没命中规则时为 None
+
+
+def auto_approve_rule(text: str) -> Rule:
+    """无人值守时自动批准的规则：写成 ``工具(模式)``（如 ``bash(npm test*)``、``write(src/**)``），可以带 ``allow:`` 前缀。"""
+    t = text.strip()
+    try:
+        return Rule.parse(t if t.startswith("allow:") else f"allow:{t}", "auto_approve")
+    except ValueError:
+        raise ValueError(f"无法解析自动批准规则：{text!r}（格式：工具(模式)，如 bash(npm test*)、write(src/**)）") from None
 
 
 class PermissionPolicy:
     def __init__(self, mode: str | Mode = Mode.DEFAULT, rules: Iterable[str | Rule] = (), *, workspace: Any = None,
-                 baseline: bool = True):
+                 baseline: bool = True, auto_approve: Iterable[str | Rule] = ()):
         self.mode = Mode(mode)
         self.workspace = workspace
         self.baseline = baseline
         parsed = [r if isinstance(r, Rule) else Rule.parse(r) for r in rules]
         self.rules: list[Rule] = ([Rule.parse(r, "managed") for r in MANAGED_BASELINE] if baseline else []) + parsed
+        self.auto_rules = [r if isinstance(r, Rule) else auto_approve_rule(r) for r in auto_approve]
 
     # ------------------------------------------------------------------ 目标串
     def _targets(self, tool: Tool, args: dict[str, Any]) -> list[str]:
@@ -200,21 +220,14 @@ class PermissionPolicy:
 
         # 1) 规则：deny → ask → allow，先命中者生效
         decision: Decision | None = None
-        reason, hit = "", None
+        reason, hit, source = "", None, None
         for want in (Decision.DENY, Decision.ASK, Decision.ALLOW):
-            for r in all_rules:
-                if r.decision != want:
-                    continue
-                if tool.name == "bash" and want == Decision.ALLOW and r.pattern:
-                    # 复合命令：每一段都必须被 allow 规则覆盖，防止 "git status && rm -rf x" 搭便车
-                    segs = targets[1:] or targets[:1]
-                    if not all(any(r2.decision == Decision.ALLOW and r2.matches(tool.name, [s]) for r2 in all_rules) for s in segs):
-                        continue
-                if r.matches(tool.name, targets):
-                    decision, hit = want, str(r)
-                    reason = f"命中{'托管' if r.source == 'managed' else ('会话授权' if r.source == 'session' else '')}规则 {r}"
-                    break
-            if decision:
+            same = [r for r in all_rules if r.decision == want]
+            r = self._allowed_by(tool, targets, same) if want == Decision.ALLOW \
+                else next((r for r in same if r.matches(tool.name, targets)), None)
+            if r is not None:
+                decision, hit, source = want, str(r), r.source
+                reason = f"命中{'托管' if r.source == 'managed' else ('会话授权' if r.source == 'session' else '')}规则 {r}"
                 break
 
         # 2) 模式默认姿态
@@ -230,13 +243,66 @@ class PermissionPolicy:
             decision, reason = Decision.ASK, "命令分析为高危：" + "；".join(analysis.reasons)
         if analysis and analysis.opaque and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             # allow 规则（含“本会话总是允许”的授权）按命令前缀匹配：git status "$(rm -rf ~)" 会命中 git status*，
-            # 但替换里的命令不受规则约束——这类命令一律交给人确认
-            decision, reason = Decision.ASK, "命令包含命令替换或进程替换，其中执行的命令不受 allow 规则约束，需要人工确认"
+            # 但替换里的命令不受规则约束；仓库配置给 git diff 挂的 textconv 同理——这类命令一律交给人确认
+            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换或仓库配置），不受 allow 规则约束，需要人工确认"
         if tainted and effect != Effect.READ and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:
             reason = f"{reason}（{analysis.reasons[0]}）"  # 让审批人一眼看到“为什么要问”
-        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None)
+        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source)
+
+    def _allowed_by(self, tool: Tool, targets: list[str], rules: list[Rule]) -> Rule | None:
+        """放行这次调用的第一条规则。bash 复合命令每一段都要被其中某条覆盖，防止 "git status && rm -rf x" 搭便车；
+        文件工具按实际落点匹配，见 ``_landing``。"""
+        targets = self._landing(tool, targets)
+        segs = targets[1:] or targets[:1]
+        for r in rules:
+            if tool.name == "bash" and r.pattern and not all(any(r2.matches(tool.name, [s]) for r2 in rules) for s in segs):
+                continue
+            if r.matches(tool.name, targets):
+                return r
+        return None
+
+    def _landing(self, tool: Tool, targets: list[str]) -> list[str]:
+        """放行一侧（allow 规则、会话授权、auto_approve）给文件工具匹配的目标串：文件实际落在哪里——解析后的绝对路径与
+        工作区相对路径。原始路径只在不含 ``..``、也没经过工作区里的软链接时才算：``src/../../etc/hosts``、
+        指向工作区外的 ``src/link/hosts`` 原样能被 ``read(src/**)`` 匹配上，落点却不归这条规则管。
+        工作区之外的软链接（macOS 的 ``/tmp``）不是仓库能放进来的，``allow:read(/tmp/**)`` 照常命中。
+        deny / ask 是收紧方向，仍对原始路径和落点都匹配，宁可多命中。"""
+        if tool.name not in _FILE_TOOLS or self.workspace is None or len(targets) != 3:
+            return targets
+        raw, resolved, rel = targets
+        q = Path(os.path.expanduser(raw))
+        q = q if q.is_absolute() else self.workspace.root / q
+        if ".." in q.parts or (q.is_relative_to(self.workspace.root) and str(q) != resolved):
+            return [resolved, rel]
+        return targets
+
+    def auto_approval(self, tool: Tool, args: dict[str, Any], perm: PermissionResult, *,
+                      tainted: bool = False) -> tuple[Rule | None, str]:
+        """无人值守时，这次需要确认的调用能否按 ``auto_approve`` 规则自动批准：返回 (命中的规则, "")，或者
+        (None, 不批准的原因)。规则按 allow 规则的口径匹配，但这几类调用始终不自动批准，照旧拒绝：
+
+        - 命令分析为高危的（risk = critical）；
+        - 实际执行的程序不在命令文本里的（命令替换、仓库配置）：规则按文本匹配，担保不了它们；
+        - 托管基线要求确认的（密钥线索、.git 内部、flywhl 配置）；
+        - 文件工具读写工作区之外的路径：无人值守的运行不出工作区，规则写得再宽也一样；
+        - 会话读取过不可信内容之后的外部副作用操作：提示注入要把数据送出去，走的就是这条路。
+        """
+        if not self.auto_rules:
+            return None, ""
+        if perm.risk == "critical":
+            return None, "高危命令不自动批准"
+        if tool.name == "bash" and analyze(tool.permission_target(args), self._root()).opaque:
+            return None, "命令实际执行的程序不在命令文本里，不自动批准"
+        if perm.source == "managed":
+            return None, f"托管基线要求确认（{perm.rule}），不自动批准"
+        if self._outside(tool, args):
+            return None, "工作区之外的路径不自动批准"
+        if tainted and perm.effect == Effect.EXTERNAL:
+            return None, "会话读取过不可信内容，外部副作用操作不自动批准"
+        r = self._allowed_by(tool, self._targets(tool, args), self.auto_rules)
+        return (r, "") if r else (None, "没有匹配的 auto_approve 规则")
 
     def _mode_default(self, tool: Tool, args: dict[str, Any], effect: Effect) -> tuple[Decision, str]:
         if self.mode == Mode.BYPASS:
@@ -261,6 +327,7 @@ def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
     bash 默认按前两个词授权（``pytest -q*``）。前两个词说明不了实际执行什么的命令只精确授权这一条：
     ``bash -lc '...'``、``python3 -c '...'``、``find . -exec ...`` 的代码在参数里，``timeout 10 ...``、``FOO=1 ...``
     后面跟的才是真正的命令——按前缀授权，批准一次 ``bash -lc 'echo hi'`` 就等于放行之后所有 ``bash -lc``。
+    文件工具按字面授权这一个路径：批准写一个名叫 ``*`` 的文件，不能变成放行之后所有写入。
     """
     target = tool.permission_target(args)
     if tool.name == "bash":
@@ -273,7 +340,7 @@ def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
         prefix = " ".join(words[:2]) if len(words) > 1 else (words[0] if words else "")
         return Rule(Decision.ALLOW, "bash", f"{prefix}*", "session")
     if tool.name in _FILE_TOOLS and target:
-        return Rule(Decision.ALLOW, tool.name, target, "session")
+        return Rule(Decision.ALLOW, tool.name, _glob_literal(target), "session")
     return Rule(Decision.ALLOW, tool.name, None, "session")
 
 

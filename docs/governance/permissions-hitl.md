@@ -108,6 +108,11 @@ _RULE_RE = re.compile(r"^\s*(allow|ask|deny)\s*:\s*([\w*?\-\[\]]+)\s*(?:\((.*)\)
 
 `fnmatch` 的 `*` 会跨越 `/`，所以 `src/**` 与 `src/*` 等价——写规则时不要指望 `*` 只匹配一层目录。
 
+放行一侧（allow 规则、会话授权、`auto_approve`）对文件工具只认文件实际落在哪里：解析后的绝对路径和相对工作区路径。
+原始路径只有在不含 `..`、也没经过工作区里的软链接时才参与匹配。否则 `src/../../etc/hosts`、指向工作区外的 `src/link/hosts`
+原样都能被 `allow:read(src/**)` 匹配上，读到的却是工作区外的文件。工作区之外的软链接（macOS 的 `/tmp`）不是仓库能放进来的，
+`allow:read(/tmp/**)` 照常命中。deny / ask 是收紧方向，仍然三个目标串都匹配，宁可多命中。
+
 **优先级：deny → ask → allow，先命中者生效。** 规则按来源分为 managed / project / user / session，但来源不参与排序：
 任何来源的 deny 都排在所有 allow 之前评估，所以用户规则里的 `allow:bash` 推翻不了托管基线的 deny。
 `tests/test_policy.py::test_rule_priority_deny_over_allow` 用 `["allow:bash", "deny:bash(rm -rf*)"]` 验证了这一点：
@@ -145,7 +150,7 @@ all_rules = [*self.rules, *grants]
 | `rm -rf ~/.cache/pip` | 否（只是 dangerous） | 命中 `deny:bash(rm -rf ~*)` | 全部 deny（托管规则） |
 | `rm -fr ~/.cache/pip` | 否 | 不命中 | default / accept_edits 为 ask，plan 为 deny，**bypass 放行** |
 
-`catastrophic` 覆盖“根目录、家目录，以及它们下面的一级目录”（`/usr`、`/etc`、`~/projects`、`$HOME/Documents`）这类整体性破坏；
+`catastrophic` 覆盖“根目录、家目录，以及它们下面的一级目录”（`/usr`、`/etc`、`~/projects`、`$HOME/Documents`）这类整体性破坏。家目录也认字面写法：`/Users/<名字>`、`/home/<名字>`、`/root` 与当前账户的真实家目录（模型常从 `pwd` 的输出里抄来绝对路径）；
 更深的路径（清理某个缓存目录）是合理操作，留给审批或沙箱。拒绝理由取的是 **触发灾难判定的那条原因**（`catastrophic_reason`），
 而不是排在最前面的原因：`sudo env FOO=1 nice -n 5 rm -rf ~` 显示的是“递归删除 ~”，而不是“sudo 提权执行”
 （`tests/test_security.py::test_catastrophic_reason_names_the_real_danger`）。
@@ -196,7 +201,8 @@ shlex 已经去掉引号与反斜杠，花括号再按 bash 的规则展开：
 | `cat ~/.kube/config`、`tar czf k.tgz ~/.ssh`、`sh -c 'cat ~/.aws/credentials'` | deny |
 | `cat ~/.k''ube/config`、`cat ~/.ku\be/config`、`cat ~/.ku{be,}/config`、`eval "cat ~/.do""cker/config.json"` | deny（去引号、展开之后再匹配） |
 | `cat $KUBECONFIG`、`cat $XDG_CONFIG_HOME/gh/hosts.yml` | deny（指向凭证位置的环境变量） |
-| `D=$HOME/.ku; cat ${D}be/config`、`cat ~/.kub?/config`、`cat $(printf '\x7e/.kube/config')` | **认不出是凭证**：前两条按工作区外路径、第三条按命令替换，default 下要确认，bypass 下放行 |
+| `D=$HOME/.ku; cat ${D}be/config` | deny（命令里赋过值的变量按取值展开之后再匹配） |
+| `D=$(echo $HOME/.ku); cat ${D}be/config`、`cat ~/.kub?/config`、`cat $(printf '\x7e/.kube/config')` | **认不出是凭证**：第二条按工作区外路径，另两条按命令替换，default 下要确认，bypass 下放行 |
 
 最后一行是字符串匹配的上限：它挡得住顺手的读取和简单变形，挡不住刻意混淆。被注入之后的对抗场景要靠系统沙箱，
 见 [18 Workspace 与沙箱](/governance/workspace-sandbox#macos-sandbox-exec-档位) 的 sandbox-exec 档位。
@@ -420,24 +426,26 @@ for j, w in enumerate(args, start=1):
 | `sort -o /etc/x a.txt`、`git diff --output=/tmp/x` | read，**allow** | external，ask |
 | `cat /etc/passwd`、`cat ~/.bashrc` | read，**allow** | external，ask（plan 下 deny） |
 | `bash -c 'git status'`、`git -C sub status` | ask | read，allow |
-| `cat {a,../../etc/passwd}`、`D=/etc; cat $D/passwd` | read，**allow** | external，ask |
+| `cat {a,../../etc/passwd}`、`D=/etc; cat $D/passwd`、`F=/etc/passwd; cat $F` | read，**allow** | external，ask |
 | `rm -rf {~,build}` | write，ask，**bypass 放行** | catastrophic，所有模式 deny |
-| `cat ~/.kube/config` | dangerous，ask，**bypass 放行** | credential，所有模式 deny |
+| `D=~; rm -rf $D`、`cd ~ && rm -rf *`、`rm -rf $DIR/*`（DIR 没赋值） | write / dangerous，ask，**bypass 放行** | catastrophic，所有模式 deny |
+| `cat ~/.kube/config`、`D=$HOME/.ku; cat ${D}be/config` | dangerous / external，ask，**bypass 放行** | credential，所有模式 deny |
 | `cat $XDG_CONFIG_HOME/gh/hosts.yml` | read，**allow** | credential，所有模式 deny |
 
-剩下的缺口有一个共同点：判断它们需要 shell **运行时** 的状态（当前目录、变量的值、脚本文件的内容），静态分析拿不到。
+剩下的缺口有一个共同点：判断它们需要只有 **运行时** 才知道的东西（命令替换的输出、读进来的输入、脚本文件的内容），静态分析拿不到。
 
 | 命令 | 分析结果 | 判定 | 问题所在 |
 |---|---|---|---|
-| `F=/etc/passwd; cat $F` | read | **allow** | 整个路径都在变量里；只有“以变量开头、又带 `/`”的词才按越界处理（否则 `echo $PATH` 也要确认） |
-| `D=$HOME/.ku; cat ${D}be/config` | external | ask，**bypass 放行** | 变量拼出来的凭证路径，字符串里没有凭证字样 |
+| `D=$(echo $HOME/.ku); cat ${D}be/config` | external | ask，**bypass 放行** | 值要到运行时才知道，只能按位置未知处理，认不出是凭证 |
 | `python3 script.py` | write | ask | 脚本内容不可见，能做的事和 `python -c` 一样多 |
 | `rm -fr ~/.cache/pip` | dangerous | ask，**bypass 放行** | 家目录下的深层路径不算 catastrophic，基线 glob 又只认 `rm -rf ~*` |
 
 相对路径用 `..` 爬出工作区（`cat ../../etc/passwd`）现在会被识别：命令在工作区根目录执行，`_is_outside()` 对含 `..` 的相对路径做
 `os.path.normpath`，结果以 `..` 开头即视为越界（`a/../b.txt` 仍在工作区内，`tests/test_security.py::test_analyzer_edge_cases`）。
 花括号先按 bash 的规则展开再判断（结果超过 64 个按无法分析处理）；以变量开头、又带 `/` 的词落在哪里取决于变量的值，
-按越界处理，`$PWD` 除外（它就是工作区根目录）。
+按越界处理，`$PWD` 除外（没有 `cd` 过时它就是工作区根目录）。
+
+**变量与当前目录。** 命令里赋过值的变量按每种可能的取值各分析一遍（`D=~; rm -rf $D`、`C=rm; $C -rf ~`），`cd` 之后的相对路径按可能的当前目录拼起来（`cd ~ && rm -rf *`）。哪些变量“一定赋过值”按 bash 的语义跟踪：`||` 之后、`if` 分支里、管道与子 shell 里的赋值不算数，没导出的变量在 `sh -c` 里是空的。变量可能为空时，`rm -rf`、`find -delete`、`chmod -R` 的目标再按“为空”判一次：`rm -rf $DIR/*` 在 DIR 为空时就是 `rm -rf /*`，任何模式都拒绝，原因里提示改写成 `${DIR:?}`（为空时 bash 报错退出，不执行删除）。这一条宁可多拒：`if` 的两个分支都赋了值，出了 `if` 仍按可能为空处理。值要到运行时才知道的变量（`$(...)`、`read`、`printf -v`、`source` 过的脚本可能改过的）落在哪里都按越界处理。命令里改了 IFS 的，展开后按新的分隔符拆词；`source` 过的脚本可能改了 IFS，之后的变量展开再按取值里出现的标点逐个试拆（`D=a:/; rm -rf $D` 在 IFS 含 `:` 时就是 `rm -rf /`），字母、数字当分隔符只出现在刻意混淆里，交给沙箱。命令里定义的别名和函数到调用处接上参数再分析：`alias r='rm -rf'; r ~`、`f() { rm -rf "$@"; }; f ~` 都会拒绝；同名的每个定义都算（调用之后才改掉的、分支和循环里的），位置参数按调用时的参数个数全部绑定，函数体可能挪动位置参数时（`shift`、`set --`、`eval`、命令位置上的变量）每种截法各分析一遍，层层调用超过 8 层直接拒绝。取值组合超过 16 种时只逐个分析前 16 种，截掉的取值（按可能的当前目录拼起来）里有根目录、家目录、块设备或凭证位置就拒绝；连同递归超过 1024 段时任何模式都拒绝——剩下的段没有分析，后面可能就跟着 `rm -rf ~`。
 但像变量、脚本内容这样的运行时状态，静态分析 shell 本质上做不完。这正是本章末尾“与 pi 的对照”一节中 pi 立场的出发点，
 也是本项目在 [18 章](/governance/workspace-sandbox) 讨论沙箱的原因。
 分析器的真正价值是 **降低审批疲劳**：让 `ls`、`git status` 这类高频只读命令不用问，把审批留给真正值得看的动作。
@@ -449,7 +457,7 @@ for j, w in enumerate(args, start=1):
 
 - **污点来源**：`Tool.untrusted_for(args)` 返回 True 的调用，或某次结果带 `ToolResult.tainted = True`。具体有三类：
   - bash：`BashTool.untrusted_for()` 取命令分析的 `network` 标记——`curl`、`wget`、`git pull`、`npm install` 取回的内容可能夹带注入；
-  - MCP 工具：`openWorldHint` 按 MCP 规范默认为 true，服务器没有声明 `openWorldHint: false` 的工具输出一律视为不可信（见 [19 安全](/governance/security)）；
+  - MCP 工具：输出一律视为不可信，只有配置写明 `trust_annotations = true` 且服务器声明 `openWorldHint: false` 时例外（见 [19 安全](/governance/security)）；
   - 子代理：子 Run 读过不可信内容，父 Run 也被标记——注入可以借子代理的回传结论进入父上下文。
 - **传播与持久化**：执行器在每次调用结束后检查，一旦命中就把 `rc.tainted` 置为 True，写入会话元数据 `meta["tainted"]`，
   并发布 `code="tainted"` 的 notice。`_build_rc` 构造 Run 时从会话元数据还原，所以暂停恢复、崩溃接管、同一会话的下一次 Run 都继承污点；
@@ -644,7 +652,7 @@ def preview(self, args: dict[str, Any], ctx: ToolContext) -> str | None:
 | 工具 | 生成的授权 | 例子 |
 |---|---|---|
 | bash | 前两个词 + `*` | `pytest -q tests` → `allow:bash(pytest -q*)` |
-| 文件工具 | 具体路径 | `allow:write(src/a.py)` |
+| 文件工具 | 具体路径，按字面（路径里的 `*` 不当通配符） | `allow:write(src/a.py)` |
 | 其它 | 整个工具 | `allow:send_notification` |
 
 粒度越窄越安全，但窄到每次都要重新批就失去意义。“前两个词”是一个折中，它的边界值得了解：
@@ -661,12 +669,42 @@ CI、批处理、定时任务里没有人能点“批准”。`PermissionConfig.
 | `on_ask` | 行为 | CLI 入口 |
 |---|---|---|
 | `wait`（默认） | 创建审批对象，等待人工 | `flywhl chat` / `flywhl serve` |
-| `deny` | 直接拒绝，不创建审批对象（`by="policy:auto_deny"`） | `flywhl run --json` 在未指定时自动设为 deny |
+| `deny` | 直接拒绝，不创建审批对象（`by="policy:auto_deny"`）；`auto_approve` 规则命中的自动批准 | `flywhl run --json` 在未指定时自动设为 deny；`--approve` 同时给出规则 |
 | `allow` | 直接放行（`by="policy:auto_allow"`） | `flywhl run --yes` |
 
 `on_ask="allow"` 放行的是 **所有** 判定为 ask 的调用，包括被命令分析升级的 dangerous 命令和被污点升级的副作用操作，
-剩下的防线只有 deny 规则。所以 CI 中更稳妥的组合是 `on_ask="deny"` 加上一组显式的 allow 规则（明确列出允许的测试、构建命令），
-或者 bypass 模式加上一次性沙箱——让“全放行”发生在用完即弃的环境里。
+剩下的防线只有 deny 规则。CI 里更稳妥的是 `on_ask="deny"` 加一组 **自动批准规则**，或者 bypass 模式加一次性沙箱——
+让“全放行”发生在用完即弃的环境里。
+
+### 按规则自动批准
+
+```toml
+[permissions]
+on_ask = "deny"
+auto_approve = ["bash(npm test*)", "bash(npm run build*)", "write(src/**)", "edit(src/**)"]
+```
+
+命令行等价写法是 `flywhl run "…" --json --approve 'bash(npm test*)' --approve 'write(src/**)'`（给了 `--approve` 即按
+`on_ask="deny"` 运行，不能与 `--yes` 同用）。判定为 ask 的调用，命中其中一条就自动批准（`by="policy:auto_approve"`，
+理由里写明命中的规则），否则照旧拒绝，拒绝理由写明原因，CI 日志里一眼能看到缺哪条规则。规则写法与 allow 规则相同，
+bash 复合命令同样要每一段都被覆盖。
+
+为什么不直接写 allow 规则：allow 规则在有人值守时同样生效，`allow:write(src/**)` 会让交互会话里的写入也不再询问；
+`auto_approve` 只在没人能点“批准”时才起作用。另一个区别在于它接在命令分析与污点升级 **之后**，所以要单独划出不批准的范围。
+下面几类调用规则写得再宽也不自动批准，和有人值守时一样等人，无人值守下就是拒绝：
+
+| 不自动批准的调用 | 原因 |
+|---|---|
+| 命令分析为高危（`git push --force`、`curl … \| sh`） | 与疲劳提示同一口径：高危命令在任何授权下都要人看 |
+| 实际执行的程序不在命令文本里（命令替换、仓库配置） | 规则按文本匹配，担保不了文本之外的东西 |
+| 托管基线要求确认的（密钥线索、`.git/` 内部、flywhl 配置） | 这些位置被改写的后果会延续到之后的运行 |
+| 文件工具读写工作区之外的路径 | 无人值守的运行不出工作区，规则写得再宽也一样 |
+| PreToolUse hook 要求确认的 | 守卫明确要人看 |
+| 读过不可信内容之后的外部副作用（网络、通知、推送） | 提示注入要把数据送出去，走的就是这条路；工作区内的写入不受影响 |
+
+项目配置里的 `auto_approve` 和放宽的 allow 规则一样要先信任：无人值守时多批准什么，不能由仓库自己说了算。
+`on_ask = "deny"` 平时只会更严，项目配置可以直接写；但用户配置里已有 `auto_approve` 规则时，它会把交互运行里的
+“等人审”换成“按这些规则替人批准”，这时同样要先信任（项目配置同时写了 `auto_approve = []` 的除外）。
 
 ## 审批疲劳如何量化
 
@@ -696,6 +734,19 @@ print("P90 等待(s)", waits[int(len(waits) * 0.9)] if waits else None)
 print("秒批", sum(1 for a in approved if a.decided_at - a.created_at < 2))
 print("重复", Counter(a.summary for a in approved).most_common(5))
 ```
+
+### 内置的疲劳提示
+
+上面的指标要事后去查。harness 在每次审批之后检查两个信号（`policy/fatigue.py`），只看人做出的决定，自动放行、超时与取消不算：
+
+| 信号 | 条件 | 提示 |
+|---|---|---|
+| 秒批成串 | 本会话最近 10 次人工决定里有 3 次在 2 秒内批准 | 批准前看一眼命令分析与变更预览。之后至少再过 10 次决定才会再提示，免得提示本身也被习惯性忽略 |
+| 同类重复批准 | 同一条“始终允许”规则（`grant_for()` 生成的键）在本会话人工批准满 3 次 | 给出这条规则，建议选“本会话始终允许”或写进 `permissions.rules`。外部副作用操作附一句“确认范围足够窄”；critical 命令不提示，任何授权下它们都要问 |
+
+单次秒批不算信号：短命令一眼就能看完。提示是一条 `notice` 事件（`code = "approval_fatigue"`），时间线和终端都会显示。运行结束、时间线按历史重绘时，这类提示随会话详情（`GET /api/sessions/{id}` 的 `notices`）补回到对应运行的末尾，会话授权、hook 告警、模型降级等提示同样保留。按会话的计数只在内存里，服务重启后从零开始。
+
+审批卡片上直接写出“本会话始终允许”会添加哪条规则，以及本会话已经批准过几次同类操作。授权有多宽，批准前就能看到：上文 `npm install*` 那种放行任何包的授权，在卡片上一眼可见。「审批」页顶部按最近 500 条记录显示人工决定数、批准率、秒批比例、等待时长的中位数与 P90、超时数，以及人工批准最多的同类操作，数据来自 `GET /api/approvals/stats`。
 
 调优的方向始终是：**把人的注意力留给少数真正有风险的动作**。高频且总被批准的，变成规则；高风险的，保持 ask 甚至 deny；
 无法静态判断风险的，放进沙箱。

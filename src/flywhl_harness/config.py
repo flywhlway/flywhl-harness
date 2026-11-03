@@ -36,7 +36,7 @@ import tomllib
 import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 
 @dataclass
@@ -85,7 +85,22 @@ class PermissionConfig:
     on_ask: str = "wait"                   # wait（等待人审）| allow | deny（无人值守时）
     approval_timeout: float = 600.0        # 审批超时，超时默认拒绝
     strip_secret_env: bool = True          # bash 子进程剥离 *KEY*/*TOKEN*/*SECRET* 等环境变量
-    sandbox: str = "off"                   # off | macos（bash 跑在 sandbox-exec 里，原型，见 tools/sandbox.py）
+    sandbox: str = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：bash 的系统沙箱，原型，见 tools/sandbox.py
+    sandbox_network: str = "allow"         # allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；要求开启沙箱
+    network_allow: list[str] = field(default_factory=list)   # 出站白名单：pypi.org、*.github.com、registry.local:5000
+    unix_sockets: list[str] = field(default_factory=list)    # 沙箱里放行连接的 Unix 套接字（绝对路径），如本机数据库；默认只放行 DNS 与系统日志
+    # hook / MCP 服务器经 npx、uvx、docker run 这类命令临时拉取的包必须锁到确切版本（镜像要带 @sha256: 摘要），否则拒绝启动
+    require_pinned: bool = False
+    # 无人值守（on_ask = "deny"）时自动批准的操作，写成 工具(模式)：bash(npm test*)、write(src/**)。其余需要审批的照旧拒绝；
+    # 高危命令、托管基线要求确认的、读过不可信内容后的外部操作不在此列，见 PermissionPolicy.auto_approval
+    auto_approve: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        from .policy.permissions import auto_approve_rule   # 延迟导入，与 _describe 同理
+
+        _check_str_list("permissions.auto_approve", self.auto_approve)
+        for r in self.auto_approve:
+            auto_approve_rule(r)    # 写错了在加载时就报出来，不要等到第一次审批
 
 
 @dataclass
@@ -96,7 +111,20 @@ class HookConfig:
     command: str = ""
     matcher: str = "*"
     timeout: float = 30.0
-    fail_closed: bool = False
+    # 脚本崩溃、超时、输出无法解析时怎么办。None = 按事件决定：pre_tool_use 是守卫，失败即拒绝（fail-closed）；
+    # 其它事件只是观察或补充上下文，失败即放行并给出警告
+    fail_closed: bool | None = None
+    # 子进程与 bash、MCP 一样剥离密钥类环境变量。确实要用的：env 写明取值，pass_env 列出从 harness 进程原样传入的变量名
+    env: dict[str, str] = field(default_factory=dict)
+    pass_env: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _check_env("hooks.env", self.env)
+        _check_str_list("hooks.pass_env", self.pass_env)
+
+    @property
+    def closed(self) -> bool:
+        return self.fail_closed if self.fail_closed is not None else self.event == "pre_tool_use"
 
 
 @dataclass
@@ -160,12 +188,14 @@ class HarnessConfig:
         user_file = (flywhl_home() / "config.toml").resolve()
         if user_file.is_file():
             _merge(cfg, tomllib.loads(user_file.read_text(encoding="utf-8")), layer=True)
+        explicit = {k: v for k, v in overrides.items() if v is not None}
         project = Path(path) if path else next((p for p in map(Path, PROJECT_CONFIG_FILES) if p.is_file()), None)
         if project is not None and project.is_file() and project.resolve() != user_file:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _trusted_part(project.resolve(), raw, data, trust)
+                data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
+                                     cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
         env_map = {
             "FLYWHL_PROVIDER": "provider",
@@ -188,7 +218,6 @@ class HarnessConfig:
             cfg.fallback_models = [m.strip() for m in fallbacks.split(",") if m.strip()]
         if os.environ.get("FLYWHL_PERMISSION_MODE"):
             cfg.permissions.mode = os.environ["FLYWHL_PERMISSION_MODE"]
-        explicit = {k: v for k, v in overrides.items() if v is not None}
         if explicit.get("provider", "auto") != "auto" and "model" not in explicit:
             from .llm.profiles import pinned_provider   # 延迟导入：llm 包反过来依赖本模块
 
@@ -257,9 +286,15 @@ _SAFE_KEYS = frozenset({
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
 })
-# permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任
+# permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任。
+# on_ask = deny 有一个例外：用户配置里写了 auto_approve 规则时，它会让这些规则替人批准，见 split_untrusted
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
-    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos",),
+    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos", "linux"),
+    # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
+    "sandbox_network": ("deny",), "network_allow": ([],),
+    "unix_sockets": ([],),   # 放行的套接字可能连着 docker.sock 这类能绕开沙箱的守护进程
+    "require_pinned": (True,),
+    "auto_approve": ([],),   # 无人值守时多批准哪些操作，由仓库自己说了算就等于没有审批
 }
 _TIGHTENING_RULE = re.compile(r"^\s*(deny|ask)\s*:")
 
@@ -273,7 +308,7 @@ class TrustRequest:
     """一份等待信任的项目配置，交给 ``HarnessConfig.load(trust=...)`` 的回调判断。"""
 
     path: Path          # 绝对路径。信任绑定位置：同样一行 python scripts/guard.py，换个仓库执行的就是另一份脚本
-    digest: str         # 文件内容的 SHA-256，内容一变就要重新确认
+    digest: str         # 文件内容（连同 hook、MCP 引用的脚本）的 SHA-256，哪个变了都要重新确认
     risky: list[str]    # 需要信任才能生效的设置，每项一行，供人审阅
 
 
@@ -282,8 +317,13 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
-def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。
+def split_untrusted(data: dict[str, Any], base: Path | None = None,
+                    auto_approve: Iterable[str] = ()) -> tuple[dict[str, Any], list[str]]:
+    """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是 hook、MCP 服务器实际运行的目录
+    （工作区）：命令里的相对路径按它解析，引用的文件与没锁版本的包写进确认提示。
+
+    auto_approve 是前几层（用户配置）已有的自动批准规则。没有它们时 ``on_ask = "deny"`` 只会更严；有了它们，
+    deny 就是把“等人审”换成“按这些规则替人批准”，仓库不能替用户打开，同样要信任。
 
     未知键留在前一部分，交给 ``_merge`` 照常报错——拼写错误不该变成一次信任确认。
     """
@@ -299,35 +339,88 @@ def split_untrusted(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                     risky += [f"permissions.rules: {r!r}" for r in v if r not in perms[k]]
                 elif k in _SAFE_PERMISSIONS and v not in _SAFE_PERMISSIONS[k]:
                     risky.append(f"permissions.{k} = {v!r}")
+                elif k == "on_ask" and v == "deny" and value.get("auto_approve", list(auto_approve)):
+                    risky.append("permissions.on_ask = 'deny'（会按 auto_approve 规则自动批准，不再等人审）")
                 else:
                     perms[k] = v
             safe[key] = perms
         elif key in _SAFE_KEYS or key not in known:
             safe[key] = value
         else:
-            risky += _describe(key, value)
+            risky += _describe(key, value, base or Path.cwd())
     # 转义控制字符：防止配置里的终端转义序列把确认提示改写成别的样子
     return safe, ["".join(c if c.isprintable() else repr(c)[1:-1] for c in s) for s in risky]
 
 
-def _describe(key: str, value: Any) -> list[str]:
+def _describe(key: str, value: Any, base: Path) -> list[str]:
     """高危设置写成一行：会执行的命令完整展示（不截断，截断处正好可以藏东西），其余展示取值。"""
+    from .policy.supply_chain import describe
+
     if key == "hooks" and isinstance(value, list) and value:
-        return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}"
+        return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}{_describe_env(h)}"
+                + (describe(h["command"], base, h.get("env")) if isinstance(h.get("command"), str) else "")
                 if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
     if key == "mcp_servers" and isinstance(value, dict) and value:
-        return [f"mcp_servers.{name}: 启动 {' '.join(map(str, [s.get('command'), *s.get('args', [])]))!r}"
-                if isinstance(s, dict) else f"mcp_servers.{name} = {s!r}" for name, s in value.items()]
+        return [_describe_mcp(name, s, base) for name, s in value.items()]
     return [f"{key} = {value!r}"]
 
 
+def _describe_env(spec: dict[str, Any]) -> str:
+    """子进程的 env / pass_env 同样要经过确认：PATH、BASH_ENV、DYLD_* 能换掉命令实际执行的程序，pass_env 会把密钥交出去。"""
+    from .policy.bash_analyzer import BENIGN_ENV   # 延迟导入，与 load() 里的 llm.profiles 同理
+    from .tools.shell import _SECRET_ENV
+
+    env = spec.get("env")
+    parts = [f"设置 {k}=" + ("<已隐藏>" if _SECRET_ENV.search(str(k)) else repr(v))
+             + ("" if BENIGN_ENV.fullmatch(str(k)) else "（可能改变实际执行的程序或加载的代码）")
+             for k, v in (env.items() if isinstance(env, dict) else [])]
+    if spec.get("pass_env"):
+        parts.append(f"从当前环境原样传入 {spec['pass_env']!r}")
+    return "".join(f"；{p}" for p in parts)
+
+
+def _describe_mcp(name: str, spec: Any, base: Path) -> str:
+    from .policy.supply_chain import describe, mcp_argv, mcp_base
+
+    try:
+        check_mcp_server(name, spec)
+    except ValueError as e:
+        return f"{e}（信任后加载时同样会报错）"
+    line = f"mcp_servers.{name}: 启动 {' '.join(map(str, [spec.get('command'), *spec.get('args', [])]))!r}"
+    if spec.get("cwd"):
+        line += f"（目录 {spec['cwd']!r}）"
+    line += _describe_env(spec)
+    if spec.get("trust_annotations"):
+        line += "；采信服务器自报的只读、幂等、封闭世界注解"
+    if spec.get("read_only_tools"):
+        line += f"；这些工具按只读处理，调用不经审批：{spec['read_only_tools']!r}"
+    return line + describe(mcp_argv(spec), mcp_base(spec, base), spec.get("env"))
+
+
+def _run_dir(cfg: HarnessConfig, data: dict[str, Any], explicit: dict[str, Any]) -> Path:
+    """hook 与 MCP 服务器实际运行的目录，即最终生效的工作区：显式参数 > 环境变量 > 项目配置 > 用户配置。
+    项目配置里的 workspace 本身也要信任才生效；不信任时连同 hook 一起丢掉，按它算也不会错。"""
+    ws = explicit.get("workspace") or os.environ.get("FLYWHL_WORKSPACE") or data.get("workspace") or cfg.workspace
+    return Path(str(ws)).expanduser().resolve()
+
+
 def _trusted_part(path: Path, raw: bytes, data: dict[str, Any],
-                  trust: Callable[[TrustRequest], bool] | None) -> dict[str, Any]:
-    """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。"""
-    safe, risky = split_untrusted(data)
+                  trust: Callable[[TrustRequest], bool] | None, base: Path,
+                  auto_approve: Iterable[str] = ()) -> dict[str, Any]:
+    """项目配置：高危设置在这份内容被信任过、或 ``trust`` 回调当场确认后才生效，否则只返回安全的部分。
+
+    hook、MCP 命令里引用的脚本（``python3 scripts/guard.py``）真正执行的是脚本的内容：一并算进哈希，改了脚本同样要
+    重新确认。相对路径按 base（hook、MCP 实际运行的工作区）解析，不按配置文件所在目录：换个工作区启动，执行的是
+    另一份脚本，哈希跟着变，要重新确认。"""
+    from .policy.supply_chain import config_files, file_digest
+
+    safe, risky = split_untrusted(data, base, auto_approve)
     if not risky:
         return data
-    req = TrustRequest(path, hashlib.sha256(raw).hexdigest(), risky)
+    digest = hashlib.sha256(raw)
+    for f in config_files(data, base):
+        digest.update(f"\0{f}\0{file_digest(f)}".encode())
+    req = TrustRequest(path, digest.hexdigest(), risky)
     if is_trusted(req):
         return data
     if trust is None:
@@ -367,6 +460,44 @@ def record_trust(req: TrustRequest) -> None:
     os.replace(tmp, f)      # 原子替换：并发写入最坏丢一条记录，不会留下半个文件
 
 
+# ---------------------------------------------------------------------- 类型校验
+# 放宽权限的设置一律按声明的类型严格校验，写错就报错，不做宽松转换：read_only_tools = "safe_*" 若按字符拆开，
+# 其中的 "*" 会放行全部工具，而信任确认里显示的却是 'safe_*'——确认的内容必须就是生效的内容
+MCP_SERVER_KEYS = ("command", "args", "env", "cwd", "read_only_tools", "trust_annotations")
+
+
+def _check_str_list(where: str, value: Any) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ValueError(f"{where} 必须是字符串列表，实际是 {value!r}")
+    return value
+
+
+def _check_env(where: str, value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError(f"{where} 必须是“变量名 = 字符串”的表，实际是 {value!r}")
+    return value
+
+
+def check_mcp_server(name: str, spec: Any) -> dict[str, Any]:
+    """校验一个 ``[mcp_servers.<name>]``，有误抛 ``ValueError``。配置加载与 ``load_mcp_tools`` 都会调用。"""
+    where = f"mcp_servers.{name}"
+    if not isinstance(spec, dict):
+        raise ValueError(f"{where} 必须是表，实际是 {spec!r}")
+    unknown = sorted(set(spec) - set(MCP_SERVER_KEYS))
+    if unknown:
+        raise ValueError(f"{where} 有未知配置项：{', '.join(unknown)}（可选：{', '.join(MCP_SERVER_KEYS)}）")
+    if not isinstance(spec.get("command"), str) or not spec["command"]:
+        raise ValueError(f"{where}.command 必须是非空字符串")
+    _check_str_list(f"{where}.args", spec.get("args", []))
+    _check_env(f"{where}.env", spec.get("env", {}))
+    if not isinstance(spec.get("cwd", ""), str):
+        raise ValueError(f"{where}.cwd 必须是字符串")
+    _check_str_list(f"{where}.read_only_tools", spec.get("read_only_tools", []))
+    if not isinstance(spec.get("trust_annotations", False), bool):
+        raise ValueError(f"{where}.trust_annotations 必须是 true 或 false，实际是 {spec['trust_annotations']!r}")
+    return spec
+
+
 def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
     """把字典递归合并进 dataclass；未知键直接报错，避免配置拼写错误被静默忽略。
 
@@ -384,5 +515,9 @@ def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
             setattr(dc, key, current + hooks if layer else hooks)
         elif key == "rules" and layer and isinstance(value, list):
             setattr(dc, key, current + value)
+        elif key == "mcp_servers":
+            if not isinstance(value, dict):
+                raise ValueError(f"mcp_servers 必须是表，实际是 {value!r}")
+            setattr(dc, key, {name: check_mcp_server(name, spec) for name, spec in value.items()})
         else:
             setattr(dc, key, value)

@@ -6,8 +6,10 @@
 - **CAS 决定一次**：批准、拒绝、超时、取消并发到达时，只有第一个生效（store.resolve_approval）；
 - **超时默认拒绝**：拒绝理由作为 is_error 的工具结果回给模型，让它调整方案；
 - **防 TOCTOU**：批准时可修改参数，修改后的参数要 **重新做 schema 校验与权限判定**（在执行层完成）；
-- **防审批疲劳**：低风险自动放行；“本会话总是允许”生成一条窄粒度的会话级授权规则。
-- **无人值守**：``on_ask=allow|deny`` 用于 CI / 批处理，此时不创建审批对象。
+- **防审批疲劳**：低风险自动放行；“本会话总是允许”生成一条窄粒度的会话级授权规则；秒批与同类重复批准
+  由 ``fatigue.FatigueMonitor`` 记下，出现时在事件流里提示（见 fatigue.py）。
+- **无人值守**：``on_ask=allow|deny`` 用于 CI / 批处理，此时不创建审批对象；deny 时 ``auto_approve`` 规则命中的
+  调用自动批准（执行层算好命中的规则传进来，见 ``PermissionPolicy.auto_approval``）。
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Any, Awaitable, Callable
 from .._utils import new_id, now
 from ..cancel import CancelToken, RunCancelled
 from ..runtime.store import ApprovalRecord, Store
+from .fatigue import FatigueMonitor
 
 
 @dataclass
@@ -39,17 +42,22 @@ class ApprovalBroker:
         self.on_ask = on_ask
         self.timeout = timeout
         self.resolver = resolver          # 交互式 CLI 在终端里问用户；Web UI 则通过 API 调用 resolve()
+        self.fatigue = FatigueMonitor()
         self._waiters: dict[str, asyncio.Future[ApprovalDecision]] = {}
 
     async def request(
         self, *, run_id: str, session_id: str, call_id: str, tool: str, args: dict[str, Any], summary: str,
         risk: str, reason: str, cancel: CancelToken,
         on_created: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
+        auto_rule: str | None = None, auto_why: str = "",
     ) -> ApprovalDecision:
         if self.on_ask == "allow":
             return ApprovalDecision(True, by="policy:auto_allow", reason="无人值守模式自动放行")
         if self.on_ask == "deny":
-            return ApprovalDecision(False, by="policy:auto_deny", reason="无人值守模式下，需要审批的操作一律拒绝")
+            if auto_rule:
+                return ApprovalDecision(True, by="policy:auto_approve", reason=f"无人值守：命中自动批准规则 {auto_rule}")
+            why = f"（{auto_why}）" if auto_why else ""
+            return ApprovalDecision(False, by="policy:auto_deny", reason=f"无人值守模式下，需要审批的操作一律拒绝{why}")
         rec = self.store.create_approval(ApprovalRecord(
             id=new_id("ap_"), run_id=run_id, session_id=session_id, call_id=call_id, tool=tool, args=args,
             summary=summary, risk=risk, reason=reason, status="pending", expires_at=now() + self.timeout,

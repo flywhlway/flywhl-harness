@@ -268,7 +268,7 @@ command = "python"
 args = ["examples/mcp_echo_server.py"]
 ```
 
-工具以 `mcp__<server>__<tool>` 命名注册，副作用等级由 annotations 保守推导（未声明 `openWorldHint` 的工具输出视为污点）。必须通过 `async with Harness(...)` 或 `await h.start()` 才会连接服务器并注册工具；`start()` 是幂等的，`run_eval` 也会自动调用。服务器子进程拿不到 harness 进程里的密钥类环境变量，凭证要写在该服务器的 `env` 里。协议细节、未实现的部分与安全注意事项见 [27 协议生态](/advanced/protocols)。
+工具以 `mcp__<server>__<tool>` 命名注册，一律按外部副作用处理、输出视为污点。服务器自报的 annotations 默认不采信：只读工具在 `read_only_tools` 里点名（支持 `*` 通配），确实信得过的服务器才写 `trust_annotations = true`。必须通过 `async with Harness(...)` 或 `await h.start()` 才会连接服务器并注册工具；`start()` 是幂等的，`run_eval` 也会自动调用。服务器子进程拿不到 harness 进程里的密钥类环境变量，凭证要写在该服务器的 `env` 里。协议细节、未实现的部分与安全注意事项见 [27 协议生态](/advanced/protocols)。
 
 ## ⑥ 替换存储后端为 PostgreSQL
 
@@ -431,7 +431,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `loop_guard.max_consecutive_errors` / `same_file_edit_warn` | `6` / `6` | 连续错误；同文件反复编辑 |
 | `permissions.mode` / `rules` / `on_ask` / `approval_timeout` | `"default"` / `[]` / `"wait"` / `600.0` | 见配方 ④ |
 | `permissions.strip_secret_env` | `True` | bash 子进程剥离 `*KEY*` / `*TOKEN*` / `*SECRET*` 等环境变量 |
-| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed` |
+| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed`（不写时 `pre_tool_use` 为 true，其余事件为 false） |
 | `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
 
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、

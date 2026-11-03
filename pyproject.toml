@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=1.0"]   # Anthropic provider 使用官方 SDK
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "coverage>=7.10"]
 
 [project.scripts]
 flywhl = "flywhl_harness.cli:main"
@@ -33,7 +33,21 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 # 真实模型测试默认不跑（要花钱、要密钥、结果有随机性）：pytest -m live tests/live 显式运行
 addopts = "-m 'not live'"
-markers = ["live: 调用真实模型的端到端测试（需要密钥，见 tests/live/README.md）"]
+markers = [
+    "live: 调用真实模型的端到端测试（需要密钥，见 tests/live/README.md）",
+    "os_sandbox: 测试 bash 工具的系统沙箱档位；系统沙箱不能嵌套，scripts/safe_pytest.py 在外层沙箱之外单独运行它们",
+]
+
+# 覆盖率只出报告、不设门禁：FLYWHL_COVERAGE=1 pytest 由 scripts/safe_pytest.py 两段收集后合并，再 coverage report
+[tool.coverage.run]
+source = ["flywhl_harness"]
+branch = true
+parallel = true            # 两段各写一份数据
+# 不测子进程（patch = subprocess）：第二段里系统沙箱中的 Python 子进程写不了数据文件会报错，实测也不增加覆盖行数
+relative_files = true
+
+[tool.coverage.report]
+skip_empty = true
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "coverage>=7.10"]

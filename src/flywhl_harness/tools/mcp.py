@@ -9,9 +9,10 @@ MCP 是“harness ↔ 工具服务器”的协议（工具在哪、怎么调）�
 治理要点
 --------
 - **命名空间**：工具名加前缀 ``mcp__<server>__<tool>``，避免与内置工具冲突，也便于按服务器写权限规则；
-- **副作用分级**：依据 MCP 的 annotations——``readOnlyHint`` 为只读；否则按外部副作用处理（保守）；
-  ``openWorldHint`` 按规范 **默认为 true**：除非服务器明确声明 false，输出都视为不可信（污点）；
-  ``idempotentHint`` 为 true 的写工具在“结果未知”时允许用同一幂等键重试；
+- **副作用分级**：annotations 是服务器的自我声明，规范要求客户端把它当作不可信的提示。默认一律按最保守处理：
+  外部副作用、输出视为不可信（污点）、不幂等、取消时不直接中断。放宽有两条路，都写在配置里，接入时要经信任确认：
+  ``read_only_tools`` 点名按只读处理的工具；``trust_annotations = true`` 采信该服务器的 ``readOnlyHint``（只读）、
+  ``idempotentHint``（“结果未知”时允许用同一幂等键重试）与 ``openWorldHint = false``（输出不算污点）；
 - **环境隔离**：服务器进程拿不到 harness 进程里的密钥类环境变量，需要的凭证在配置的 ``env`` 里显式给出；
 - **超时即未知**：``tools/call`` 不设客户端超时，由执行器统一计时；超时或取消时向服务器发送
   ``notifications/cancelled``，非只读工具的超时按“结果未知”上报；
@@ -23,12 +24,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from fnmatch import fnmatchcase
 from typing import Any
 
+from ..config import check_mcp_server
 from .base import Effect, Tool, ToolContext, ToolResult
 from .shell import _clean_env
 
 PROTOCOL_VERSION = "2025-06-18"
+# 会放宽处理的注解取值：只读、幂等、封闭世界
+_LOOSENING = {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False}
 
 
 class MCPError(Exception):
@@ -141,17 +146,21 @@ class MCPClient:
 
 
 class MCPTool(Tool):
-    def __init__(self, client: MCPClient, spec: dict[str, Any]):
+    def __init__(self, client: MCPClient, spec: dict[str, Any], *, trust_annotations: bool = False,
+                 read_only: bool = False):
         self.client = client
         self.remote_name = spec["name"]
         self.name = f"mcp__{client.name}__{spec['name']}"
         self.description = (spec.get("description") or "")[:2000] + f"（来自 MCP 服务器 {client.name}）"
         self.parameters = spec.get("inputSchema") or {"type": "object", "properties": {}}
         ann = spec.get("annotations") or {}
-        read_only = bool(ann.get("readOnlyHint", False))
+        # 恶意服务器自称只读就能绕过审批、自称幂等就能被重做：没写明 trust_annotations 时，注解一项都不采信
+        hints = ann if trust_annotations else {}
+        self.ignored_hints = [] if trust_annotations else [k for k, v in _LOOSENING.items() if ann.get(k) is v]
+        read_only = read_only or hints.get("readOnlyHint") is True
         self.effect = Effect.READ if read_only else Effect.EXTERNAL
-        self.untrusted_output = bool(ann.get("openWorldHint", True))   # 规范默认值为 true
-        self.idempotent = read_only or bool(ann.get("idempotentHint", False))
+        self.untrusted_output = hints.get("openWorldHint", True) is not False   # 规范默认值为 true
+        self.idempotent = read_only or hints.get("idempotentHint") is True
         self.interruptible = read_only
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -174,12 +183,17 @@ async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = N
         [mcp_servers.echo]
         command = "python"
         args = ["examples/mcp_echo_server.py"]
+        read_only_tools = ["echo"]     # 按只读处理的工具，支持 * 通配
+        # trust_annotations = true     # 采信服务器自报的只读、幂等、封闭世界注解
     """
     clients, tools = [], []
     for name, conf in servers.items():
+        check_mcp_server(name, conf)   # 代码里直接构造的配置不经过 HarnessConfig.load，这里再校验一次
         c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd)
         await c.start()
         clients.append(c)
+        trust = conf.get("trust_annotations", False)
+        ro = conf.get("read_only_tools", [])
         for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：保证工具顺序稳定
-            tools.append(MCPTool(c, spec))
+            tools.append(MCPTool(c, spec, trust_annotations=trust, read_only=any(fnmatchcase(spec["name"], p) for p in ro)))
     return clients, tools

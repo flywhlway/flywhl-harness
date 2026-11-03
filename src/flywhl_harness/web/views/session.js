@@ -2,10 +2,10 @@
 // 数据流：初次渲染来自会话时间线（持久化状态）；运行中的增量来自 SSE（带 seq，按 seq 去重，可断线续传）；
 // Run 结束时再以持久化状态重绘一次，保证页面与数据库一致。
 import { api } from "../lib/api.js";
-import { $, $$, copyText, esc, fmt, h, isTyping, modKey } from "../lib/dom.js";
+import { $, $$, copyText, esc, fmt, h, isTyping, modKey, store } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { ACTIVE, DEMO_TEMPLATES, EVENT_TYPES, MODES, REAL_TEMPLATES, RUN_STATUS, TERMINAL, modeOf, statusBadge } from "../lib/meta.js";
-import { announce, confirmDialog, openMenu, toast } from "../lib/ui.js";
+import { announce, confirmDialog, openMenu, setTitle, toast } from "../lib/ui.js";
 import { createInspector } from "./inspector.js";
 import { md } from "../md.js";
 import * as T from "./timeline.js";
@@ -35,6 +35,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       <button class="btn" type="button" id="s-mode" aria-haspopup="menu" aria-expanded="false"></button>
       <span class="actions" id="s-run-actions"></span>
       <button class="btn ghost icon" type="button" id="s-insp" aria-label="检查器" data-tip="显示或隐藏检查器（${modKey} + \\）">${icon("panel")}</button>
+      <button class="btn ghost icon" type="button" id="s-more" aria-label="会话操作" aria-haspopup="menu" aria-expanded="false" data-tip="重命名、导出、归档">${icon("more")}</button>
     </div>`;
   const ws = h("div", { class: "workspace" });
   const conv = h("section", { class: "conversation", "aria-label": "对话" });
@@ -63,6 +64,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
   $("#s-insp", header).onclick = () => setInspector(ws.classList.contains("no-inspector"));
   scrim.onclick = () => setInspector(false, false);   // 收起覆盖层不改桌面宽度下的偏好
   $("#s-mode", header).onclick = (e) => openModeMenu(e.currentTarget);
+  $("#s-more", header).onclick = (e) => openSessionMenu(e.currentTarget);
   jump.onclick = () => { stick = true; timeline.scrollTo({ top: timeline.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); jump.hidden = true; };
 
   // 贴底滚动：用户在底部附近时跟随新内容；往上翻阅时不打断，只显示“跳到最新”
@@ -91,15 +93,36 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       </form>`;
     const ta = $("#c-input", w), send = $("#c-send", w);
     const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(240, ta.scrollHeight) + "px"; send.disabled = !ta.value.trim(); };
-    ta.addEventListener("input", autosize);
+    ta.addEventListener("input", () => { hist.i = -1; autosize(); });
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+      else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.isComposing) browseHistory(e);
     });
     $("#c-form", w).addEventListener("submit", (e) => { e.preventDefault(); submit(); });
     w.autosize = autosize;
     return w;
   }
   const input = $("#c-input", composerWrap);
+
+  // 输入历史（像 shell 一样）：输入框为空时按 ↑ 进入翻阅，翻阅中 ↑ ↓ 切换，一打字就退出；↓ 越过最新一条回到草稿
+  const HISTORY_KEY = "flywhl-history";
+  const hist = { i: -1, draft: "" };
+  function browseHistory(e) {
+    const list = store.get(HISTORY_KEY, []);
+    const up = e.key === "ArrowUp";
+    if (!list.length || (hist.i === -1 && (!up || input.value))) return;
+    e.preventDefault();
+    if (hist.i === -1) hist.draft = input.value;
+    hist.i = up ? Math.min(hist.i + 1, list.length - 1) : hist.i - 1;
+    input.value = hist.i === -1 ? hist.draft : list[hist.i];
+    composerWrap.autosize();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function remember(text) {
+    const list = store.get(HISTORY_KEY, []).filter((x) => x !== text);
+    store.set(HISTORY_KEY, [text, ...list].slice(0, 50));
+    hist.i = -1;
+  }
 
   function renderComposerLeft() {
     const left = $("#c-left", composerWrap);
@@ -142,8 +165,9 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const s = V.detail?.session;
     const title = s?.title || "新任务";
     $("#s-title", header).textContent = title;
-    document.title = `${title} · flywhl harness`;
-    $("#s-status", header).innerHTML = V.run ? statusBadge(V.run.status) : "";
+    setTitle(`${title} · flywhl harness`);
+    $("#s-status", header).innerHTML = (V.run ? statusBadge(V.run.status) : "")
+      + (s?.meta?.archived ? `<span class="badge outline">${icon("archive")}已归档</span>` : "");
     $("#s-meta", header).innerHTML = V.run ? `<span class="mono">${esc(fmt.shortId(V.run.id))}</span>${V.run.attempt > 1 ? `<span>· 第 ${V.run.attempt} 次尝试</span>` : ""}` : "";
     const mode = modeOf(s?.meta?.mode || app.info.mode);
     const mb = $("#s-mode", header);
@@ -169,6 +193,20 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       box.append(h("button", { class: "btn primary", type: "button", onclick: () => resumeRun(), html: `${icon("retry")}重试` }));
     }
   }
+
+  function openSessionMenu(anchor) {
+    if (!V.sid) { toast("发送第一条任务后才会创建会话。", { title: "尚未创建会话" }); return; }
+    const archived = !!V.detail?.session?.meta?.archived;
+    openMenu(anchor, [
+      { label: "重命名…", icon: "pencil", onSelect: rename },
+      { label: "导出为 Markdown", icon: "download", desc: "当前分支的对话记录，含工具调用与结果", onSelect: () => app.exportSession(V.sid) },
+      { label: "复制会话 ID", icon: "copy", onSelect: async () => { if (await copyText(V.sid)) toast(V.sid, { title: "已复制会话 ID", tone: "success" }); } },
+      "sep",
+      archived ? { label: "取消归档", icon: "archive", onSelect: () => app.archiveSession(V.sid, false) }
+        : { label: "归档", icon: "archive", desc: V.running ? "运行结束后才能归档" : "从侧边栏移到「已归档」，随时可以找回", disabled: V.running, onSelect: () => app.archiveSession(V.sid, true) },
+    ], { label: "会话操作" });
+  }
+  const rename = () => app.renameSession(V.sid, V.detail?.session?.title || "");
 
   function openModeMenu(anchor) {
     if (!V.sid) { toast("权限模式属于会话：发送第一条任务后可以调整。", { title: "尚未创建会话" }); return; }
@@ -196,6 +234,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
   async function submit() {
     const text = input.value.trim();
     if (!text) return;
+    remember(text);
     try {
       if (!V.sid) {        // 草稿：第一条任务才真正创建会话，标题取自任务描述
         const s = await api.post("/api/sessions", { title: text.slice(0, 40) });
@@ -348,6 +387,8 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       setRunning(false);
       const m = RUN_STATUS[d.status];
       announce(`运行结束：${m ? m.label : d.status}`);
+      const sid = V.sid;
+      app.notify(`运行结束：${m ? m.label : d.status}`, { body: V.detail?.session?.title || "", tag: "flywhl-run-" + sid, onClick: () => app.navigate("#/s/" + sid) });
       await reload();
       V.run = V.detail.runs.find((r) => r.id === V.run?.id) || V.run;
       setRunning(false);
@@ -428,15 +469,19 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const runs = Object.fromEntries(d.runs.map((r) => [r.id, r]));
     let prev = null;
     const frag = document.createDocumentFragment();
+    const closeRun = (id) => {   // 一次运行的条目结束：补上它留下的提示，结束了的再加小结
+      for (const n of d.notices?.[id] || []) frag.append(T.noticeItem(n));
+      if (runs[id] && TERMINAL.has(runs[id].status)) frag.append(T.runSummary(runs[id]));
+    };
     for (const it of d.timeline) {
-      if (prev && it.run_id && it.run_id !== prev && runs[prev] && TERMINAL.has(runs[prev].status)) frag.append(T.runSummary(runs[prev]));
+      if (prev && it.run_id && it.run_id !== prev) closeRun(prev);
       prev = it.run_id || prev;
       if (it.kind === "compaction") { frag.append(T.compactionDivider(it.payload)); continue; }
       const m = it.message;
       if (m.role === "user") frag.append(T.userItem(m));
       else if (m.role === "assistant") frag.append(T.assistantItem(m, results, ctx));
     }
-    if (prev && runs[prev] && TERMINAL.has(runs[prev].status)) frag.append(T.runSummary(runs[prev]));
+    if (prev) closeRun(prev);
     inner.append(frag);
     for (const a of d.approvals) if (a.session_id === V.sid || V.running) attachApproval(a);
     stick = true;
@@ -489,6 +534,9 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       return true;
     },
     setMode(id) { const m = MODES.find((x) => x.id === id); if (m) setMode(m); },
+    rename,
+    applyTitle(id, title) { if (id === V.sid && V.detail) { V.detail.session.title = title; renderHeader(); } },
+    applyArchived(id, archived) { if (id === V.sid && V.detail) { V.detail.session.meta.archived = archived; renderHeader(); } },
     stop() { if (V.running) stopRun(); },
     get running() { return V.running; },
     get sid() { return V.sid; },

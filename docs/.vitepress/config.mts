@@ -77,6 +77,26 @@ const sidebar = [
   },
 ];
 
+// 精简手册自成一套目录：进入 /manual/ 后侧栏只显示手册页面，其它路径仍用上面的教程目录
+const manualSidebar = [
+  {
+    text: "精简手册",
+    items: [
+      { text: "导读", link: "/manual/" },
+      { text: "Harness 理论精要", link: "/manual/theory" },
+      { text: "架构与组件", link: "/manual/architecture" },
+      { text: "关键机制", link: "/manual/mechanisms" },
+      { text: "安全与治理", link: "/manual/security" },
+      { text: "实战手册", link: "/manual/practice" },
+      { text: "速查表", link: "/manual/cheatsheet" },
+    ],
+  },
+  {
+    text: "完整教程",
+    items: [{ text: "从 01 章开始读", link: "/guide/what-is-harness" }],
+  },
+];
+
 export default withMermaid(
   defineConfig({
     base,
@@ -94,10 +114,11 @@ export default withMermaid(
       siteTitle: "flywhl / harness",
       nav: [
         { text: "教程", link: "/guide/what-is-harness" },
+        { text: "精简手册", link: "/manual/", activeMatch: "^/manual/" },
         { text: "知识地图", link: "/reference/knowledge-map" },
         { text: "源码地图", link: "/reference/source-map" },
       ],
-      sidebar,
+      sidebar: { "/manual/": manualSidebar, "/": sidebar },
       outline: { level: [2, 3], label: "本页目录" },
       search: {
         provider: "local",

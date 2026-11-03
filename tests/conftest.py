@@ -37,10 +37,7 @@ def tool_ends(events) -> list[dict]:
     return [e.data for e in events if e.type == E.TOOL_END]
 
 
-@pytest.fixture(autouse=True)
-def _isolated_flywhl_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """用户配置与信任记录指向临时目录：本机的 ~/.flywhl 不影响测试，测试也不会写它。"""
-    monkeypatch.setenv("FLYWHL_HOME", str(tmp_path / "flywhl-home"))
+# HOME 隔离、执行绊线与系统沙箱在仓库根目录的 conftest.py：审计套件 docs/quality-audit/tests 同样需要
 
 
 @pytest.fixture

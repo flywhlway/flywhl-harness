@@ -210,16 +210,43 @@ class CommandHook:
                                 "updatedInput": {...}, "additionalContext": "..."}}
     """
 
-    def __init__(self, command: str, cwd: str | None = None):
+    def __init__(self, command: str, cwd: str | None = None, *, env: dict[str, str] | None = None,
+                 pass_env: list[str] | None = None):
         self.command = command
         self.cwd = cwd
+        self.env = dict(env or {})
+        self.pass_env = list(pass_env or [])
         self.__name__ = f"command:{command.split()[0] if command.split() else command}"
+        # 命令引用的文件（python3 scripts/guard.py 里的脚本）启动时的内容：按目录记，没给 cwd 时在第一次执行的目录记
+        self._pins: dict[str, dict[str, str]] = {}
+        if cwd:
+            self.changed_files(cwd)
+
+    def changed_files(self, base: str) -> list[str]:
+        """启动后（或在这个目录第一次执行后）引用的文件有哪些变了：内容改了、符号链接换了指向、新出现或不见了。
+        Agent 能改工作区里的文件，改过的 hook 脚本会在系统沙箱外、以 harness 的身份运行。"""
+        from .supply_chain import pin_files, referenced_files
+
+        now = pin_files(referenced_files(self.command, base, self.env))
+        before = self._pins.setdefault(base, now)
+        return sorted(p for p in before.keys() | now.keys() if before.get(p) != now.get(p))
+
+    def child_env(self, event: str) -> dict[str, str]:
+        """与 bash、MCP 子进程一样剥离密钥类环境变量：hook 脚本是第三方代码，它拿到哪些变量，从配置里一眼可见。"""
+        from ..tools.shell import _clean_env   # 延迟导入：tools 依赖 policy
+
+        passed = {k: os.environ[k] for k in self.pass_env if k in os.environ}
+        return {**_clean_env(True), **passed, **self.env, "FLYWHL_HOOK_EVENT": event}
 
     async def __call__(self, inp: HookInput) -> HookOutput | None:
+        base = self.cwd or inp.cwd or os.getcwd()
+        changed = self.changed_files(base)
+        if changed:   # 交给 HookBus：守卫类 hook 按阻断处理，其余跳过并告警——改过的脚本一次也不执行
+            raise RuntimeError(f"引用的文件在启动后被改过：{'、'.join(changed)}，拒绝执行；确认改动无误后重启 harness")
         proc = await asyncio.create_subprocess_shell(
             self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-            env={**os.environ, "FLYWHL_HOOK_EVENT": inp.event}, start_new_session=True,
+            stderr=asyncio.subprocess.PIPE, cwd=base,
+            env=self.child_env(inp.event), start_new_session=True,
         )
         try:
             out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))

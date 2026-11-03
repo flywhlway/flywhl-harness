@@ -175,11 +175,17 @@ async def test_approval_request_carries_diff_preview(ws):
 
 
 # ---------------------------------------------------------------------- 其它
-def test_mcp_annotation_defaults_are_conservative():
+def test_mcp_annotations_are_hints_not_trusted_by_default():
     plain = MCPTool(_FakeClient(), {"name": "do"})
     assert plain.effect == Effect.EXTERNAL and plain.untrusted_output and not plain.idempotent
-    closed = MCPTool(_FakeClient(), {"name": "get", "annotations": {"readOnlyHint": True, "openWorldHint": False}})
-    assert closed.effect == Effect.READ and not closed.untrusted_output
+    claims = {"name": "get", "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False}}
+    liar = MCPTool(_FakeClient(), claims)   # 自称只读、幂等、封闭世界：没写明采信时一项都不认
+    assert liar.effect == Effect.EXTERNAL and liar.untrusted_output and not liar.idempotent and not liar.interruptible
+    assert liar.ignored_hints == ["readOnlyHint", "idempotentHint", "openWorldHint"]
+    trusted = MCPTool(_FakeClient(), claims, trust_annotations=True)
+    assert trusted.effect == Effect.READ and not trusted.untrusted_output and trusted.idempotent and not trusted.ignored_hints
+    named = MCPTool(_FakeClient(), {"name": "get"}, read_only=True)   # 用户点名只读：只放宽副作用等级，输出仍是污点
+    assert named.effect == Effect.READ and named.idempotent and named.untrusted_output
 
 
 class _FakeClient:
@@ -466,6 +472,9 @@ CREDENTIAL_SAMPLES = [
     "~/.config/gcloud/application_default_credentials.json", "~/.azure/msal_token_cache.json", "~/.kube/config",
     "~/.docker/config.json", "~/.netrc", "~/.git-credentials", "~/.config/gh/hosts.yml", "~/.pypirc", "~/.pgpass",
     "~/.vault-token", "~/.gnupg/private-keys-v1.d/a.key", "/etc/shadow", "/etc/master.passwd", "/proc/1/environ",
+    "~/.config/git/credentials", "~/.cargo/credentials.toml", "~/.gem/credentials", "~/.terraform.d/credentials.tfrc.json",
+    "~/.oci/config", "~/.s3cfg", "~/.boto", "~/.config/rclone/rclone.conf", "~/.password-store/work/github.gpg",
+    "~/Library/Keychains/login.keychain-db", "~/.local/share/keyrings/login.keyring", "~/.flywhl/server_token",
     ".kube/config", "deploy/.docker/config.json",       # 凭证就在工作区里：早期版本 read 在 default 模式下直接放行
     # 大小写别名：macOS / Windows 的文件系统不区分大小写，.SSH/config 打开的就是 .ssh/config；早期版本按原样匹配，全部放行
     ".SSH/config", "~/.Kube/config", "~/.AWS/credentials", "deploy/.DOCKER/config.json", "~/keys/ID_RSA",
@@ -567,7 +576,7 @@ def test_every_sensitive_glob_is_exercised_and_known_to_bash():
 
     samples = [os.path.expanduser(p) for p in CREDENTIAL_SAMPLES]
     for g in CREDENTIAL_GLOBS:
-        hit = [p for p in samples if fnmatch.fnmatchcase(p, g)]
+        hit = [p for p in samples if fnmatch.fnmatchcase(p.lower(), g)]   # 清单按小写写，匹配不区分大小写
         assert hit, f"{g} 没有样例"
         assert all(CREDENTIAL_HINTS.search(p) and SECRET_HINTS.search(p) for p in hit), g
     for p in HINT_SAMPLES:  # 两档不串：线索档的样例不能被当成凭证档硬拒绝
@@ -640,16 +649,28 @@ def _seatbelt_usable() -> bool:
     exe = "/usr/bin/sandbox-exec"
     if sys.platform != "darwin" or not os.path.exists(exe):
         return False
-    return subprocess.run([exe, "-p", "(version 1)(allow default)", "/usr/bin/true"]).returncode == 0
+    # 用一份真有限制的配置探测：外层已有沙箱时内层会被拒绝，只放行一切的配置却照样成功
+    probe = '(version 1)(allow default)(deny file-write* (literal "/nonexistent/flywhl-probe"))'
+    return subprocess.run([exe, "-p", probe, "/usr/bin/true"], capture_output=True).returncode == 0
 
 
-needs_seatbelt = pytest.mark.skipif(not _seatbelt_usable(), reason="需要可用的 macOS sandbox-exec")
-SPLICED = "D=$HOME/.ku; cat ${D}be/config"   # 变量拼出来的路径：命令串里没有 .kube 字样
+# os_sandbox：系统沙箱不能嵌套，scripts/safe_pytest.py 把这些用例放到第二段、在外层沙箱之外运行
+SEATBELT = [pytest.mark.os_sandbox, pytest.mark.skipif(not _seatbelt_usable(), reason="需要可用的 macOS sandbox-exec")]
 
 
-@pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=needs_seatbelt)])
+def needs_seatbelt(fn):
+    for mark in SEATBELT:
+        fn = mark(fn)
+    return fn
+
+
+SPLICED = "D=$(echo $HOME/.ku); cat ${D}be/config"   # 运行时才拼出来的路径：命令串里没有 .kube 字样
+
+
+@pytest.mark.parametrize("sandbox,leaked", [("off", True), pytest.param("macos", False, marks=SEATBELT)])
 async def test_sandbox_blocks_credential_reads_static_analysis_misses(ws, tmp_path, monkeypatch, sandbox, leaked):
-    """命令分析看不出 ${D}be/config 是凭证，只按“工作区外路径”处理，bypass 下照样执行；沙箱按真实路径拒绝。"""
+    """变量的值要到运行时才知道（$(...)）：命令分析看不出 ${D}be/config 是凭证，只按“无法静态分析”处理，
+    bypass 下照样执行；沙箱按真实路径拒绝。"""
     home = tmp_path / "home"
     (home / ".kube").mkdir(parents=True)
     (home / ".kube" / "config").write_text("token: s3cr3t\n")

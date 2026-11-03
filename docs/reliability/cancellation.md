@@ -316,7 +316,7 @@ def interruptible_for(self, args: dict[str, Any]) -> bool:
     return self.effect_for(args) != Effect.EXTERNAL
 ```
 
-MCP 工具的 `interruptible` 取自注解 `readOnlyHint`：只读工具直接中止，写工具走宽限期。
+MCP 工具的 `interruptible` 跟随只读判定：配置点名只读（或采信服务器的 `readOnlyHint`）的工具直接中止，其余走宽限期。
 MCP 调用被放弃时（取消、超时），客户端会向服务器发一条 `notifications/cancelled`，告诉它“不用做了”。
 这只是尽力而为的提示，已经发生的副作用不会因此撤销，结果仍按上表记录。
 

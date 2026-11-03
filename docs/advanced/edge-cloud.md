@@ -393,7 +393,7 @@ flywhl-harness 的会话结构为“按领域合并”提供了一个天然的�
 
 ## 本地守护进程 + MCP
 
-把开发者本机的环境接入云端编排，常见形态是一个 **本地守护进程**：它主动向云端建立出站连接（本机不必开放入站端口），把本地能力以 MCP 工具的形式暴露给云端 harness。flywhl-harness 的 `src/flywhl_harness/tools/mcp.py` 已经能把 MCP 服务器的工具接入为普通工具（`mcp__<server>__<tool>` 命名空间、按 `readOnlyHint` 判定副作用、`openWorldHint` 标记污点），但只支持 stdio 传输，即 MCP 服务器与 harness 在同一台机器上；跨网络接入需要 MCP 的远程传输（如 Streamable HTTP，以 MCP 规范为准）或自建的隧道。
+把开发者本机的环境接入云端编排，常见形态是一个 **本地守护进程**：它主动向云端建立出站连接（本机不必开放入站端口），把本地能力以 MCP 工具的形式暴露给云端 harness。flywhl-harness 的 `src/flywhl_harness/tools/mcp.py` 已经能把 MCP 服务器的工具接入为普通工具（`mcp__<server>__<tool>` 命名空间、按配置判定只读、输出默认标记为污点），但只支持 stdio 传输，即 MCP 服务器与 harness 在同一台机器上；跨网络接入需要 MCP 的远程传输（如 Streamable HTTP，以 MCP 规范为准）或自建的隧道。
 
 这条链路上的授权与审计要两侧都做：
 

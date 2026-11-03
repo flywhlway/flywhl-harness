@@ -338,10 +338,12 @@ class Store:
         rows = self._q(f"SELECT * FROM sessions {where} ORDER BY updated_at DESC LIMIT ?", (limit,))
         return [SessionRecord(**_row(r)) for r in rows]  # type: ignore[arg-type]
 
-    def update_session(self, sid: str, **fields: Any) -> None:
+    def update_session(self, sid: str, *, touch: bool = True, **fields: Any) -> None:
+        """``touch=False``：只改标题、归档这类元数据，不刷新 updated_at（会话列表按它排序，改个名不该跳到最前）。"""
         if not fields:
             return
-        fields["updated_at"] = now()
+        if touch:
+            fields["updated_at"] = now()
         cols = ", ".join(f"{k}=?" for k in fields)
         vals = [_dump(v) if k == "meta" else v for k, v in fields.items()]
         self._x(f"UPDATE sessions SET {cols} WHERE id=?", (*vals, sid))
@@ -520,6 +522,19 @@ class Store:
             Event(r["type"], json.loads(r["data"]), run_id, r["seq"], r["ts"]) for r in self._q(sql, params)
         ]
 
+    def list_notices(self, run_ids: list[str], codes: frozenset[str]) -> dict[str, list[dict[str, Any]]]:
+        """这些运行里 code 在 codes 之内的提示（notice 事件），按运行分组、按序号排列。"""
+        out: dict[str, list[dict[str, Any]]] = {}
+        if not run_ids:
+            return out
+        rows = self._q(f"SELECT run_id, data FROM events WHERE type='notice' AND run_id IN ({','.join('?' * len(run_ids))})"
+                       " ORDER BY run_id, seq", run_ids)
+        for r in rows:
+            d = json.loads(r["data"])
+            if d.get("code") in codes:
+                out.setdefault(r["run_id"], []).append(d)
+        return out
+
     def max_event_seq(self, run_id: str) -> int:
         r = self._q("SELECT MAX(seq) AS m FROM events WHERE run_id=?", (run_id,))
         return int(r[0]["m"] or 0)
@@ -554,7 +569,9 @@ class Store:
         )
         return n == 1
 
-    def list_approvals(self, status: str | None = "pending", run_id: str | None = None) -> list[ApprovalRecord]:
+    def list_approvals(self, status: str | None = "pending", run_id: str | None = None,
+                       limit: int | None = None) -> list[ApprovalRecord]:
+        """按创建时间从早到晚；给了 limit 时只取最近的 limit 条。"""
         sql, params = "SELECT id FROM approvals WHERE 1=1", []
         if status:
             sql += " AND status=?"
@@ -562,7 +579,12 @@ class Store:
         if run_id:
             sql += " AND run_id=?"
             params.append(run_id)
-        return [a for r in self._q(sql + " ORDER BY created_at", params) if (a := self.get_approval(r["id"]))]
+        if limit is not None:
+            sql = f"SELECT id FROM ({sql} ORDER BY created_at DESC LIMIT ?)"
+            params.append(limit)
+        rows = self._q(sql + " ORDER BY created_at" if limit is None else sql, params)
+        recs = [a for r in rows if (a := self.get_approval(r["id"]))]
+        return recs if limit is None else sorted(recs, key=lambda a: a.created_at)
 
 
 class BlobStore:

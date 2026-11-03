@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -28,10 +29,15 @@ IGNORED_DIRS = {
 
 
 IGNORED_FILES = {".DS_Store", "Thumbs.db"}
+_SHA = re.compile(r"[0-9a-f]{7,64}")
 
 
 class PathEscape(Exception):
     """路径逃逸出工作区。"""
+
+
+class CredentialPath(PathEscape):
+    """路径（跟随符号链接后）落在凭证位置：任何模式下都不读写。"""
 
 
 @dataclass
@@ -172,12 +178,22 @@ class ShadowGit:
             except Exception:
                 return None
 
+    def _commit(self, sha: str) -> str:
+        """校验快照编号：只收十六进制 sha，且必须是影子仓库里的 commit。sha 会原样拼进 git 参数，
+        ``--output=/路径`` 这类“编号”能让 git 在任意位置写文件。"""
+        if not _SHA.fullmatch(sha):
+            raise ValueError(f"快照编号必须是 7–64 位十六进制 commit sha：{sha[:80]!r}")
+        if self._git("cat-file", "-t", sha, check=False).strip() != "commit":
+            raise ValueError(f"快照不存在：{sha}")
+        return sha
+
     async def diff(self, sha: str) -> str:
         """快照 sha 与当前工作区的差异（unified diff）。"""
         if not self.enabled:
             return ""
         async with self._lock:
             def run() -> str:
+                self._commit(sha)
                 self._git("add", "-A")
                 return self._git("diff", "--cached", sha, check=False)
             return await asyncio.to_thread(run)
@@ -186,6 +202,7 @@ class ShadowGit:
         """把工作区回滚到快照 sha：恢复被修改/删除的文件，删除快照之后新增的文件。返回受影响文件。"""
         async with self._lock:
             def run() -> list[str]:
+                self._commit(sha)
                 self._git("add", "-A")
                 changed = [x for x in self._git("diff", "--cached", "--name-only", sha).splitlines() if x]
                 added = [x for x in self._git("diff", "--cached", "--name-only", "--diff-filter=A", sha).splitlines() if x]

@@ -267,10 +267,12 @@ async def test_mcp_tools(ws):
     h = make_harness(ws, [
         {"tool_calls": [{"name": "mcp__demo__echo", "args": {"text": "你好 MCP"}}]},
         "完成",
-    ], mcp_servers={"demo": {"command": sys.executable, "args": [str(ROOT / "examples" / "mcp_echo_server.py")]}})
+    ], mcp_servers={"demo": {"command": sys.executable, "args": [str(ROOT / "examples" / "mcp_echo_server.py")],
+                             "read_only_tools": ["echo"]}})
     async with h:
         assert "mcp__demo__add_note" in h.tools
         assert str(h.tools.get("mcp__demo__echo").effect) == "read"
+        assert str(h.tools.get("mcp__demo__add_note").effect) == "external"
         res = await h.run("调用 MCP")
     assert tool_ends(res.events)[0]["content"] == "你好 MCP"
 

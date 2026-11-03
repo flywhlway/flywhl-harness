@@ -1,12 +1,12 @@
-// 列表页：运行记录、审批收件箱、工具目录。都是“只读视图 + 定时刷新”，不持有长连接。
+// 列表页：运行记录、审批收件箱、工具目录。都是“只读视图 + 定时刷新”，不持有长连接。页面外壳也供「环境与安全」页复用。
 import { api } from "../lib/api.js";
 import { $, $$, debounce, esc, fmt, h } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { ACTIVE, EFFECT, effectBadge, statusBadge, toolIcon } from "../lib/meta.js";
-import { toast } from "../lib/ui.js";
+import { setTitle, toast } from "../lib/ui.js";
 import { approvalCard } from "./timeline.js";
 
-function pageShell(root, { title, iconName }) {
+export function pageShell(root, { title, iconName }) {
   root.innerHTML = "";
   const header = h("header", { class: "page-header", html: `
     <button class="btn ghost icon menu-toggle" type="button" data-action="open-nav" aria-label="打开导航">${icon("menu")}</button>
@@ -15,7 +15,7 @@ function pageShell(root, { title, iconName }) {
   const inner = h("div", { class: "page-inner" });
   page.append(inner);
   root.append(header, page);
-  document.title = `${title} · flywhl harness`;
+  setTitle(`${title} · flywhl harness`);
   return { header, inner, actions: $("#pg-actions", header) };
 }
 
@@ -130,10 +130,32 @@ export function mountRuns(root, app) {
 export function mountApprovals(root, app) {
   const { inner, actions } = pageShell(root, { title: "审批", iconName: "shieldCheck" });
   inner.innerHTML = `<div class="page-intro"><p>所有会话中等待人工确认的操作。批准、修改参数后批准或拒绝，结果会立即回到对应的运行中；超时未处理的审批会被自动拒绝。</p></div>
+    <section class="ap-fatigue" id="ap-stats" aria-label="审批疲劳指标" hidden></section>
     <div class="approval-inbox" id="ap-list"></div>`;
-  actions.append(refreshBtn(() => load(true)));
+  actions.append(refreshBtn(() => { load(true); loadStats(); }));
   const list = $("#ap-list", inner);
+  const stats = $("#ap-stats", inner);
   let ids = "";
+  // 疲劳指标：最近 500 条审批现算（要逐条生成授权规则），只在打开、手动刷新与处理完审批后更新，不跟着轮询
+  async function loadStats() {
+    let st;
+    try { st = await api.get("/api/approvals/stats"); } catch { return; }
+    stats.hidden = !st.human;
+    if (!st.human) return;
+    const pct = (x) => (x == null ? "—" : `${Math.round(x * 100)}%`);
+    const sec = (x) => (x == null ? "—" : fmt.dur(x));
+    const fastWarn = st.fast_rate != null && st.fast_rate >= 0.3 && st.approved >= 5;
+    const stat = (k, v, ic, warn = false) => `<div class="stat${warn ? " warn" : ""}"><span class="k">${icon(ic, "sm")}${k}</span><span class="v">${v}</span></div>`;
+    stats.innerHTML = `<div class="stat-cards">
+        ${stat("人工决定", st.human, "user")}
+        ${stat("批准率", pct(st.approve_rate), "check")}
+        ${stat(`${st.fast_seconds} 秒内批准`, `${st.fast}<small>${pct(st.fast_rate)}</small>`, "zap", fastWarn)}
+        ${stat("等待 中位 / P90", `${sec(st.wait_p50)}<small>/ ${sec(st.wait_p90)}</small>`, "clock")}
+        ${stat("超时拒绝", st.timeouts, "timer", st.timeouts > 0)}
+      </div>
+      ${fastWarn ? `<p class="warn-line">${icon("alert", "sm")}<span>批准里有 ${pct(st.fast_rate)} 在 ${st.fast_seconds} 秒内点下，可能没看清就批了。总在批准的同类操作改成规则，把审批留给真正需要判断的动作。</span></p>` : ""}
+      ${st.repeated.length ? `<p class="grant-line">${icon("repeat", "sm")}<span>人工批准最多的同类操作（写进 <code>permissions.rules</code> 就不用每次问）：${st.repeated.map((r) => `<code>${esc(r.key)}</code> ×${r.count}`).join("、")}</span></p>` : ""}`;
+  }
   async function load(manual = false) {
     let items;
     try { items = await api.get("/api/approvals"); } catch (e) { if (manual) toast(e.message, { tone: "danger" }); return; }
@@ -146,13 +168,14 @@ export function mountApprovals(root, app) {
       return;
     }
     for (const a of items) {
-      const card = approvalCard(a, { sid: null, showSource: true, onResolved: () => { card.remove(); app.refreshApprovals(); load(true); } });
+      const card = approvalCard(a, { sid: null, showSource: true, onResolved: () => { card.remove(); app.refreshApprovals(); load(true); loadStats(); } });
       const link = h("a", { class: "btn ghost sm", href: "#/s/" + a.session_id, html: `${icon("external", "sm")}打开会话` });
       $(".approval-foot", card).prepend(link);
       list.append(card);
     }
   }
   load(true);
+  loadStats();
   const stop = poller(load, 3000);
   return { dispose: stop };
 }

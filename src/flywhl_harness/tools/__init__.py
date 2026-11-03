@@ -18,7 +18,9 @@ def default_tools(cfg: HarnessConfig, data_dir: Path | None = None) -> ToolRegis
 
     reg = ToolRegistry([
         ReadTool(), WriteTool(), EditTool(),
-        BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout, cfg.permissions.sandbox),
+        BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout, cfg.permissions.sandbox,
+                 cfg.permissions.sandbox_network, cfg.permissions.network_allow,
+                 cfg.permissions.unix_sockets),
         LsTool(), GrepTool(), TodoWriteTool(), ReadRefTool(), SearchRefTool(), TaskTool(),
     ])
     if cfg.enable_demo_tools:

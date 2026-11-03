@@ -9,6 +9,7 @@
     [mcp_servers.demo]
     command = "python"
     args = ["examples/mcp_echo_server.py"]
+    read_only_tools = ["echo"]   # 服务器自报的 readOnlyHint 默认不采信：只读工具要在这里点名
 """
 
 import json

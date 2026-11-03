@@ -59,7 +59,12 @@ mode = "default"                  # default | accept_edits | plan | bypass
 on_ask = "wait"                   # wait（等待人审）| allow | deny（无人值守）
 approval_timeout = 600
 strip_secret_env = true
-sandbox = "off"                   # off | macos（bash 跑在 sandbox-exec 里：凭证位置不可读写，写操作限制在工作区与临时目录；原型）
+sandbox = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：凭证位置不可读写，写操作限制在工作区与临时目录；原型
+sandbox_network = "allow"         # allow | deny | allowlist；后两档要求开启沙箱，否则 bash 拒绝执行
+                                  # deny 禁止一切对外连接（含回环地址、DNS 查询与本机 Unix 套接字）
+# network_allow = ["pypi.org", "files.pythonhosted.org", "*.github.com"]   # allowlist 时经本机代理只放行这些主机
+# unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]   # 沙箱里放行的本机 Unix 套接字（不能在工作区、临时目录里）；默认只放行 DNS，docker.sock、ssh-agent 都连不上
+# require_pinned = true          # hook / MCP 经 npx、uvx、docker run 临时拉取的包必须锁到确切版本（镜像带 @sha256:），否则拒绝启动
 rules = [
   "allow:bash(git status*)",
   "allow:bash(git diff*)",
@@ -72,9 +77,13 @@ rules = [
 # event = "pre_tool_use"
 # matcher = "bash"
 # command = "python3 scripts/guard.py"
-# fail_closed = true
+# fail_closed = true             # hook 崩溃或超时时按拒绝处理；不写时 pre_tool_use 为 true，其余事件为 false
+# pass_env = ["SLACK_WEBHOOK_URL"]   # 子进程默认剥离密钥类环境变量；确实要用的在这里列出变量名
+# env = { GUARD_LEVEL = "strict" }   # 或直接写明取值
 
 # MCP 服务器：工具名会加上 mcp__<名字>__ 前缀
 # [mcp_servers.demo]
 # command = "python3"
 # args = ["examples/mcp_echo_server.py"]
+# read_only_tools = ["echo"]     # 按只读处理（调用不经审批）的工具，支持 * 通配
+# trust_annotations = false      # 服务器自报的只读、幂等、封闭世界注解默认不采信

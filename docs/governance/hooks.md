@@ -303,11 +303,18 @@ if dec.edited_args:
         if again.updated_input is not None:
             args, errs = validate(tool.parameters, again.updated_input)
             # ... 校验失败同样以 invalid 结束
+            # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略
+            final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+            if final.decision == Decision.DENY:
+                return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
 ```
 
 理由是：人批准的是 **审批卡片上那一次调用**，不是“这次可以不守规矩”。审批人把路径从 `out/a.md` 改成 `feature_list.json`，
 清单守卫照样要检查；hook 的 `updated_input`（例如强制输出目录）也照样生效。第二轮只认 `deny`——`ask` 已经被人回答过了，
 不会再弹一次审批。回归测试：`tests/test_security.py::test_edited_args_rerun_pre_tool_hooks`。
+
+第二轮的 `updated_input` 还要再过一次权限策略，因为审批人没见过改写之后的参数。早期版本漏了这一步：hook 能把批准过的命令改写成
+`rm -rf ~` 并直接执行，灾难性命令的拒绝、凭证位置、deny 规则都管不到它。回归测试：`tests/test_hardening.py::test_hook_rewrite_after_approval_is_rechecked`。
 
 `stop_run` 不会打断当前这次调用——它只设置 `rc.stop_requested`，`AgentLoop` 在下一回合开始时检查并以
 `Outcome("cancelled", ..., by="hook")` 结束。想同时阻止当前调用，需要再返回 `decision="deny"`。
@@ -318,7 +325,8 @@ if dec.edited_args:
 
 ## fail-open 还是 fail-closed
 
-hook 自己会出错：脚本有 bug、依赖的服务超时、JSON 解析失败。`HookBus.run` 对异常的处理由 `Hook.fail_closed` 决定：
+hook 自己会出错：脚本有 bug、依赖的服务超时、JSON 解析失败。`HookBus.run` 对异常的处理由 `Hook.fail_closed` 决定。
+进程内注册的 hook 默认 fail-open；`flywhl.toml` 里的命令 hook 不写 `fail_closed` 时按事件取默认值：`pre_tool_use` 是守卫，默认 fail-closed，其余事件默认 fail-open。各类 hook 的建议：
 
 | 类别 | 例子 | 建议 | 理由 |
 |---|---|---|---|
@@ -378,7 +386,7 @@ flowchart LR
 proc = await asyncio.create_subprocess_shell(
     self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-    env={**os.environ, "FLYWHL_HOOK_EVENT": inp.event}, start_new_session=True,
+    env=self.child_env(inp.event), start_new_session=True,
 )
 try:
     out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
@@ -448,7 +456,7 @@ return res  # 决策取值由 HookBus 统一归一化（approve → allow、bloc
 | JSON 字段 | `continue`、`stopReason`、`decision`+`reason`（含 PreToolUse 里的旧写法 `approve`/`block`）、`permissionDecision`、`updatedInput`、`updatedToolOutput`、`additionalContext` | 不识别 `systemMessage`、`suppressOutput`；`permissionDecision: "defer"` 等未知值被忽略并产生 `hook_warning` |
 | hook 类型 | command | 不支持 http / mcp_tool / prompt / agent 类型 |
 | 执行方式 | — | 串行而非并行 |
-| 环境变量 | — | 子进程继承完整的 `os.environ`（包括 bash 工具会剥离的密钥变量） |
+| 环境变量 | — | 密钥类变量被剥离，规则与 bash 工具相同；脚本确实要用的，在 `env` 里写明取值或在 `pass_env` 里列出变量名 |
 
 在 `flywhl.toml` 里注册：
 
@@ -459,9 +467,14 @@ matcher = "bash"
 command = "python scripts/guard.py"
 timeout = 5
 fail_closed = true      # 拦截类 hook 一定要显式打开
+pass_env = ["SLACK_WEBHOOK_URL"]   # 可选：从当前环境原样传入的变量
+env = { GUARD_LEVEL = "strict" }   # 可选：写明取值的变量
 ```
 
 `Harness.__init__` 把每条配置包装成 `Hook(..., source="project")` 加入 HookBus，工作目录是工作区根。
+子进程的环境由 `CommandHook.child_env()` 生成：先按 bash 工具的规则剥离 `*KEY*`、`*TOKEN*`、带密码的 URL 等变量，
+再叠加 `pass_env` 与 `env`，最后设置 `FLYWHL_HOOK_EVENT`。项目配置里的 `env` 与 `pass_env` 会出现在信任确认里，
+其中 `PATH`、`BASH_ENV`、`DYLD_*` 这类能换掉实际执行程序的变量单独标出；设置页只显示变量名，不显示取值。
 
 ## Stop hook：验收与“阻止次数上限”
 
@@ -521,7 +534,7 @@ Claude Code 的 Stop hook 输入中有类似作用的 `stop_hook_active` 字段�
 
 ## hook 本身是供应链风险点
 
-hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略，`CommandHook` 还继承了完整的环境变量。
+hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，文件系统上的凭证它仍然读得到。
 这意味着：
 
 - **克隆一个仓库就可能执行它的代码。** 如果无条件加载项目配置，`flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。
@@ -530,8 +543,8 @@ hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过
 
 对应的治理措施：项目级 hook 首次加载或内容变化时要求人工确认——本项目对启动目录的 `flywhl.toml` 按“路径 + 内容哈希”记录信任，
 未信任时不注册其中的 hook（Claude Code 在启动时快照 hook 配置、变更需在 `/hooks` 中审阅，以官方文档为准）；
-用哈希锁定 hook 脚本内容；把 hook 脚本所在目录加入 `deny:write(...)` 规则，防止 Agent 改写自己的护栏；
-给命令 hook 一个最小化的环境，而不是 `os.environ`。更完整的供应链讨论见 [19 安全](/governance/security)。
+用哈希锁定 hook 脚本内容——本项目的信任哈希包含命令里直接写出的脚本，`CommandHook` 每次执行前再核对一遍，脚本改过、符号链接换了指向就拒绝执行（守卫类 hook 按阻断处理）；把 hook 脚本放在工作区外，或者把它所在目录加入 `deny:write(...)` 规则，防止 Agent 改写自己的护栏；
+给命令 hook 一个最小化的环境（本项目已实现，见上文与 Claude Code 的差异表）。更完整的供应链讨论见 [19 安全](/governance/security)。
 
 ## 典型配方
 
@@ -671,9 +684,9 @@ asyncio.run(main())
 - hooks 把“必须发生”和“绝不能发生”的规则从提示词移到确定性代码；判断标准是能否接受“模型这次忘了”。
 - 本项目 8 个挂载点覆盖会话、输入、工具前后、结束验收、压缩和收尾；同一输出字段在不同事件里语义不同。
 - `HookBus` 串行执行：改写可链式传递、deny 短路，代价是顺序敏感——改写在前，检查在后，审计不要依赖 hook 顺序。
-- hook 只能收紧权限：改写后重新校验、重新判定，决策取最严；审批人改参后 PreToolUse 再跑一遍，人工批准绕不过 hook。
+- hook 只能收紧权限：改写后重新校验、重新判定，决策取最严；审批人改参后 PreToolUse 再跑一遍，这一遍的改写同样重新判定：人工批准绕不过 hook，hook 也绕不过策略。
 - 决策先经 `normalize_decision` 归一化：`block` 在 PreToolUse 里就是 deny，写错的取值产生告警而不是静默放行。
-- 拦截类 hook 必须 fail-closed；`to_json` 的事故说明 fail-open 会把任何 bug 变成绕过。命令 hook 超时会杀掉整个进程组。
+- 拦截类 hook 必须 fail-closed（配置文件里的 `pre_tool_use` 命令 hook 默认如此）；`to_json` 的事故说明 fail-open 会把任何 bug 变成绕过。命令 hook 超时会杀掉整个进程组。
 - Stop hook 定义“完成”，`max_stop_blocks` 保证它不会无限续跑，并以 `incomplete` 如实收尾。
 - hook 的权限比模型高，本身就是供应链风险，需要审阅、锁定和最小化环境。
 
