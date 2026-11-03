@@ -1,0 +1,52 @@
+# 依赖漏洞扫描基线（2026-11-03）
+
+## Python 运行时依赖（核心 + anthropic 扩展，25 个包）
+
+$ uv export --frozen --no-dev --extra anthropic --no-emit-project --format requirements-txt -o requirements-runtime.txt
+$ uvx pip-audit@2.10.1 -r requirements-runtime.txt --disable-pip -f markdown
+
+首次扫描（uv.lock 里是 certifi 2026.7.22）：
+
+Found 2 known vulnerabilities in 1 package
+Name    | Version   | ID              | Fix Versions
+certifi | 2026.7.22 | PYSEC-2026-4320 | 2026.10.18
+（同一条记录列了两次）
+
+内容：证书包里有 emSign ECC Root CA - G3，链到它的 8 张 eMudhra 中间 CA 私钥泄露并已被吊销。拿到私钥又处在中间人位置的人，
+可以给任意主机名签出受信任的证书。httpx 默认用 certifi 的证书包校验 TLS，受影响的是 harness 连模型供应商的 HTTPS。
+2026.10.18 删掉了全部 emSign 根证书，2026.10.19 把不受影响的恢复回来。
+
+处理：uv lock --upgrade-package certifi，certifi 2026.7.22 → 2026.10.23。
+
+复扫：No known vulnerabilities found
+
+## Python 全部依赖（含 dev 组与全部扩展，33 个包）
+
+$ uv export --frozen --all-extras --all-groups --no-emit-project --format requirements-txt -o requirements-all.txt
+$ uvx pip-audit@2.10.1 -r requirements-all.txt --disable-pip
+
+升级 certifi 之前同样只有上面一条；升级之后：No known vulnerabilities found
+
+## 文档站（docs/，npm）
+
+$ npm audit
+6 vulnerabilities (2 low, 3 moderate, 1 high)
+
+| 级别 | 包 | 受影响版本 | 来源 | 修复 |
+|---|---|---|---|---|
+| high | vite | <=6.4.3 | 优化依赖的 .map 处理有路径穿越（GHSA-4w7w-66w2-5vf9）；launch-editor 经 UNC 路径泄露 NTLMv2 哈希 | npm 给不出修复 |
+| moderate | esbuild | <=0.24.2 | 任意网站都能向开发服务器发请求并读到响应（GHSA-67mh-4wv8-2f99） | npm 给不出修复 |
+| moderate | vitepress | <=1.6.4 | 经 vite | npm 给不出修复 |
+| moderate | vitepress-plugin-mermaid | 全部 | 经 vitepress | npm 给不出修复 |
+| low | katex | 0.11.0 - 0.18.1 | 原型污染可绕过信任限制（GHSA-238p-pmpm-9mq7） | 经 mermaid 12.3.0，大版本升级 |
+| low | mermaid | 10.9.0-rc.1 - 12.1.0 | 经 katex | 同上 |
+
+判断：
+- vite、esbuild 两条都出在开发服务器（`vitepress dev`）上，发布的静态站点不运行它们。本机预览时，开发服务器只在回环地址监听，
+  预览期间不要在同一个浏览器里打开不可信网页。
+- katex 经 mermaid 引入，作用于构建时渲染的公式与图，输入是本仓库自己的文档。
+- 这些依赖都不进 Python 包。修复要升级 mermaid 大版本，vitepress 1.x 也没有不受影响的版本，所以先不动，M2-7 整理站点时一起处理。
+
+## CI
+
+tests.yml 新增 coverage-audit 作业：每次运行都扫运行时依赖，结果写进作业摘要并作为产物上传。只报告，发现漏洞不让作业失败。
