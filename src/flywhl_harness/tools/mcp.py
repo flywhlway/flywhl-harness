@@ -48,7 +48,7 @@ class MCPClient:
                  cwd: str | None = None, timeout: float = 30.0, *, confinement: Confinement | None = None,
                  workspace: str | None = None):
         self.name = name
-        self.confinement = confinement or Confinement()
+        self.confinement = confinement or Confinement.resolve()
         self.workspace = workspace or cwd or "."
         self._launch: Any = None        # enter() 的上下文：出站代理活到服务器退出
         self._proxy: Any = None
@@ -81,11 +81,13 @@ class MCPClient:
                 "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
                 "clientInfo": {"name": "flywhl-harness", "version": "0.1.0"},
             })
-        except (MCPError, OSError, asyncio.TimeoutError) as e:   # OSError：命令不存在，或者服务器一启动就退出、写不进 stdin
+            self.server_info = init.get("serverInfo", {})
+            await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        except BaseException as e:   # 取消也要收拾：服务器和它的出站代理不能留下
             await self.close()
-            raise MCPError(f"MCP 服务器 {self.name} 启动失败：{e or type(e).__name__}{self._start_hint()}") from e
-        self.server_info = init.get("serverInfo", {})
-        await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            if isinstance(e, (MCPError, OSError, asyncio.TimeoutError)):   # OSError：命令不存在，或者服务器一启动就退出、写不进 stdin
+                raise MCPError(f"MCP 服务器 {self.name} 启动失败：{e or type(e).__name__}{self._start_hint()}") from e
+            raise
         return self
 
     def _start_hint(self) -> str:
@@ -222,19 +224,20 @@ async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = N
         # trust_annotations = true     # 采信服务器自报的只读、幂等、封闭世界注解
     """
     clients, tools = [], []
-    for name, conf in servers.items():
-        check_mcp_server(name, conf)   # 代码里直接构造的配置不经过 HarnessConfig.load，这里再校验一次
-        c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd, workspace=cwd,
-                      confinement=confinement.scoped("mcp", name, conf) if confinement else None)
-        try:
+    box = confinement or Confinement.resolve()
+    try:
+        for name, conf in servers.items():
+            check_mcp_server(name, conf)   # 代码里直接构造的配置不经过 HarnessConfig.load，这里再校验一次
+            c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd, workspace=cwd,
+                          confinement=box.scoped("mcp", name, conf))
+            clients.append(c)
             await c.start()
-        except MCPError:   # 已经起来的服务器不能留着：它们的出站代理也跟着
-            for started in clients:
-                await started.close()
-            raise
-        clients.append(c)
-        trust = conf.get("trust_annotations", False)
-        ro = conf.get("read_only_tools", [])
-        for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：保证工具顺序稳定
-            tools.append(MCPTool(c, spec, trust_annotations=trust, read_only=any(fnmatchcase(spec["name"], p) for p in ro)))
+            trust = conf.get("trust_annotations", False)
+            ro = conf.get("read_only_tools", [])
+            for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：保证工具顺序稳定
+                tools.append(MCPTool(c, spec, trust_annotations=trust, read_only=any(fnmatchcase(spec["name"], p) for p in ro)))
+    except BaseException:   # 已经起来的服务器不能留着：它们的出站代理也跟着
+        for started in clients:
+            await started.close()
+        raise
     return clients, tools

@@ -86,6 +86,8 @@ class ToolContext:
     recovering: bool = False
     # 距离 Run 截止时间的剩余秒数（None 表示没有墙钟限额）：自管超时的工具据此收紧自己的超时
     time_left: float | None = None
+    # 这次调用过了人工门（``Tool.human_gate``）。只有执行器在人批准之后才设：默认 False，走不到审批的路径（回放、直接调用）一律不算
+    human_approved: bool = False
 
 
 @functools.cache

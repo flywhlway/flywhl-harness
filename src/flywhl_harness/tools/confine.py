@@ -20,6 +20,7 @@ hook 与 MCP 服务器是长期或反复运行的第三方代码，用 ``scoped(
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import os
@@ -66,7 +67,7 @@ class Confinement:
 
     def __init__(self, level: str = "off", network: str = "allow", rules: list[Any] | None = None,
                  sockets: list[tuple[str, str]] | None = None, *, requested: str | None = None, problem: str = "",
-                 state_dir: Path | None = None):
+                 state_dir: Path | None = None, protected: list[str] | None = None):
         self.level = level                  # 实际生效的档位：macos | linux | off
         self.network = network              # 实际生效的网络策略：allow | deny | allowlist
         self.rules = rules or []
@@ -74,11 +75,12 @@ class Confinement:
         self.requested = requested or level
         self.problem = problem              # 非空：配置要沙箱，这里却用不了
         self.state_dir = state_dir
+        self.protected = protected or []    # 只读的位置，比如 harness 的数据目录，见 sandbox._read_only()
         self._private_tmp: str | None = None
 
     @classmethod
     def resolve(cls, sandbox: str = "auto", network: str = "auto", allow: list[str] | None = None,
-                unix_sockets: list[str] | None = None) -> "Confinement":
+                unix_sockets: list[str] | None = None, protected: list[str] | None = None) -> "Confinement":
         """校验并解析配置。写错了在这里报错，不要等到第一条命令。"""
         if sandbox not in SANDBOX_LEVELS:
             raise ValueError(f"未知的沙箱档位 {sandbox!r}（可选：{' | '.join(SANDBOX_LEVELS)}）")
@@ -96,12 +98,12 @@ class Confinement:
         if network == "auto":
             network = "allow" if level == "off" and not problem else "allowlist"
         return cls(level, network, parse_rules(allow or []), pin_sockets(sockets),   # 套接字启动时定下真实位置，之后不再解析
-                   requested=sandbox, problem=problem)
+                   requested=sandbox, problem=problem, protected=protected)
 
     @classmethod
-    def from_config(cls, permissions: Any) -> "Confinement":
+    def from_config(cls, permissions: Any, protected: list[str] | None = None) -> "Confinement":
         return cls.resolve(permissions.sandbox, permissions.sandbox_network, permissions.network_allow,
-                           permissions.unix_sockets)
+                           permissions.unix_sockets, protected)
 
     @property
     def active(self) -> bool:
@@ -118,7 +120,8 @@ class Confinement:
         rules = self.rules if o.get("network_allow") is None else parse_rules(o["network_allow"])
         safe = re.sub(r"[^\w.-]", "_", name)
         return Confinement(self.level, network, rules, self.sockets, requested=self.requested, problem=self.problem,
-                           state_dir=flywhl_home() / "sandbox" / f"{kind}-{safe}" if self.level != "off" else None)
+                           state_dir=flywhl_home() / "sandbox" / f"{kind}-{safe}" if self.level != "off" else None,
+                           protected=self.protected)
 
     def status(self) -> dict[str, Any]:
         """给 doctor、启动横幅、「环境与安全」页看的：实际生效的状态，不是配置里写的。"""
@@ -155,10 +158,10 @@ class Confinement:
         if self.level == "macos":
             return sandbox_argv(argv, workspace, writable=[*default_writable(), *extra] if extra else None,
                                 network=self.network, local_ports=[str(proxy.port), *local_ports(self.rules)] if proxy else (),
-                                unix_sockets=[real for _, real in self.sockets])
+                                unix_sockets=[real for _, real in self.sockets], protected=self.protected)
         return bwrap_argv(argv, workspace, writable=extra, network=self.network, private_tmp=self.private_tmp(),
                           unix_sockets=self.sockets, egress_socket=proxy.unix_path if proxy else None,
-                          local_ports=local_ports(self.rules), chdir=chdir)
+                          local_ports=local_ports(self.rules), chdir=chdir, protected=self.protected)
 
     @contextlib.asynccontextmanager
     async def enter(self, argv: list[str], workspace: str | Path, env: dict[str, str], *,
@@ -172,15 +175,16 @@ class Confinement:
                                          "当前 sandbox = \"off\"。请同时设置 permissions.sandbox")
             yield Launch(list(argv), env)
             return
-        env = {**self._scope_env(), **env}
         async with contextlib.AsyncExitStack() as stack:   # 出站代理与子进程同生共死
             try:
+                env = {**env, **self._scope_env()}   # 宿主的缓存目录在沙箱里写不了，以这份为准
                 if self.level == "linux":
                     require_bwrap()
+                    self.private_tmp()
                 proxy = await self._start_proxy(stack) if self.network == "allowlist" else None
-                wrapped = self._wrap(argv, workspace, proxy, chdir)
-            except (RuntimeError, OSError) as e:   # OSError：TMPDIR 太长，放不下 Unix 套接字的路径
-                raise SandboxUnavailable(str(e)) from None
+                wrapped = await asyncio.to_thread(self._wrap, argv, workspace, proxy, chdir)   # 大工作区要遍历一阵
+            except (RuntimeError, OSError) as e:   # OSError：TMPDIR 太长，放不下 Unix 套接字的路径；状态目录建不出来
+                raise SandboxUnavailable(f"{e}。{OFF_HINT}") from None
             yield Launch(wrapped, {**env, **proxy.env(EGRESS_PORT if self.level == "linux" else None)} if proxy else env, proxy)
 
     async def _start_proxy(self, stack: contextlib.AsyncExitStack) -> EgressProxy:

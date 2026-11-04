@@ -12,20 +12,26 @@ import os
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from flywhl_harness.cancel import CancelToken
 from flywhl_harness.config import HarnessConfig, HookConfig, UntrustedConfigWarning, check_mcp_server, split_untrusted
+from flywhl_harness.observe.replay import RecordedTool
 from flywhl_harness.policy.approvals import ApprovalDecision
 from flywhl_harness.policy.hooks import CommandHook, Hook, HookEvent, HookInput, HookOutput
 from flywhl_harness.policy.permissions import Decision, PermissionPolicy
+from flywhl_harness.runtime.workspace import ShadowGit
 from flywhl_harness.tools import confine, sandbox
+from flywhl_harness.tools.base import ToolContext
 from flywhl_harness.tools.confine import OFF_HINT, Confinement, SandboxUnavailable
-from flywhl_harness.tools.egress import EgressProxy, parse_rules
+from flywhl_harness.tools.egress import _DENIED_LIMIT, EgressProxy, parse_rules
 from flywhl_harness.tools.mcp import MCPClient, MCPError, load_mcp_tools
 from flywhl_harness.tools.sandbox import _RELAY, EGRESS_PORT, Detected
 from flywhl_harness.tools.shell import BashTool, _sandbox_hint
@@ -464,6 +470,33 @@ async def test_hook_refused_when_sandbox_is_unavailable_fails_closed_for_guards(
     assert not (ws / "ran.txt").exists()
 
 
+PS_PROBE = r"""
+import asyncio, os, sys
+from flywhl_harness.tools.confine import Confinement
+
+async def saw(box):
+    async with box.enter(["/bin/sh", "-c", "ps eww -p $PPID 2>&1"], sys.argv[2], {"PATH": os.environ["PATH"]}) as run:
+        p = await asyncio.create_subprocess_exec(*run.argv, env=run.env, cwd=sys.argv[2], stdout=asyncio.subprocess.PIPE,
+                                                 stderr=asyncio.subprocess.STDOUT)
+        out, _ = await p.communicate()
+    return "FLYWHL_PROBE_API_KEY=sentinel" in out.decode(errors="replace")
+
+async def main():
+    print(await saw(Confinement()), await saw(Confinement(sys.argv[1], "allowlist")))
+
+asyncio.run(main())
+"""
+
+
+@real_sandbox
+def test_ps_cannot_read_the_harness_environment(ws):
+    """子进程的环境剥离管不到 harness 自己：``ps eww -p $PPID`` 读的是父进程。ps 读的是 exec 时的环境，所以起一个新进程来测，
+    沙箱外读得到的那一次是对照。"""
+    out = subprocess.run([sys.executable, "-c", PS_PROBE, LEVEL, str(ws)], capture_output=True, text=True, timeout=60,
+                         env={**os.environ, "FLYWHL_PROBE_API_KEY": "sentinel"})
+    assert out.stdout.split() == ["True", "False"], out.stdout + out.stderr
+
+
 MCP_SERVER = r"""
 import json, os, sys
 for line in sys.stdin:
@@ -536,7 +569,8 @@ async def test_verify_command_runs_in_the_sandbox_without_secrets(ws, secret, ou
     monkeypatch.setenv("FLYWHL_TEST_API_KEY", "s3cr3t")
     perms = HarnessConfig().permissions
     perms.sandbox = LEVEL
-    ok, out = await _run_verify(f'sh read.sh; env | grep FLYWHL_TEST_API_KEY; touch "{outside}" 2>/dev/null; exit 3', str(ws), perms)
+    ok, out = await _run_verify(f'sh read.sh; env | grep FLYWHL_TEST_API_KEY; touch "{outside}" 2>/dev/null; exit 3', str(ws),
+                                Confinement.from_config(perms))
     assert not ok and SENTINEL not in out and "s3cr3t" not in out and not outside.exists()
 
 
@@ -544,5 +578,309 @@ async def test_verify_command_refuses_when_sandbox_is_unavailable(ws, monkeypatc
     from flywhl_harness.agent.loop import _run_verify
 
     monkeypatch.setattr(confine, "detect", lambda: Detected("", "没有沙箱"))
-    ok, out = await _run_verify(f"touch {ws}/ran.txt", str(ws), HarnessConfig().permissions)
+    ok, out = await _run_verify(f"touch {ws}/ran.txt", str(ws), Confinement.resolve())
     assert not ok and "验收命令未执行" in out and not (ws / "ran.txt").exists()
+
+
+# ---------------------------------------------------------------------- 沙箱之外还有谁在替命令执行
+def run_git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def booby_trapped_repo(ws: Path, marker: Path) -> None:
+    """工作区里的嵌套仓库，配置里写着 core.fsmonitor：沙箱里的命令写得出这样的东西，而影子 git 跑在沙箱外。"""
+    sub = ws / "sub"
+    sub.mkdir()
+    (sub / "a.txt").write_text("a", encoding="utf-8")
+    run_git(sub, "init", "-q")
+    run_git(sub, "add", ".")
+    run_git(sub, "commit", "-qm", "x")
+    hook = sub / "monitor.sh"
+    hook.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    hook.chmod(0o755)
+    run_git(sub, "config", "core.fsmonitor", str(hook))
+
+
+async def test_shadow_git_never_runs_what_a_nested_repo_configured(ws, tmp_path):
+    marker = tmp_path / "ran-on-host"
+    booby_trapped_repo(ws, marker)
+    shadow = ShadowGit(ws, tmp_path / "shadow.git")
+    first = await shadow.snapshot("第一次把嵌套仓库收进索引")
+    (ws / "b.txt").write_text("b", encoding="utf-8")
+    assert first and await shadow.snapshot("第二次 add 时 git 进嵌套仓库跑 git status")
+    await shadow.diff(first)
+    await shadow.restore(first)
+    assert not marker.exists()
+    assert "160000" not in shadow._git("ls-files", "--stage")
+
+
+async def test_gitlink_left_by_an_earlier_version_is_dropped_before_add(ws, tmp_path):
+    marker = tmp_path / "ran-on-host"
+    booby_trapped_repo(ws, marker)
+    shadow = ShadowGit(ws, tmp_path / "shadow.git")
+    shadow._ensure()
+    shadow._git("add", "-A")
+    shadow._git("commit", "-qm", "升级之前留下的快照")
+    assert "160000" in shadow._git("ls-files", "--stage")
+    assert await shadow.snapshot("升级之后")
+    assert not marker.exists()
+
+
+def tool_ctx(ws: Path) -> ToolContext:
+    return ToolContext(run_id="r", session_id="s", call_id="c", workspace=SimpleNamespace(root=ws), cancel=CancelToken(),
+                       blobs=None, idempotency_key="k")
+
+
+async def test_bash_will_not_leave_the_sandbox_unless_told_a_human_agreed(ws):
+    res = await boxed_bash().execute({"command": "touch ran.txt", "outside_sandbox": True}, tool_ctx(ws))
+    assert res.is_error and "命令未执行" in res.content and not (ws / "ran.txt").exists()
+
+
+async def test_replay_cannot_reach_the_outside_sandbox_path(ws):
+    """回放把工具包成 RecordedTool，权限层看不到人工门，模式又是 bypass。没有录制结果的调用落到真实工具上时，要靠执行层这一道。"""
+    real = boxed_bash()
+    tool = RecordedTool(real.spec(), {}, real, dry_run_external=True)
+    res = await tool.execute({"command": "touch ran.txt", "outside_sandbox": True}, tool_ctx(ws))
+    assert res.is_error and not (ws / "ran.txt").exists()
+
+
+async def test_hook_cannot_swap_the_command_a_human_just_approved(ws):
+    """人批准的是审批卡上那一条：批准之后 hook 换掉命令，要重新申请。"""
+    h = make_harness(ws, [bash("touch ok.txt", outside_sandbox=True), "好"], on_ask="wait", permissions__sandbox="off")
+    h.tools.get("bash").confinement = Confinement("macos", "allow")
+    calls = []
+
+    async def rewrite(inp: HookInput) -> HookOutput:
+        calls.append(inp)
+        return HookOutput(decision="allow", updated_input={"command": "touch swapped.txt", "outside_sandbox": True})
+
+    async def edit(rec):
+        return ApprovalDecision(True, by="u", edited_args={"command": "touch edited.txt", "outside_sandbox": True})
+
+    h.hooks.add(Hook(HookEvent.PRE_TOOL_USE, rewrite, "rw", matcher="bash"))
+    h.approvals.resolver = edit
+    end = tool_ends((await h.run("跑")).events)[0]
+    assert len(calls) == 2 and "人工门" in end["content"]
+    assert not (ws / "swapped.txt").exists() and not (ws / "edited.txt").exists()
+
+
+def test_gate_keeps_the_reason_the_command_needed_asking():
+    tool = boxed_bash()
+    plain = PermissionPolicy("default").evaluate(tool, {"command": "curl https://example.com"})
+    gated = PermissionPolicy("default").evaluate(tool, {"command": "curl https://example.com", "outside_sandbox": True})
+    assert plain.decision == Decision.ASK and plain.reason
+    assert "沙箱外" in gated.reason and plain.reason in gated.reason
+
+
+# ---------------------------------------------------------------------- 默认值与收尾
+def test_tools_built_by_hand_are_confined_by_default(monkeypatch):
+    monkeypatch.setattr(confine, "detect", lambda: Detected("linux"))
+    assert (BashTool().confinement.level, BashTool().confinement.network) == ("linux", "allowlist")
+    assert MCPClient("s", "x").confinement.level == "linux"
+
+
+def test_loopback_names_are_one_host():
+    assert EgressProxy(parse_rules(["127.0.0.1:8080"])).allowed("localhost", 8080)
+    assert EgressProxy(parse_rules(["localhost:8080"])).allowed("127.0.0.1", 8080)
+    assert not EgressProxy(parse_rules(["localhost:8080"])).allowed("127.0.0.1", 8081)
+
+
+def test_denied_hosts_are_listed_once_and_bounded():
+    proxy = EgressProxy([])
+    for i in range(_DENIED_LIMIT * 2):
+        proxy._refuse(f"h{i}.example", 443)
+        proxy._refuse("h0.example", 443)
+    assert len(proxy.denied) == len(set(proxy.denied)) == _DENIED_LIMIT
+
+
+async def test_private_caches_win_over_the_host_ones(ws, tmp_path):
+    box = Confinement("macos", "deny", state_dir=tmp_path / "state")
+    box._wrap = lambda argv, *_: argv
+    async with box.enter(["x"], ws, {"XDG_CACHE_HOME": "/host/cache"}) as run:
+        assert run.env["XDG_CACHE_HOME"] == str(tmp_path / "state" / "cache")
+
+
+async def test_failure_at_launch_says_how_to_go_without_a_sandbox(ws, monkeypatch):
+    def gone():
+        raise RuntimeError("bwrap 不见了")
+
+    monkeypatch.setattr(confine, "require_bwrap", gone)
+    with pytest.raises(SandboxUnavailable, match="bwrap 不见了") as e:
+        async with Confinement("linux", "deny").enter(["x"], ws, {}):
+            pass
+    assert OFF_HINT in str(e.value)
+    (ws / "plain").write_text("x", encoding="utf-8")
+    with pytest.raises(SandboxUnavailable):     # 状态目录建不出来，同样是用不了沙箱，不是裸的 OSError
+        async with Confinement("macos", "deny", state_dir=ws / "plain" / "state").enter(["x"], ws, {}):
+            pass
+
+
+async def test_cancelled_verify_command_leaves_nothing_running(ws):
+    from flywhl_harness.agent.loop import _run_verify
+
+    pid_file = ws / "pid"
+    task = asyncio.create_task(_run_verify(f'echo $$ > "{pid_file}.tmp"; mv "{pid_file}.tmp" "{pid_file}"; exec sleep 30',
+                                           str(ws), Confinement()))
+    async with asyncio.timeout(10):
+        while not pid_file.exists():
+            await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+async def test_failed_tool_listing_stops_the_servers_already_up(ws, monkeypatch):
+    script = ws / "server.py"
+    script.write_text(MCP_SERVER, encoding="utf-8")
+    seen = []
+
+    async def no_tools(self):
+        seen.append(self)
+        raise MCPError("tools/list 失败")
+
+    monkeypatch.setattr(MCPClient, "list_tools", no_tools)
+    with pytest.raises(MCPError):
+        await load_mcp_tools({"t": {"command": sys.executable, "args": ["-I", str(script)]}}, cwd=str(ws), confinement=Confinement())
+    await asyncio.wait_for(seen[0].proc.wait(), 5)
+    assert seen[0]._launch is None
+
+
+async def test_cancelled_mcp_start_stops_the_server(ws):
+    silent = ws / "silent.py"
+    silent.write_text("import sys\nsys.stdin.read()\n", encoding="utf-8")
+    c = MCPClient("s", sys.executable, ["-I", str(silent)], workspace=str(ws), confinement=Confinement())
+    task = asyncio.create_task(c.start())
+    async with asyncio.timeout(10):
+        while c.proc is None:
+            await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(c.proc.wait(), 5)
+    assert c._launch is None
+
+
+GREET_CLIENT = r"""
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
+print(s.recv(100).decode())
+"""
+
+
+async def test_relay_passes_on_what_arrives_with_the_proxy_reply():
+    """服务器先开口的协议（MySQL、SSH）：问候可能和 CONNECT 的 200 落在同一次读里，转发器不能把它吞掉。"""
+    async def proxy(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\nhello-from-server\n")
+        await writer.drain()
+        await reader.read()
+        writer.close()
+
+    d = tempfile.mkdtemp(prefix="fw")
+    path, local = os.path.join(d, "p"), _free_port()
+    server = await asyncio.start_unix_server(proxy, path)
+    try:
+        async with server:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-S", "-c", _RELAY, path, str(_free_port()), str(local),
+                sys.executable, "-I", "-S", "-c", GREET_CLIENT, str(local),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), 20)
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert "hello-from-server" in out.decode(), out
+
+
+def test_workspace_inside_the_data_dir_stays_writable(ws):
+    assert sandbox._read_only(os.path.realpath(ws), [str(ws.parent)]) == []
+
+
+def test_harness_protects_its_own_data_dir(ws):
+    h = make_harness(ws, ["好"], permissions__sandbox="off", data_dir=str(ws.parent / "state"))
+    assert h.confinement.protected == [str(h.data_dir)] == h.tools.get("bash").confinement.protected
+    assert h.confinement.scoped("hook", "x").protected == h.confinement.protected
+
+
+# ---------------------------------------------------------------------- 工作区里写不得的位置（真实沙箱）
+async def in_box(box: Confinement, ws: Path, command: str, chdir: str | None = None) -> tuple[int, str]:
+    env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]}
+    async with box.enter(["/bin/sh", "-c", command], ws, env, chdir=chdir) as run:
+        proc = await asyncio.create_subprocess_exec(*run.argv, env=run.env, cwd=chdir or ws, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+    return proc.returncode, out.decode(errors="replace")
+
+
+@real_sandbox
+async def test_git_works_but_what_later_runs_on_the_host_stays_read_only(ws):
+    run_git(ws, "init", "-q")
+    box = Confinement(LEVEL, "deny")
+    git = "git -c user.name=t -c user.email=t@t"
+    code, out = await in_box(box, ws, f"echo a > a.txt && git add . && {git} commit -qm x && git log --oneline | wc -l")
+    assert code == 0 and out.strip() == "1", out
+    config = (ws / ".git" / "config").read_bytes()
+    assert (await in_box(box, ws, "echo 'touch ran' > .git/hooks/pre-commit"))[0] != 0
+    assert (await in_box(box, ws, "printf '[core]\\n\\tfsmonitor = x\\n' >> .git/config"))[0] != 0
+    assert (await in_box(box, ws, "mv .git renamed"))[0] != 0     # 整个换掉 .git 就绕过了上面两条
+    assert not (ws / ".git" / "hooks" / "pre-commit").exists() and (ws / ".git" / "config").read_bytes() == config
+
+
+@real_sandbox
+async def test_git_init_still_works_in_an_empty_workspace(ws):
+    code, out = await in_box(Confinement(LEVEL, "deny"), ws, "git init -q")
+    assert code == 0 and (ws / ".git" / "HEAD").exists(), out
+
+
+@real_sandbox
+async def test_data_dir_inside_the_workspace_is_read_only(ws):
+    data = ws / "state"
+    data.mkdir()
+    box = Confinement(LEVEL, "deny", protected=[str(data)])
+    assert (await in_box(box, ws, "echo x > state/harness.db"))[0] != 0 and not (data / "harness.db").exists()
+    assert (await in_box(box, ws, "echo x > other.txt"))[0] == 0
+
+
+@real_sandbox
+async def test_hard_links_do_not_get_around_read_only_paths(ws, outside):
+    """硬链接是同一个文件的另一个名字。工作区内部链得上是对照：下面的失败才是沙箱拦的。"""
+    kept = ws / ".flywhl" / "keep.txt"
+    kept.parent.mkdir()
+    box = Confinement(LEVEL, "deny")
+    code, out = await in_box(box, ws, "echo a > own && ln own linked && echo b >> linked && cat own")
+    assert code == 0 and out.split() == ["a", "b"], out
+    for target in (kept, outside):
+        target.write_text("原样", encoding="utf-8")
+        assert (await in_box(box, ws, f'ln "{target}" link && echo changed >> link'))[0] != 0
+        assert target.read_text(encoding="utf-8") == "原样" and not (ws / "link").exists()
+
+
+@real_sandbox
+@pytest.mark.skipif(sys.platform != "darwin", reason="APFS 默认不分大小写")
+async def test_case_variants_do_not_get_around_read_only_paths(ws):
+    (ws / ".flywhl").mkdir()
+    box = Confinement(LEVEL, "deny")
+    assert (await in_box(box, ws, "echo x > .FLYWHL/new.txt"))[0] != 0
+    assert not (ws / ".flywhl" / "new.txt").exists()
+
+
+@real_sandbox
+async def test_low_port_rule_does_not_take_every_command_down(ws):
+    """沙箱里绑不了 1024 以下的端口：这条规则经 HTTP 代理照样能用，不能因为它所有命令都起不来。"""
+    code, out = await in_box(Confinement(LEVEL, "allowlist", parse_rules(["localhost:80"])), ws, "echo ran")
+    assert code == 0 and "ran" in out, out
+
+
+@real_sandbox
+async def test_working_directory_outside_the_workspace_is_there(ws, tmp_path):
+    """MCP 的 cwd 可以在 /tmp 下：Linux 沙箱换掉了 /tmp，不挂回来连目录都进不去。"""
+    cwd = tmp_path / "server-home"
+    cwd.mkdir()
+    (cwd / "data.txt").write_text("found", encoding="utf-8")
+    code, out = await in_box(Confinement(LEVEL, "deny"), ws, "cat data.txt", chdir=str(cwd))
+    assert code == 0 and "found" in out, out

@@ -246,6 +246,9 @@ def main() -> int:
         asyncio.run(STAGES[args.stage](Paths(Path(args.base)), r, args))
         return 0 if r.ok else 1
 
+    for where in (Path.cwd(), Path(sys.prefix)):   # macOS 沙箱里临时目录可写，Linux 沙箱里 /tmp 是私有的：放在那里结果不成立
+        if any(where.resolve().is_relative_to(Path(t).resolve()) for t in (tempfile.gettempdir(), "/tmp")):
+            ap.error(f"{where} 在临时目录里，请换到临时目录之外运行（当前目录和虚拟环境都是）")
     base = Path(tempfile.mkdtemp(prefix=PREFIX, dir=Path.cwd()))
     results, ok = [], True
     try:

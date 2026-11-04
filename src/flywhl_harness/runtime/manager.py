@@ -185,7 +185,7 @@ class Harness:
         if loose and self.config.permissions.require_pinned:
             raise ValueError("permissions.require_pinned 已开启，以下 hook / MCP 服务器临时拉取的包没有锁定确切版本"
                              f"（npm 包写成 名字@1.2.3，Python 包写成 名字==1.2.3，镜像带 @sha256: 摘要），拒绝启动：{'；'.join(loose)}")
-        self.confinement = Confinement.from_config(self.config.permissions)
+        self.confinement = Confinement.from_config(self.config.permissions, [str(self.data_dir)])
         self.hooks = hooks or HookBus()
         for i, hc in enumerate(self.config.hooks):
             box = self.confinement.scoped("hook", f"{i}-{hc.event}", {"sandbox": hc.sandbox, "sandbox_network": hc.sandbox_network,

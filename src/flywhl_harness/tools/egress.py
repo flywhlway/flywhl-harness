@@ -40,6 +40,7 @@ _LABEL = r"[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?"
 _HOST = re.compile(rf"{_LABEL}(\.{_LABEL})*")
 _RULE = re.compile(rf"(\*\.)?{_HOST.pattern}(:(\d{{1,5}}|\*))?")
 _LOCAL = ("localhost", "127.0.0.1")
+_DENIED_LIMIT = 256     # 一条长命的 MCP 服务器可以反复撞白名单：报错只要列出主机，不用留下每一次
 _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 _REASONS = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
 # 基准测试网段。TUN 模式的代理软件（fake-ip）把所有域名解析到这里，它不是内网，按公网处理
@@ -174,12 +175,21 @@ class EgressProxy:
         url = f"http://127.0.0.1:{port or self.port}"
         return {**dict.fromkeys(_PROXY_ENV, url), "NO_PROXY": "", "no_proxy": "", "NODE_USE_ENV_PROXY": "1"}
 
+    def _matching(self, host: str, port: int) -> list[Any]:
+        names = _LOCAL if host in _LOCAL else (host,)   # Linux 上转发器总是连 127.0.0.1：规则写哪个名字都算
+        return [r for r in self.rules if any(r.matches(n, port) for n in names)]
+
     def allowed(self, host: str, port: int) -> bool:
-        return any(r.matches(host, port) for r in self.rules)
+        return bool(self._matching(host, port))
+
+    def _refuse(self, host: str, port: int) -> None:
+        item = f"{host}:{port}"
+        if item not in self.denied and len(self.denied) < _DENIED_LIMIT:
+            self.denied.append(item)
 
     async def vet(self, host: str, port: int) -> list[str]:
         """主机名过了白名单，再核对解析出的地址，按顺序返回可以连的 IP；一个都没有时抛 ``EgressDenied``。"""
-        rules = [r for r in self.rules if r.matches(host, port)]
+        rules = self._matching(host, port)
         addrs = await self.resolve(host, port)
         ok = [str(ip) for ip in addrs if any(r.reaches(ip) for r in rules)]
         if ok:
@@ -202,12 +212,12 @@ class EgressProxy:
             except ValueError as e:
                 return await _reply(writer, 400, f"代理无法处理这个请求：{e}")
             if not self.allowed(host, port):
-                self.denied.append(f"{host}:{port}")
+                self._refuse(host, port)
                 return await _reply(writer, 403, f"出站白名单不包含 {host}:{port}（见 permissions.network_allow）")
             try:
                 ips = await asyncio.wait_for(self.vet(host, port), self.connect_timeout)
             except EgressDenied as e:
-                self.denied.append(f"{host}:{port}")
+                self._refuse(host, port)
                 return await _reply(writer, 403, str(e))
             except (OSError, asyncio.TimeoutError) as e:
                 return await _reply(writer, 502, f"解析 {host} 失败：{e or type(e).__name__}")

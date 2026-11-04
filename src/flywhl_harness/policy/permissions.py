@@ -259,7 +259,8 @@ class PermissionPolicy:
             decision, reason = Decision.DENY, f"plan 模式只允许只读操作，不能离开沙箱：{gate}"
         human_only = bool(gate) and decision != Decision.DENY
         if human_only:   # 模式、规则、会话授权的放行到这里都作废，见模块注释“人工门”
-            decision, reason, risk = Decision.ASK, gate or "", "critical"
+            why = f"（{reason}）" if decision == Decision.ASK and reason else ""   # 原来为什么要问，审批人同样要看到
+            decision, reason, risk = Decision.ASK, f"{gate}{why}", "critical"
         return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source, human_only)
 
     def _allowed_by(self, tool: Tool, targets: list[str], rules: list[Rule]) -> Rule | None:

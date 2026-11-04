@@ -143,12 +143,12 @@ class BashTool(Tool):
     interruptible = True
     manages_timeout = True
 
-    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "off",
-                 sandbox_network: str = "allow", network_allow: list[str] | None = None,
-                 unix_sockets: list[str] | None = None):
+    def __init__(self, strip_secret_env: bool = True, default_timeout: float = 120.0, sandbox: str = "auto",
+                 sandbox_network: str = "auto", network_allow: list[str] | None = None,
+                 unix_sockets: list[str] | None = None, protected: list[str] | None = None):
         self.strip_secret_env = strip_secret_env
         self.default_timeout = default_timeout
-        self.confinement = Confinement.resolve(sandbox, sandbox_network, network_allow, unix_sockets)
+        self.confinement = Confinement.resolve(sandbox, sandbox_network, network_allow, unix_sockets, protected)
 
     def human_gate(self, args: dict[str, Any]) -> str | None:
         if args.get("outside_sandbox") and self.confinement.active:
@@ -184,7 +184,10 @@ class BashTool(Tool):
         started = time.monotonic()
         spawn = dict(cwd=str(ctx.workspace.root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                      stdin=asyncio.subprocess.DEVNULL, start_new_session=True)
-        outside = self.human_gate(args) is not None   # 走到这里已经过了人工确认，见 PermissionPolicy.evaluate
+        outside = self.human_gate(args) is not None
+        if outside and not ctx.human_approved:   # 只看参数不够：回放和直接调用走不到审批，这里默认拒绝
+            return ToolResult(content="这条命令要在沙箱外执行，必须由人当场确认，这次调用没有经过确认：命令未执行", is_error=True,
+                              details={"command": command, "outside_sandbox": True})
         box = Confinement() if outside else self.confinement
         shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
         chunks: list[bytes] = []

@@ -409,7 +409,8 @@ class AgentLoop:
             if todos and any(t.get("status") in ("pending", "in_progress") for t in todos):
                 gaps.append("计划中仍有未完成项：\n" + render_todos([t for t in todos if t.get("status") in ("pending", "in_progress")]))
         if rc.config.verify_command and rc.role == "main" and not planning:
-            ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root), rc.config.permissions)
+            ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root), _verify_box(rc),
+                                        rc.config.permissions.strip_secret_env)
             if not ok:
                 gaps.append(f"验收命令 `{rc.config.verify_command}` 未通过：\n{out}")
         event = HookEvent.STOP if rc.role == "main" else HookEvent.SUBAGENT_STOP
@@ -471,20 +472,27 @@ class AgentLoop:
             self.rc.store.update_session(self.rc.session_id, meta={**s.meta, **kv})
 
 
-async def _run_verify(command: str, cwd: str, permissions: Any, timeout: float = 300.0) -> tuple[bool, str]:
+def _verify_box(rc: RunContext) -> Confinement:
+    """用 harness 那一份：现建的话，每一轮都多留下一个私有 /tmp，也不知道数据目录在哪。"""
+    return getattr(rc.harness, "confinement", None) or Confinement.from_config(rc.config.permissions)
+
+
+async def _run_verify(command: str, cwd: str, box: Confinement, strip_secret_env: bool = True,
+                      timeout: float = 300.0) -> tuple[bool, str]:
     """验收命令和 bash 一样进沙箱、剥离密钥：它跑的 pytest、npm test 执行的是 Agent 刚改过的代码，
     放在沙箱外，写一个 conftest.py 就出去了。"""
-    box = Confinement.from_config(permissions)
     try:
-        async with box.enter(["/bin/sh", "-c", command], cwd, _clean_env(permissions.strip_secret_env)) as run:
+        async with box.enter(["/bin/sh", "-c", command], cwd, _clean_env(strip_secret_env)) as run:
             proc = await asyncio.create_subprocess_exec(*run.argv, cwd=cwd, env=run.env, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT, start_new_session=True)
             try:
                 out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, asyncio.CancelledError) as e:   # 它在自己的进程组里，不杀就留在后台继续跑
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 await proc.wait()
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 return False, f"验收命令超时（{timeout:.0f}s）"
     except SandboxUnavailable as e:
         return False, f"沙箱不可用，验收命令未执行：{e}"

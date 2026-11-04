@@ -264,8 +264,9 @@ class ToolExecutor:
                         final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
                         if final.decision == Decision.DENY:
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
-                        if final.human_only and not perm.human_only:
+                        if final.human_only:   # 人批准的是改写之前的那条命令
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数要过人工门，需要重新申请：{final.reason}"), "denied")
+            ctx.human_approved = perm.human_only
             if dec.remember and not perm.human_only:   # 这一次的确认只管这一次
                 g = grant_for(tool, args)
                 rc.grants.append(g)

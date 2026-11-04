@@ -246,7 +246,7 @@ class CommandHook:
             raise RuntimeError(f"引用的文件在启动后被改过：{'、'.join(changed)}，拒绝执行；确认改动无误后重启 harness")
         from ..tools.confine import Confinement   # 延迟导入：tools 依赖 policy
 
-        box = self.confinement or Confinement()
+        box = self.confinement or Confinement.resolve()
         async with box.enter(["/bin/sh", "-c", self.command], base, self.child_env(inp.event)) as run:
             proc = await asyncio.create_subprocess_exec(
                 *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

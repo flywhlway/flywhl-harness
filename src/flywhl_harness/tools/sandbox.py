@@ -116,8 +116,11 @@ def relay(conn, path, port):
                 if not data:
                     raise OSError("proxy closed")
                 head += data
-            if b" 200 " not in head.split(b"\r\n", 1)[0]:
+            status, _, rest = head.partition(b"\r\n\r\n")
+            if b" 200 " not in status.split(b"\r\n", 1)[0]:
                 raise OSError("proxy refused")
+            if rest:   # 服务器先开口的协议（MySQL、SSH）：问候可能和代理的回复粘在一起
+                conn.sendall(rest)
     except OSError:
         conn.close()
         up.close()
@@ -135,7 +138,13 @@ listeners = []
 for port in [proxy_port, *local]:
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", port))
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        if port == proxy_port:
+            raise
+        s.close()    # 1024 以下的端口绑不上：这条规则仍然能经 HTTP 代理走，不能让一个端口拖垮所有命令
+        continue
     s.listen(128)
     listeners.append((s, 0 if port == proxy_port else port))
 if os.fork() == 0:
@@ -180,7 +189,7 @@ def probe() -> Detected:
     if not bwrap:
         return Detected("", "没有安装 bubblewrap，用包管理器装上：apt install bubblewrap 或 dnf install bubblewrap")
     err = _trial([bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-ipc",
-                  "--unshare-net", "--die-with-parent", "--new-session", "/bin/true"])
+                  "--unshare-net", "--die-with-parent", "--new-session", "/bin/sh", "-c", ":"])
     if not err:
         return Detected("linux")
     return Detected("", f"bubblewrap 启动失败：{err}。多半是 user namespace 被禁用：Ubuntu 上运行 sudo sysctl "
@@ -227,22 +236,27 @@ def default_writable() -> list[str]:
 
 def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = None,
                      env: dict[str, str] | None = None, network: str = "allow",
-                     local_ports: Iterable[str] = (), unix_sockets: Iterable[str] = ()) -> str:
+                     local_ports: Iterable[str] = (), unix_sockets: Iterable[str] = (),
+                     protected: Iterable[str] = ()) -> str:
     """生成 Seatbelt 配置。``writable`` 为工作区之外允许写的目录，默认是临时目录；``env`` 默认取当前环境；
     ``network`` 取 ``SANDBOX_NETWORK`` 之一，``allowlist`` 时 ``local_ports`` 是放行的本机端口（出站代理的端口在其中）；
-    ``unix_sockets`` 是另外放行连接的 Unix 套接字。"""
+    ``unix_sockets`` 是另外放行连接的 Unix 套接字；``protected`` 见 ``_read_only()``。"""
     if network not in _NETWORK_POLICIES:
         raise ValueError(f"未知的沙箱网络策略 {network!r}（可选：{' | '.join(_NETWORK_POLICIES)}）")
     ws = os.path.realpath(workspace)
     extra = default_writable() if writable is None else [os.path.realpath(p) for p in writable]
     allowed = " ".join([f"(subpath {_str(ws)})", *(f"(subpath {_str(p)})" for p in extra), *_DEVICES])
     _refuse_writable(unix_sockets, [ws, *extra])
+    frozen = [f"(subpath {_str(p)})" for p in _read_only(ws, protected)]
+    if os.path.isdir(os.path.join(ws, ".git")):   # 整个 .git 换掉就绕过了里面的只读。只管目录本身，里面照常写
+        frozen.append(f"(literal {_str(os.path.join(ws, '.git'))})")
     lines = [
         "(version 1)",
         "(allow default)",
         f"(deny file-read* file-write* {' '.join(_credential_filters(dict(os.environ) if env is None else env))})",
         f"(deny file-write* (require-not (require-any {allowed})))",
-        f"(deny file-write* (subpath {_str(os.path.join(ws, '.flywhl'))}) (literal {_str(os.path.join(ws, 'flywhl.toml'))}))",
+        f"(deny file-write* (subpath {_str(os.path.join(ws, '.flywhl'))}) (literal {_str(os.path.join(ws, 'flywhl.toml'))})"
+        f" {' '.join(frozen)})",
         f"(deny mach-lookup {' '.join(_MACH_DENY)})",
         "(deny job-creation)",   # launchd 任务同样跑在沙箱外。实测 launchd 已经不接受沙箱进程提交的任务，这里写明而不依赖它
         # Unix 套接字连着本机的守护进程（docker.sock、tmux、ssh-agent），任何网络策略下都先整体拒绝
@@ -259,19 +273,28 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     return "\n".join(lines)
 
 
+def _read_only(ws: str, protected: Iterable[str]) -> list[str]:
+    """工作区里写不得的位置，都是之后会在沙箱外起作用的东西：``protected`` 是 harness 的数据目录（影子仓库、会话库），
+    ``.git/hooks``、``.git/config`` 在用户下一次 ``git commit`` 或一条获准离开沙箱的 ``git push`` 时执行。
+    只保护已有的：``git init`` 还要能在空工作区里运行。"""
+    git = [os.path.realpath(os.path.join(ws, ".git", name)) for name in ("hooks", "config")]
+    paths = [*(p for p in git if os.path.exists(p)), *(os.path.realpath(p) for p in protected)]
+    return [p for p in paths if not _under(ws, p)]   # 工作区放在数据目录里时，不能把整个工作区变成只读
+
+
 def _program(command: str | list[str]) -> list[str]:
     return ["/bin/bash", "-c", command] if isinstance(command, str) else list(command)
 
 
 def sandbox_argv(command: str | list[str], workspace: str | Path, *, writable: Iterable[str] | None = None,
                  executable: str | None = None, network: str = "allow", local_ports: Iterable[str] = (),
-                 unix_sockets: Iterable[str] = ()) -> list[str]:
+                 unix_sockets: Iterable[str] = (), protected: Iterable[str] = ()) -> list[str]:
     """把命令包进 sandbox-exec：字符串按 bash 命令，列表按完整的 argv。沙箱不可用时抛 ``RuntimeError``，由调用方拒绝执行。"""
     executable = executable or SANDBOX_EXEC
     if sys.platform != "darwin" or not os.path.exists(executable):
         raise RuntimeError(f"sandbox = \"macos\" 需要 macOS 自带的 {executable}，当前环境没有")
     profile = seatbelt_profile(workspace, writable=writable, network=network, local_ports=local_ports,
-                               unix_sockets=unix_sockets)
+                               unix_sockets=unix_sockets, protected=protected)
     return [executable, "-p", profile, *_program(command)]
 
 
@@ -316,8 +339,7 @@ def workspace_credentials(workspace: str) -> set[str]:
     for top, dirs, files in os.walk(workspace):
         seen += len(dirs) + len(files)
         if seen > _WALK_LIMIT:
-            raise RuntimeError(f"工作区里的文件超过 {_WALK_LIMIT} 个，没法逐个确认凭证位置都已遮住；"
-                               "可以改用 macOS 档位，或在更小的目录里启动")
+            raise RuntimeError(f"工作区里的文件超过 {_WALK_LIMIT} 个，没法逐个确认凭证位置都已遮住，可以在更小的目录里启动")
         keep = []
         for d in dirs:
             p = os.path.join(top, d)
@@ -365,11 +387,12 @@ def require_bwrap(executable: str | None = None) -> str:
 def bwrap_argv(command: str | list[str], workspace: str | Path, *, writable: Iterable[str] | None = None,
                env: dict[str, str] | None = None, network: str = "allow", executable: str | None = None,
                private_tmp: str | None = None, unix_sockets: Iterable[tuple[str, str]] = (),
-               egress_socket: str | None = None, local_ports: Iterable[str] = (), chdir: str | None = None) -> list[str]:
+               egress_socket: str | None = None, local_ports: Iterable[str] = (), chdir: str | None = None,
+               protected: Iterable[str] = ()) -> list[str]:
     """把命令包进 bubblewrap：字符串按 bash 命令，列表按完整的 argv。不可用、工作区大到数不完凭证位置时抛 ``RuntimeError``，
     由调用方拒绝执行。``private_tmp`` 是挂成沙箱里 ``/tmp`` 的宿主目录（会话内的命令共用），不给就每条命令一个空的；
     ``unix_sockets`` 是 ``pin_sockets()`` 定下的 (配置的路径, 真实位置)；``network = "allowlist"`` 时 ``egress_socket`` 是
-    宿主上出站代理的 Unix 套接字，``local_ports`` 是白名单里的本机端口；``chdir`` 默认是工作区。"""
+    宿主上出站代理的 Unix 套接字，``local_ports`` 是白名单里的本机端口；``chdir`` 默认是工作区；``protected`` 见 ``_read_only()``。"""
     bwrap = require_bwrap(executable)
     if network not in _NETWORK_POLICIES:
         raise ValueError(f"未知的沙箱网络策略 {network!r}（可选：{' | '.join(_NETWORK_POLICIES)}）")
@@ -397,8 +420,11 @@ def bwrap_argv(command: str | list[str], workspace: str | Path, *, writable: Ite
     for p in binds:
         argv += ["--bind", p, p]
     argv += ["--bind", ws, ws]
-    for p in (os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml")):
-        if os.path.exists(p):
+    git = os.path.join(ws, ".git")
+    if os.path.isdir(git) and not os.path.islink(git):   # 挂载点改不了名：整个 .git 换掉就绕过了里面的只读
+        argv += ["--bind", git, git]
+    for p in (os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml"), *_read_only(ws, protected)):
+        if os.path.exists(p) and _under(p, ws):   # 工作区之外的本来就写不了，/tmp 下的这样一挂反而露出来了
             argv += ["--ro-bind", p, p]
     for p in _credential_paths(ws, dict(os.environ) if env is None else env):
         argv += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
@@ -406,7 +432,10 @@ def bwrap_argv(command: str | list[str], workspace: str | Path, *, writable: Ite
     # 但挂回去的工作区与可写目录可能就在 /tmp 下面，里面的照样要盖
     pinned = {real for _, real in unix_sockets}
     hidden = [h for h in ("/run", "/var/run", "/tmp", "/var/tmp") if not os.path.islink(h)]
-    for p in _visible_sockets(host_sockets(), hidden, [ws, *binds]):
+    cwd = os.path.realpath(chdir) if chdir else ws
+    if any(_under(cwd, h) for h in hidden) and not any(_under(cwd, p) for p in (ws, *binds)):
+        argv += ["--ro-bind", cwd, cwd]   # 配置里写的工作目录（MCP 的 cwd）在换掉的目录下
+    for p in _visible_sockets(host_sockets(), hidden, [ws, *binds, cwd]):
         if p not in pinned:
             argv += ["--ro-bind", "/dev/null", p]
     # 显式放行的挂回来：只挂真的套接字；沙箱能写的目录里的不挂
@@ -419,7 +448,7 @@ def bwrap_argv(command: str | list[str], workspace: str | Path, *, writable: Ite
         ports = ",".join(p for p in local_ports if p.isdigit() and int(p) != EGRESS_PORT)
         argv += ["--bind", str(egress_socket), EGRESS_SOCKET]
         program = [python, "-I", "-S", "-c", _RELAY, EGRESS_SOCKET, str(EGRESS_PORT), ports, *program]
-    return [*argv, "--setenv", "TMPDIR", "/tmp", "--chdir", os.path.realpath(chdir) if chdir else ws, *program]
+    return [*argv, "--setenv", "TMPDIR", "/tmp", "--chdir", cwd, *program]
 
 
 def _is_socket(path: str) -> bool:
