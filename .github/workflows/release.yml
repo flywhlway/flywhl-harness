@@ -1,0 +1,147 @@
+# 推送 v* 标签时发布：离线门禁 → 构建 → 干净安装冒烟 → TestPyPI → 人工批准 → PyPI → GitHub Release。
+# 用 Trusted Publishing，仓库里不存令牌。PyPI 和 TestPyPI 上的发布者要填这个文件名和下面的 environment 名字。
+# live 回归要花钱、要密钥，不在这里跑；候选版本的结果写进 evidence，构建作业检查文件存在。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: false     # 发布产物不用缓存构建
+      - name: 标签格式
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]] || { echo "标签 $TAG 不是 v1.2.3 或 v1.2.3rc1 的写法"; exit 1; }
+      - name: 构建
+        run: uv build
+      - name: 包版本要和标签一致
+        run: |
+          test -f "dist/flywhl_harness-${TAG#v}-py3-none-any.whl" || { ls dist; echo "dist 里没有 ${TAG#v} 的 wheel"; exit 1; }
+      - name: 元数据检查
+        run: uvx -q twine@6.2.0 check --strict dist/*
+      - name: 依赖漏洞（有已知漏洞就停）
+        run: |
+          uv export --frozen --no-dev --extra anthropic --no-emit-project --format requirements-txt -o requirements-runtime.txt
+          uvx -q pip-audit@2.10.1 -r requirements-runtime.txt --disable-pip --progress-spinner off
+      - name: 发布门禁记录与发布说明
+        run: |
+          VERSION="${TAG#v}"
+          test -f "docs/quality-audit/evidence/release-gate-$VERSION.md" || { echo "缺 live 回归记录 release-gate-$VERSION.md"; exit 1; }
+          grep -Eq "^## \[$VERSION\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md || { echo "CHANGELOG 里没有带日期的 $VERSION 一节"; exit 1; }
+          awk -v head="## [$VERSION]" 'index($0, "## [") == 1 { p = index($0, head) == 1; next } p' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: 只装 wheel，不碰仓库代码
+        run: |
+          uv venv "$RUNNER_TEMP/fresh"
+          uv pip install --python "$RUNNER_TEMP/fresh/bin/python" dist/*.whl
+      - name: 空目录里跑通演示模型
+        run: '"$RUNNER_TEMP/fresh/bin/python" -I scripts/smoke_install.py'
+
+  testpypi:
+    needs: [tests, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/flywhl-harness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086   # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true     # 重跑作业时已上传的版本不算失败
+
+  pypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:                  # 必需审批人在这个 environment 上：没人批准，这一步一直等着
+      name: pypi
+      url: https://pypi.org/p/flywhl-harness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086   # v1.14.3
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+      - name: 建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          [[ "$TAG" =~ (a|b|rc)[0-9]+$ ]] && flags+=(--prerelease)
+          gh release create "$TAG" dist/* --title "$TAG" --notes-file release-notes.md "${flags[@]}"

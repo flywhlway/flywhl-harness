@@ -9,6 +9,7 @@ on:
     paths-ignore: ["docs/**", "design-system/**", "**.md"]
   pull_request:
   workflow_dispatch:
+  workflow_call:            # 发布流水线复用：标签上再跑一遍全部离线门禁
 
 permissions:
   contents: read
@@ -42,6 +43,10 @@ jobs:
         run: uv run pytest -q
         env:
           FLYWHL_REQUIRE_SANDBOX: "1"     # 沙箱起不来时失败：否则沙箱用例全部跳过，作业还是绿的
+      - name: 审计不变量
+        run: uv run pytest -q docs/quality-audit/tests
+        env:
+          FLYWHL_REQUIRE_SANDBOX: "1"
       - name: 演示：kill -9 后另一个进程接管并完成
         run: uv run python examples/11_kill9_cli_recover.py
 
