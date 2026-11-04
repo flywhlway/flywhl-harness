@@ -538,7 +538,10 @@ async def test_web_logo_matches_docs_site(ws):
 
     root = Path(__file__).resolve().parents[1]
     web = root / "src" / "flywhl_harness" / "web"
-    docs_logo = (root / "docs" / "public" / "favicon.svg").read_text()
+    docs_favicon = root / "docs" / "public" / "favicon.svg"
+    if not docs_favicon.exists():
+        pytest.skip("sdist 不带文档站")
+    docs_logo = docs_favicon.read_text()
     index = (web / "index.html").read_text()
 
     def geometry(svg: str) -> tuple[list[str], list[str]]:
