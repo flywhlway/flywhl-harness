@@ -11,7 +11,7 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 
 - 密钥从项目根目录的 `.env` 读取（只在这里加载；普通的 `pytest` 不运行这些用例，也不会读到本机密钥）；
   缺少某家密钥的用例自动跳过，不算失败。
-- 测试报告末尾打印每个场景的 token、缓存命中与费用。用 deepseek-flash 跑完全部 33 个场景约 3 分钟、30 万 token、0.05 美元左右
+- 测试报告末尾打印每个场景的 token、缓存命中与费用。用 deepseek-flash 跑完全部 33 个场景约 3～5 分钟、28 万 token、0.03 美元左右
   （其中 64% 的输入命中前缀缓存）。
 - 断言只针对 harness 的可观测结果（工具序列、文件内容、Run 状态、事件），提示词要求原样输出时才匹配文字。
   模型偶尔不按要求做时，失败信息里附带完整对话记录（`transcript()`），可以直接判断是 harness 的问题还是模型的问题。
@@ -30,7 +30,7 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 | `MINIMAX_API_KEY` | MiniMax 多步任务 |
 | `OPENROUTER_API_KEY` | OpenRouter 多步任务；经 OpenRouter 调 Claude Haiku（Anthropic 协议） |
 | `DEEPSEEK_API_KEY` + Kimi + `MINIMAX_API_KEY` | 同一会话依次换用三家供应商续聊（共 4 次运行） |
-| `LLM_FALLBACK_MODEL`（及链上每一家的密钥） | 项目 `.env` 配置的降级链 |
+| `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL`（及链上每一家的密钥） | 项目 `.env` 配置的降级链 |
 
 ## 失败分类记录（2026-10-16）
 
@@ -58,6 +58,27 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 回归测试是 `tests/test_policy.py::test_plan_mode_is_a_hard_ceiling_for_side_effects`。
 
 全部修复后完整重跑（f212ce0）：33 passed，34.4 万 token，0.051 美元。
+
+## 失败分类记录（2026-11-04）
+
+系统沙箱默认开启后的回归。在不挂载宿主目录的一次性 Linux 容器里运行，被测的 bash 跑在真实的 bubblewrap 里
+（`FLYWHL_TEST_SANDBOX=off` 关掉测试自己的外层沙箱，`FLYWHL_TEST_REAL_SANDBOX=1` 让被测代码用真沙箱）。
+
+同一份代码完整跑了三次，每次都核对过日志里没有密钥：
+
+| 次序 | 结果 | 失败项 | 分类 |
+|---|---|---|---|
+| 1 | 31 passed，2 failed | `test_configured_fallback_chain_from_env`：运行脚本漏传了 `LLM_PRIMARY_MODEL` | 运行环境，补上后连跑 3 次通过 |
+| | | `test_multi_step_read_task_keeps_reasoning`：模型这一轮没有返回推理内容 | 模型随机性，连跑 3 次通过 |
+| 2 | 31 passed，2 failed | `test_steer_mid_run_is_followed`、`test_pause_and_resume_at_safe_point`：Run 结束了也没等到期望的事件 | **未定位** |
+| 3 | 33 passed | 无 | 278478 token，0.0282 美元，299 秒 |
+
+第 2 次的两条，当时的断言没有写 Run 的状态，所以不知道是模型换了做法（比如用 `bash` 的 `sleep` 而不是 sleep 工具）还是供应商瞬时出错，这两种都只是推测。
+能确认的是：这两条单独连跑 6 次、连同前面的取消用例连跑 8 次都通过，和前一条用例无关，也不是必现的 harness 缺陷。
+`wait_event` 现在会带上 Run 的状态、错误、最近的事件和对话记录，再出现时可以直接判断。
+
+压缩用例在这轮之前有过一次分类。沙箱开和关的对照各跑 3 次，开时 3 败，关时 2 败 1 过，所有工具调用都成功，没有一次被沙箱拦下：
+日志每行几乎一样，模型读完 `log0` 后改用 `wc`、`grep`、`head` 抽查，上下文涨不到阈值。和沙箱无关，所以把窗口从 24000 调到 14000，之后连跑 3 次通过，上面三次完整运行里也都通过。
 
 ## 场景
 
