@@ -1,0 +1,30 @@
+# PR 上构建一遍站点。VitePress 构建时检查死链，问题在合并前暴露，不用等部署失败
+name: docs-check
+
+on:
+  pull_request:
+    paths: ["docs/**", "src/flywhl_harness/__init__.py", ".github/workflows/docs-check.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # lastUpdated 需要完整 git 历史
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci
+      - run: npm run build
+        env:
+          BASE: /${{ github.event.repository.name }}/

@@ -5,7 +5,7 @@ name: deploy-docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", ".github/workflows/deploy-docs.yml"]
+    paths: ["docs/**", "src/flywhl_harness/__init__.py", ".github/workflows/deploy-docs.yml"]   # 页面标注的版本读自 __init__.py
   workflow_dispatch:
 
 permissions:

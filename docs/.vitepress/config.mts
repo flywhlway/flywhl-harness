@@ -1,8 +1,14 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
 // 部署到子路径时设置 BASE，例如 GitHub Pages：BASE=/flywhl-harness/ npm run build
 const base = process.env.BASE || "/";
+
+// 页面标注的版本和包版本同源，发版时不用再改站点
+const version = readFileSync(new URL("../../src/flywhl_harness/__init__.py", import.meta.url), "utf8")
+  .match(/__version__ = "(.+?)"/)![1];
+const changelog = "https://github.com/flywhlway/flywhl-harness/blob/main/CHANGELOG.md";
 
 const sidebar = [
   {
@@ -97,6 +103,75 @@ const manualSidebar = [
   },
 ];
 
+// 英文站路径和中文站一一对应（/en/core/tools ↔ /core/tools），语言切换才能停在同一章。
+// 除快速上手和架构总览外都是摘要，正文链到中文全文；精简手册和其余参考页没有英文版
+const enSidebar = [
+  {
+    text: "Getting started",
+    items: [
+      { text: "01 What is a harness", link: "/en/guide/what-is-harness" },
+      { text: "02 Quick start", link: "/en/guide/quickstart" },
+      { text: "03 Architecture overview", link: "/en/guide/architecture" },
+    ],
+  },
+  {
+    text: "Core mechanisms",
+    items: [
+      { text: "04 The agent loop", link: "/en/core/agent-loop" },
+      { text: "05 Messages and model access", link: "/en/core/messages-and-models" },
+      { text: "06 The tool system (ACI)", link: "/en/core/tools" },
+      { text: "07 Context engineering and compaction", link: "/en/core/context-engineering" },
+      { text: "08 Termination, budgets and loop guards", link: "/en/core/termination-budget" },
+    ],
+  },
+  {
+    text: "Reliability",
+    items: [
+      { text: "09 State and persistence", link: "/en/reliability/state-persistence" },
+      { text: "10 The run state machine", link: "/en/reliability/run-lifecycle" },
+      { text: "11 Checkpoints and crash recovery", link: "/en/reliability/checkpoint-recovery" },
+      { text: "12 Cancellation semantics", link: "/en/reliability/cancellation" },
+      { text: "13 Retries, circuit breaking and fallback", link: "/en/reliability/retry-fallback" },
+      { text: "14 Idempotency and side effects", link: "/en/reliability/idempotency" },
+      { text: "15 Streaming, steering and resumption", link: "/en/reliability/streaming" },
+    ],
+  },
+  {
+    text: "Policy and execution",
+    items: [
+      { text: "16 Hooks", link: "/en/governance/hooks" },
+      { text: "17 Permissions and human approval", link: "/en/governance/permissions-hitl" },
+      { text: "18 Workspace and sandbox", link: "/en/governance/workspace-sandbox" },
+      { text: "19 Security: injection, credentials, supply chain", link: "/en/governance/security" },
+    ],
+  },
+  {
+    text: "Multi-agent and measurement",
+    items: [
+      { text: "20 Subagents and return contracts", link: "/en/multi-agent/subagents" },
+      { text: "21 DAG scheduling and swarms", link: "/en/multi-agent/swarm-dag" },
+      { text: "22 Trajectories, replay and evaluation", link: "/en/multi-agent/trajectory-eval" },
+      { text: "23 Observability and cost", link: "/en/multi-agent/observability-cost" },
+    ],
+  },
+  {
+    text: "Advanced topics",
+    items: [
+      { text: "24 Long-running harnesses", link: "/en/advanced/long-running" },
+      { text: "25 Mapping to durable execution engines", link: "/en/advanced/durable-execution" },
+      { text: "26 Edge-cloud collaboration", link: "/en/advanced/edge-cloud" },
+      { text: "27 Protocols: MCP, A2A and Skills", link: "/en/advanced/protocols" },
+      { text: "28 The removable harness", link: "/en/advanced/evolving-harness" },
+      { text: "29 Compared with pi", link: "/en/advanced/pi-comparison" },
+      { text: "30 Extension guide", link: "/en/advanced/extending" },
+    ],
+  },
+  {
+    text: "Reference",
+    items: [{ text: "Glossary", link: "/en/reference/glossary" }],
+  },
+];
+
 export default withMermaid(
   defineConfig({
     base,
@@ -107,7 +182,40 @@ export default withMermaid(
     // quality-audit/ 是仓库内部的审计记录：链接指向目录、测试脚本与证据文件，按 GitHub 浏览写的，不进站点
     srcExclude: ["quality-audit/**"],
     lastUpdated: true,
+    sitemap: { hostname: "https://flywhlway.github.io/flywhl-harness/" },
     head: [["link", { rel: "icon", href: `${base}favicon.svg` }]],
+    locales: {
+      root: { label: "简体中文", lang: "zh-CN" },
+      en: {
+        label: "English",
+        lang: "en",
+        link: "/en/",
+        title: "flywhl harness",
+        description: "An Agent Harness written by hand: principles, design trade-offs and source walkthroughs",
+        themeConfig: {
+          nav: [
+            { text: "Docs", link: "/en/guide/what-is-harness" },
+            { text: "Quick start", link: "/en/guide/quickstart" },
+            { text: "Glossary", link: "/en/reference/glossary" },
+            { text: `Docs for ${version}`, link: changelog },
+          ],
+          sidebar: { "/en/": enSidebar },
+          outline: { level: [2, 3], label: "On this page" },
+          docFooter: { prev: "Previous", next: "Next" },
+          lastUpdated: { text: "Last updated" },
+          darkModeSwitchLabel: "Theme",
+          sidebarMenuLabel: "Menu",
+          returnToTopLabel: "Back to top",
+          langMenuLabel: "Language",
+          footer: { message: "MIT License", copyright: "flywhl-harness docs" },
+          notFound: {
+            title: "PAGE NOT FOUND",
+            quote: "This page may have no English version yet. The Chinese tutorial is the complete text.",
+            linkText: "Back to the English home page",
+          },
+        },
+      },
+    },
     markdown: { lineNumbers: true, theme: { light: "github-light", dark: "github-dark" } },
     themeConfig: {
       logo: "/favicon.svg",
@@ -117,15 +225,20 @@ export default withMermaid(
         { text: "精简手册", link: "/manual/", activeMatch: "^/manual/" },
         { text: "知识地图", link: "/reference/knowledge-map" },
         { text: "源码地图", link: "/reference/source-map" },
+        { text: `对应 ${version}`, link: changelog },
       ],
       sidebar: { "/manual/": manualSidebar, "/": sidebar },
       outline: { level: [2, 3], label: "本页目录" },
       search: {
         provider: "local",
         options: {
-          translations: {
-            button: { buttonText: "搜索", buttonAriaLabel: "搜索" },
-            modal: { noResultsText: "没有找到结果", resetButtonTitle: "清除", footer: { selectText: "选择", navigateText: "切换", closeText: "关闭" } },
+          locales: {
+            root: {
+              translations: {
+                button: { buttonText: "搜索", buttonAriaLabel: "搜索" },
+                modal: { noResultsText: "没有找到结果", resetButtonTitle: "清除", footer: { selectText: "选择", navigateText: "切换", closeText: "关闭" } },
+              },
+            },
           },
         },
       },

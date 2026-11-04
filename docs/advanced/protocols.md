@@ -44,7 +44,7 @@ flowchart LR
 
 ## 精读 tools/mcp.py
 
-flywhl 的 MCP 客户端不到 190 行，只依赖标准库与 asyncio，实现了 stdio 传输上的 tools 子集。
+flywhl 的 MCP 客户端约 250 行，只依赖标准库与 asyncio，实现了 stdio 传输上的 tools 子集。
 
 ### 握手、环境隔离与请求复用
 
@@ -57,7 +57,7 @@ self.proc = await asyncio.create_subprocess_exec(
 self._reader = asyncio.create_task(self._read_loop())
 init = await self.request("initialize", {
     "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-    "clientInfo": {"name": "flywhl-harness", "version": "0.1.0"},
+    "clientInfo": {"name": "flywhl-harness", "version": __version__},
 })
 self.server_info = init.get("serverInfo", {})
 await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})

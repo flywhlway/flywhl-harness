@@ -156,7 +156,7 @@ def _git(self, *args: str, check: bool = True, errors: str = "strict") -> str:
 
 ```python
 # ToolExecutor._run_one：权限与审批通过之后、执行之前
-effect = tool.effect_for(args)
+effect = tool.effect_in(args, self._root)
 snapshot = None
 if effect != Effect.READ and rc.config.snapshots and rc.workspace.shadow is not None:
     snapshot = await rc.workspace.shadow.snapshot(f"before {tool.name} {call.id}")
