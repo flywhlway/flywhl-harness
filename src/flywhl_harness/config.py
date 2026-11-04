@@ -85,8 +85,11 @@ class PermissionConfig:
     on_ask: str = "wait"                   # wait（等待人审）| allow | deny（无人值守时）
     approval_timeout: float = 600.0        # 审批超时，超时默认拒绝
     strip_secret_env: bool = True          # bash 子进程剥离 *KEY*/*TOKEN*/*SECRET* 等环境变量
-    sandbox: str = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：bash 的系统沙箱，原型，见 tools/sandbox.py
-    sandbox_network: str = "allow"         # allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；要求开启沙箱
+    # auto（探测，用不了时拒绝执行）| off | macos（sandbox-exec）| linux（bubblewrap）：bash、命令 hook、MCP 服务器、验收命令的系统沙箱。
+    # off 只在用户配置、-c 指定的配置或命令行里有效，项目配置写的不算。见 tools/confine.py
+    sandbox: str = "auto"
+    # auto（有沙箱时 allowlist，关掉沙箱时 allow）| allow | deny | allowlist（只经出站代理连 network_allow 里的主机）；后两种要求开启沙箱
+    sandbox_network: str = "auto"
     network_allow: list[str] = field(default_factory=list)   # 出站白名单：pypi.org、*.github.com、registry.local:5000
     unix_sockets: list[str] = field(default_factory=list)    # 沙箱里放行连接的 Unix 套接字（绝对路径），如本机数据库；默认只放行 DNS 与系统日志
     # hook / MCP 服务器经 npx、uvx、docker run 这类命令临时拉取的包必须锁到确切版本（镜像要带 @sha256: 摘要），否则拒绝启动
@@ -117,10 +120,15 @@ class HookConfig:
     # 子进程与 bash、MCP 一样剥离密钥类环境变量。确实要用的：env 写明取值，pass_env 列出从 harness 进程原样传入的变量名
     env: dict[str, str] = field(default_factory=dict)
     pass_env: list[str] = field(default_factory=list)
+    # 这个 hook 单独的沙箱设置，没写的跟随 permissions。sandbox = "off" 只在用户配置里有效，含义与 [mcp_servers.<名字>] 相同
+    sandbox: str | None = None
+    sandbox_network: str | None = None
+    network_allow: list[str] | None = None
 
     def __post_init__(self) -> None:
         _check_env("hooks.env", self.env)
         _check_str_list("hooks.pass_env", self.pass_env)
+        _check_entry_sandbox("hooks", self.__dict__)
 
     @property
     def closed(self) -> bool:
@@ -194,6 +202,7 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
+                data = _keep_sandbox_on(data, project.resolve())
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -289,7 +298,7 @@ _SAFE_KEYS = frozenset({
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任。
 # on_ask = deny 有一个例外：用户配置里写了 auto_approve 规则时，它会让这些规则替人批准，见 split_untrusted
 _SAFE_PERMISSIONS: dict[str, tuple[Any, ...]] = {
-    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("macos", "linux"),
+    "mode": ("default", "plan"), "on_ask": ("wait", "deny"), "strip_secret_env": (True,), "sandbox": ("auto", "macos", "linux"),
     # allowlist 比 allow 严、比 deny 松，不知道用户配置里是哪一个，所以和白名单条目一样要信任
     "sandbox_network": ("deny",), "network_allow": ([],),
     "unix_sockets": ([],),   # 放行的套接字可能连着 docker.sock 这类能绕开沙箱的守护进程
@@ -315,6 +324,31 @@ class TrustRequest:
 def flywhl_home() -> Path:
     """用户级目录：用户配置 config.toml 与信任记录 trusted.json 所在处。``FLYWHL_HOME`` 可改（测试、容器）。"""
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
+
+
+def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    """项目配置关不掉沙箱，信任过也一样：关沙箱的决定属于用户，仓库只能收紧。``permissions.sandbox`` 与 hook、MCP 服务器
+    各自的 ``sandbox = "off"`` 都去掉。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
+    dropped = []
+    out = dict(data)
+    perms = data.get("permissions")
+    if isinstance(perms, dict) and perms.get("sandbox") == "off":
+        out["permissions"] = {k: v for k, v in perms.items() if k != "sandbox"}
+        dropped.append("permissions.sandbox")
+    hooks = data.get("hooks")
+    if isinstance(hooks, list):
+        dropped += [f"hooks[{i}].sandbox" for i, h in enumerate(hooks) if isinstance(h, dict) and h.get("sandbox") == "off"]
+        out["hooks"] = [{k: v for k, v in h.items() if k != "sandbox"} if isinstance(h, dict) and h.get("sandbox") == "off" else h
+                        for h in hooks]
+    servers = data.get("mcp_servers")
+    if isinstance(servers, dict):
+        off = [n for n, s in servers.items() if isinstance(s, dict) and s.get("sandbox") == "off"]
+        dropped += [f"mcp_servers.{n}.sandbox" for n in off]
+        out["mcp_servers"] = {n: {k: v for k, v in s.items() if k != "sandbox"} if n in off else s for n, s in servers.items()}
+    if dropped:
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
+                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
+    return out
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None,
@@ -358,6 +392,8 @@ def _describe(key: str, value: Any, base: Path) -> list[str]:
 
     if key == "hooks" and isinstance(value, list) and value:
         return [f"hooks: {h.get('event', 'pre_tool_use')}（{h.get('matcher', '*')}）执行 {h.get('command')!r}{_describe_env(h)}"
+                + (f"；沙箱网络策略 {h['sandbox_network']!r}" if h.get("sandbox_network") else "")
+                + (f"；出站白名单 {h['network_allow']!r}" if h.get("network_allow") else "")
                 + (describe(h["command"], base, h.get("env")) if isinstance(h.get("command"), str) else "")
                 if isinstance(h, dict) else f"hooks: {h!r}" for h in value]
     if key == "mcp_servers" and isinstance(value, dict) and value:
@@ -390,6 +426,10 @@ def _describe_mcp(name: str, spec: Any, base: Path) -> str:
     if spec.get("cwd"):
         line += f"（目录 {spec['cwd']!r}）"
     line += _describe_env(spec)
+    if spec.get("sandbox_network"):
+        line += f"；沙箱网络策略 {spec['sandbox_network']!r}"
+    if spec.get("network_allow"):
+        line += f"；出站白名单 {spec['network_allow']!r}"
     if spec.get("trust_annotations"):
         line += "；采信服务器自报的只读、幂等、封闭世界注解"
     if spec.get("read_only_tools"):
@@ -463,7 +503,8 @@ def record_trust(req: TrustRequest) -> None:
 # ---------------------------------------------------------------------- 类型校验
 # 放宽权限的设置一律按声明的类型严格校验，写错就报错，不做宽松转换：read_only_tools = "safe_*" 若按字符拆开，
 # 其中的 "*" 会放行全部工具，而信任确认里显示的却是 'safe_*'——确认的内容必须就是生效的内容
-MCP_SERVER_KEYS = ("command", "args", "env", "cwd", "read_only_tools", "trust_annotations")
+MCP_SERVER_KEYS = ("command", "args", "env", "cwd", "read_only_tools", "trust_annotations", "sandbox", "sandbox_network",
+                   "network_allow")
 
 
 def _check_str_list(where: str, value: Any) -> list[str]:
@@ -476,6 +517,18 @@ def _check_env(where: str, value: Any) -> dict[str, str]:
     if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
         raise ValueError(f"{where} 必须是“变量名 = 字符串”的表，实际是 {value!r}")
     return value
+
+
+def _check_entry_sandbox(where: str, spec: dict[str, Any]) -> None:
+    """hook、MCP 服务器单独的沙箱设置。``sandbox`` 只有 off 这一个取值：其余档位跟随全局，两边不一致时说不清谁生效。"""
+    from .tools.egress import parse_rules   # 延迟导入：tools 依赖本模块
+
+    if spec.get("sandbox") not in (None, "off"):
+        raise ValueError(f"{where}.sandbox 只能写 \"off\"，其余档位跟随 permissions.sandbox，实际是 {spec['sandbox']!r}")
+    if spec.get("sandbox_network") not in (None, "allow", "deny", "allowlist"):
+        raise ValueError(f"{where}.sandbox_network 只能是 allow、deny、allowlist，实际是 {spec['sandbox_network']!r}")
+    if spec.get("network_allow") is not None:
+        parse_rules(_check_str_list(f"{where}.network_allow", spec["network_allow"]))
 
 
 def check_mcp_server(name: str, spec: Any) -> dict[str, Any]:
@@ -495,6 +548,7 @@ def check_mcp_server(name: str, spec: Any) -> dict[str, Any]:
     _check_str_list(f"{where}.read_only_tools", spec.get("read_only_tools", []))
     if not isinstance(spec.get("trust_annotations", False), bool):
         raise ValueError(f"{where}.trust_annotations 必须是 true 或 false，实际是 {spec['trust_annotations']!r}")
+    _check_entry_sandbox(where, spec)
     return spec
 
 

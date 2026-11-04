@@ -39,6 +39,8 @@ from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
 from .policy.permissions import auto_approve_rule
 from .runtime.manager import Harness
+from .tools.confine import OFF_HINT, Confinement
+from .tools.mcp import MCPError
 
 C = {"dim": "\033[2m", "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m", "blue": "\033[34m",
      "cyan": "\033[36m", "bold": "\033[1m", "reset": "\033[0m"}
@@ -133,8 +135,10 @@ async def terminal_approval(rec) -> ApprovalDecision:
     print()
     print(_c("bold", f"⚠ 需要审批：{_safe(rec.summary)}") + _c("dim", f"  [风险 {rec.risk}] {_safe(rec.reason)}"))
     print(_c("dim", _safe(json.dumps(rec.args, ensure_ascii=False, indent=2)[:1500])))
-    ans = (await asyncio.to_thread(input, "  [y] 允许  [n] 拒绝  [a] 本会话总是允许 > ")).strip().lower()
-    if ans in ("y", "yes", "a", "是"):
+    once = bool(rec.args.get("outside_sandbox"))     # 沙箱外执行每次都问，没有“总是允许”
+    prompt = "  [y] 允许  [n] 拒绝 > " if once else "  [y] 允许  [n] 拒绝  [a] 本会话总是允许 > "
+    ans = (await asyncio.to_thread(input, prompt)).strip().lower()
+    if ans in ("y", "yes", "是") or (ans == "a" and not once):
         return ApprovalDecision(True, by="terminal-user", remember=ans == "a")
     reason = "" if ans in ("n", "no", "") else ans
     return ApprovalDecision(False, by="terminal-user", reason=reason)
@@ -208,6 +212,14 @@ def _config(args: argparse.Namespace) -> HarnessConfig:
     return cfg
 
 
+def _print_sandbox(h: Harness) -> None:
+    """启动时说清楚实际生效的沙箱：配置里写的是 auto，用户要知道它落到了哪一档；用不了时不能等到第一条命令才发现。"""
+    box = h.confinement
+    print(_c("yellow", box.describe()) if box.problem or box.level == "off" else _c("dim", box.describe()))
+    if box.problem:
+        print(_c("yellow", OFF_HINT))
+
+
 async def _stream_run(h: Harness, session_id: str, prompt: str, as_json: bool, show_thinking: bool) -> str:
     render = TerminalRenderer(show_thinking)
     run = await h.start_run(session_id, prompt)
@@ -266,6 +278,7 @@ async def cmd_chat(args: argparse.Namespace) -> int:
         s = h.create_session("终端会话")
         print(_c("bold", f"flywhl-harness {__version__}") + _c("dim", f"  {h.provider.name}/{h.model} · 模式 "
               f"{cfg.permissions.mode} · 工作区 {h.workspace_root}"))
+        _print_sandbox(h)
         print(_c("dim", "输入任务开始；/help 查看命令；Ctrl-D 退出"))
         while True:
             try:
@@ -322,6 +335,7 @@ async def cmd_serve(args: argparse.Namespace) -> int:
     url = f"http://{host}:{args.port}/" + (f"?token={token}" if token else "")
     print(_c("bold", f"flywhl-harness {__version__}") + f"  {url}  "
           + _c("dim", f"({h.provider.name}/{h.model}，工作区 {h.workspace_root})"))
+    _print_sandbox(h)
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
     await server.serve()
     return 0
@@ -438,6 +452,10 @@ async def cmd_doctor(args: argparse.Namespace) -> int:
 
     cfg = _config(args)
     specs = args.models or None
+    box = Confinement.from_config(cfg.permissions)
+    print(_c("yellow", box.describe()) if box.problem or box.level == "off" else box.describe())
+    if box.problem:
+        print(_c("yellow", OFF_HINT))
     print(_c("dim", "逐个供应商检查：流式文本 → 工具调用往返（每项一两次很小的真实调用）"))
     results = await check_all(cfg, specs, timeout=args.timeout)
     print(format_report(results, color=bool(C["reset"])))
@@ -457,9 +475,10 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
     common.add_argument("--mode", choices=["default", "accept_edits", "plan", "bypass"], help="权限模式")
     common.add_argument("-y", "--yes", action="store_true", help="需要审批的操作自动放行（仅限可信环境）")
-    common.add_argument("--sandbox", choices=["off", "macos", "linux"],
-                        help="bash 的系统沙箱（macos：sandbox-exec；linux：bubblewrap；原型）")
-    common.add_argument("--network", choices=["allow", "deny", "allowlist"], help="沙箱里的网络策略（要求开启沙箱）")
+    common.add_argument("--sandbox", choices=["auto", "off", "macos", "linux"],
+                        help="系统沙箱，默认 auto（探测，用不了时拒绝执行）；macos：sandbox-exec；linux：bubblewrap")
+    common.add_argument("--network", choices=["allow", "deny", "allowlist"],
+                        help="沙箱里的网络策略，默认 allowlist（白名单为空，等于断网）；deny 与 allowlist 要求开启沙箱")
     common.add_argument("--net-allow", action="append", metavar="HOST",
                         help="出站白名单主机，可重复，如 pypi.org、*.github.com、registry.local:5000")
     common.add_argument("--thinking", action="store_true", help="显示模型的思考过程")
@@ -523,6 +542,9 @@ def main(argv: list[str] | None = None) -> None:
         code = asyncio.run(args.fn(args))
     except KeyboardInterrupt:
         code = 130
+    except MCPError as e:   # 起不来多半是沙箱拦的，消息里写了怎么办，不用打调用栈
+        print(_c("red", f"✗ {e}"), file=sys.stderr)
+        code = 1
     sys.exit(code)
 
 

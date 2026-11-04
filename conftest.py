@@ -47,6 +47,20 @@ def pytest_report_header(config: pytest.Config) -> str:
     return f"测试沙箱：{notes.get(mode, mode)}"
 
 
+@pytest.fixture(autouse=True)
+def _no_nested_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """系统沙箱不能嵌套：默认配置的 ``auto`` 在测试里落到 off，测沙箱的用例显式写档位。一次性容器里的回归设
+    ``FLYWHL_TEST_REAL_SANDBOX=1``，按真实默认值运行。"""
+    if os.environ.get("FLYWHL_TEST_REAL_SANDBOX"):
+        return
+    try:
+        from flywhl_harness.tools import confine
+        from flywhl_harness.tools.sandbox import Detected
+    except ImportError:   # 被测代码是旧版本
+        return
+    monkeypatch.setattr(confine, "detect", lambda: Detected("off"))
+
+
 # ---------------------------------------------------------------------- 执行绊线
 def _under_home(word: str) -> bool:
     if not word.startswith("/"):

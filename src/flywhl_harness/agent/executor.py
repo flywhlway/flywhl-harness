@@ -211,6 +211,9 @@ class ToolExecutor:
         if decision == Decision.DENY:
             return done(ToolResult.error(f"权限拒绝：{reason}。请换一种不需要该权限的方式完成，或向用户说明需要什么权限。"), "denied")
         if decision == Decision.ASK:
+            if perm.human_only and getattr(rc.approvals, "on_ask", "wait") != "wait":
+                return done(ToolResult.error(f"权限拒绝：{reason}。这类操作必须由人当场确认，无人值守时一律拒绝。"
+                                             "请换一种在沙箱里能完成的方式，或向用户说明需要什么权限。"), "denied")
             preview = tool.preview(args, ctx)
             grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
             fatigue = getattr(rc.approvals, "fatigue", None)
@@ -222,7 +225,8 @@ class ToolExecutor:
             dec = await rc.approvals.request(
                 run_id=rc.run_id, session_id=rc.session_id, call_id=call.id, tool=tool.name, args=args,
                 summary=tool.describe_call(args), risk=perm.risk, reason=reason, cancel=rc.cancel,
-                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview, grant, fatigue),
+                on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview,
+                                                                 None if perm.human_only else grant, fatigue),
                 auto_rule=str(auto_rule) if auto_rule else None, auto_why=auto_why,
             )
             await self._set_status("running", "审批已处理")
@@ -243,6 +247,8 @@ class ToolExecutor:
                 recheck = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 防 TOCTOU
                 if recheck.decision == Decision.DENY:
                     return done(ToolResult.error(f"修改后的参数被权限策略拒绝：{recheck.reason}"), "denied")
+                if recheck.human_only and not perm.human_only:   # 审批卡上没写的事不算批准过
+                    return done(ToolResult.error(f"修改后的参数要过人工门，需要重新申请：{recheck.reason}"), "denied")
                 if rc.hooks.has(HookEvent.PRE_TOOL_USE):
                     # 审批人改过的参数同样要过 PreToolUse 守卫：hook 表达的是“不变量”，人工批准不能绕过它
                     again = await rc.hooks.run(HookEvent.PRE_TOOL_USE, self._hook_input(HookEvent.PRE_TOOL_USE, call.name, args))
@@ -258,7 +264,9 @@ class ToolExecutor:
                         final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
                         if final.decision == Decision.DENY:
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
-            if dec.remember:
+                        if final.human_only and not perm.human_only:
+                            return done(ToolResult.error(f"PreToolUse hook 改写后的参数要过人工门，需要重新申请：{final.reason}"), "denied")
+            if dec.remember and not perm.human_only:   # 这一次的确认只管这一次
                 g = grant_for(tool, args)
                 rc.grants.append(g)
                 self._persist_grants()

@@ -14,6 +14,10 @@
 无人值守（``on_ask="deny"``）时，判定为 ask 的调用默认拒绝；``auto_approve`` 规则命中的改为自动批准，
 见 ``PermissionPolicy.auto_approval``。
 
+人工门：工具的 ``human_gate()`` 有说明时（目前只有 bash 的 ``outside_sandbox``），调用不论走到哪一步，只要没被拒绝，最后都变成
+ask，bypass 模式也一样，并标上 ``human_only``：规则、会话授权、``auto_approve`` 都放行不了，无人值守时执行层直接拒绝。
+系统沙箱是不依赖判定的最后一道防线，能拆掉它的决定只能由人当场做。
+
 bash 与凭证位置
 ---------------
 文件工具对凭证位置（``policy/sensitive.py`` 的 ``CREDENTIAL_GLOBS``）在任何模式下都拒绝；bash 早期只把命中升为 dangerous，
@@ -35,7 +39,7 @@ default 模式下要确认，bypass 模式下 ``cat ~/.kube/config`` 照读。�
 
 字符串匹配挡得住顺手的读取和引号拼接、花括号展开这类简单变形，挡不住刻意混淆（运行时才拼出来的
 ``D=$(echo $HOME/.ku); cat ${D}be/config``、glob、编码）。后者要靠系统沙箱：
-``permissions.sandbox = "macos"`` / ``"linux"`` 让 bash 跑在 sandbox-exec / bubblewrap 里，由内核按真实路径拒绝。
+默认开启的 ``permissions.sandbox`` 让 bash 跑在 sandbox-exec / bubblewrap 里，由内核按真实路径拒绝。
 
 四种模式
 --------
@@ -150,6 +154,7 @@ class PermissionResult:
     rule: str | None = None
     analysis: list[str] | None = None
     source: str | None = None       # 命中规则的来源（managed、session……），没命中规则时为 None
+    human_only: bool = False        # 过了人工门：只有人当场确认才能执行
 
 
 def auto_approve_rule(text: str) -> Rule:
@@ -249,7 +254,13 @@ class PermissionPolicy:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:
             reason = f"{reason}（{analysis.reasons[0]}）"  # 让审批人一眼看到“为什么要问”
-        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source)
+        gate = tool.human_gate(args)
+        if gate and self.mode == Mode.PLAN and decision != Decision.DENY:
+            decision, reason = Decision.DENY, f"plan 模式只允许只读操作，不能离开沙箱：{gate}"
+        human_only = bool(gate) and decision != Decision.DENY
+        if human_only:   # 模式、规则、会话授权的放行到这里都作废，见模块注释“人工门”
+            decision, reason, risk = Decision.ASK, gate or "", "critical"
+        return PermissionResult(decision, reason, risk, effect, hit, analysis.reasons if analysis else None, source, human_only)
 
     def _allowed_by(self, tool: Tool, targets: list[str], rules: list[Rule]) -> Rule | None:
         """放行这次调用的第一条规则。bash 复合命令每一段都要被其中某条覆盖，防止 "git status && rm -rf x" 搭便车；

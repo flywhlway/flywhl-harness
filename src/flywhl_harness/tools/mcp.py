@@ -14,6 +14,8 @@ MCP 是“harness ↔ 工具服务器”的协议（工具在哪、怎么调）�
   ``read_only_tools`` 点名按只读处理的工具；``trust_annotations = true`` 采信该服务器的 ``readOnlyHint``（只读）、
   ``idempotentHint``（“结果未知”时允许用同一幂等键重试）与 ``openWorldHint = false``（输出不算污点）；
 - **环境隔离**：服务器进程拿不到 harness 进程里的密钥类环境变量，需要的凭证在配置的 ``env`` 里显式给出；
+- **系统沙箱**：服务器和 bash 一样跑在沙箱里，读不到凭证文件，有自己的 /tmp 与可写目录（``tools/confine.py``）。网络默认跟随全局，
+  ``sandbox_network``、``network_allow`` 可以单独设；``sandbox = "off"`` 只在用户配置里有效；
 - **超时即未知**：``tools/call`` 不设客户端超时，由执行器统一计时；超时或取消时向服务器发送
   ``notifications/cancelled``，非只读工具的超时按“结果未知”上报；
 - **供应链**：MCP 服务器就是在你机器上运行的代码，接入前要审查来源、锁定版本，并只授予必要的权限。
@@ -29,6 +31,7 @@ from typing import Any
 
 from ..config import check_mcp_server
 from .base import Effect, Tool, ToolContext, ToolResult
+from .confine import Confinement, SandboxUnavailable
 from .shell import _clean_env
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -42,8 +45,13 @@ class MCPError(Exception):
 
 class MCPClient:
     def __init__(self, name: str, command: str, args: list[str] | None = None, env: dict[str, str] | None = None,
-                 cwd: str | None = None, timeout: float = 30.0):
+                 cwd: str | None = None, timeout: float = 30.0, *, confinement: Confinement | None = None,
+                 workspace: str | None = None):
         self.name = name
+        self.confinement = confinement or Confinement()
+        self.workspace = workspace or cwd or "."
+        self._launch: Any = None        # enter() 的上下文：出站代理活到服务器退出
+        self._proxy: Any = None
         self.command = command
         self.args = args or []
         self.env = env or {}
@@ -56,18 +64,41 @@ class MCPClient:
         self.server_info: dict[str, Any] = {}
 
     async def start(self) -> "MCPClient":
-        self.proc = await asyncio.create_subprocess_exec(
-            self.command, *self.args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env={**_clean_env(True), **self.env}, cwd=self.cwd,
-        )
-        self._reader = asyncio.create_task(self._read_loop())
-        init = await self.request("initialize", {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-            "clientInfo": {"name": "flywhl-harness", "version": "0.1.0"},
-        })
+        launch = self.confinement.enter([self.command, *self.args], self.workspace, {**_clean_env(True), **self.env},
+                                        chdir=self.cwd)
+        try:
+            run = await launch.__aenter__()
+        except SandboxUnavailable as e:
+            raise MCPError(f"MCP 服务器 {self.name} 没有启动：{e}") from None
+        self._launch, self._proxy = launch, run.proxy
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, env=run.env, cwd=self.cwd,
+            )
+            self._reader = asyncio.create_task(self._read_loop())
+            init = await self.request("initialize", {
+                "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                "clientInfo": {"name": "flywhl-harness", "version": "0.1.0"},
+            })
+        except (MCPError, OSError, asyncio.TimeoutError) as e:   # OSError：命令不存在，或者服务器一启动就退出、写不进 stdin
+            await self.close()
+            raise MCPError(f"MCP 服务器 {self.name} 启动失败：{e or type(e).__name__}{self._start_hint()}") from e
         self.server_info = init.get("serverInfo", {})
         await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return self
+
+    def _start_hint(self) -> str:
+        """启动失败多半是沙箱拦的：npx、uvx 第一次运行要下载包，默认的空白名单连不出去。"""
+        box = self.confinement
+        if box.level == "off":
+            return ""
+        denied = sorted(set(self._proxy.denied)) if self._proxy else []
+        hint = f"。它在系统沙箱里运行（网络策略 {box.network}）"
+        if denied:
+            hosts = "、".join(denied)
+            return f"{hint}，出站白名单拦下了 {hosts}：把主机写进 [mcp_servers.{self.name}] 的 network_allow"
+        return f'{hint}，确实需要沙箱外的文件或凭证时，在用户配置的 [mcp_servers.{self.name}] 里写 sandbox = "off"'
 
     async def _send(self, msg: dict[str, Any]) -> None:
         assert self.proc is not None and self.proc.stdin is not None
@@ -143,6 +174,9 @@ class MCPClient:
                 self.proc.kill()
         if self._reader:
             self._reader.cancel()
+        if self._launch is not None:
+            launch, self._launch = self._launch, None
+            await launch.__aexit__(None, None, None)
 
 
 class MCPTool(Tool):
@@ -177,7 +211,8 @@ class MCPTool(Tool):
                           details={"mcp_server": self.client.name}, tainted=self.untrusted_output)
 
 
-async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = None) -> tuple[list[MCPClient], list[MCPTool]]:
+async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = None,
+                         confinement: Confinement | None = None) -> tuple[list[MCPClient], list[MCPTool]]:
     """按配置启动 MCP 服务器并列出工具。配置示例（flywhl.toml）::
 
         [mcp_servers.echo]
@@ -189,8 +224,14 @@ async def load_mcp_tools(servers: dict[str, dict[str, Any]], cwd: str | None = N
     clients, tools = [], []
     for name, conf in servers.items():
         check_mcp_server(name, conf)   # 代码里直接构造的配置不经过 HarnessConfig.load，这里再校验一次
-        c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd)
-        await c.start()
+        c = MCPClient(name, conf["command"], conf.get("args"), conf.get("env"), conf.get("cwd") or cwd, workspace=cwd,
+                      confinement=confinement.scoped("mcp", name, conf) if confinement else None)
+        try:
+            await c.start()
+        except MCPError:   # 已经起来的服务器不能留着：它们的出站代理也跟着
+            for started in clients:
+                await started.close()
+            raise
         clients.append(c)
         trust = conf.get("trust_annotations", False)
         ro = conf.get("read_only_tools", [])

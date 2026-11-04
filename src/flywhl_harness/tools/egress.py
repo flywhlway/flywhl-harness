@@ -11,6 +11,8 @@ Seatbelt 的网络过滤只认 ``localhost`` 或 ``*`` 加端口，写不了主�
    只有显式的本机规则（``localhost:5432``）才放行，私有地址不接受通配规则；连接用的就是核过的 IP，中间不再解析（防 DNS 重绑定）。
 
 每条命令一个代理实例，监听 127.0.0.1 的临时端口，命令结束就关掉：被拒的主机准确归到这条命令上，命令留在后台的进程也随之断网。
+Linux 档的命令在自己的网络命名空间里，连不到宿主的回环地址，代理改听 Unix 套接字（``unix_path``），挂进沙箱后由转发器接上，
+判定逻辑完全一样，见 ``tools/sandbox.py``。
 
 白名单写法（``permissions.network_allow``）：
 
@@ -136,11 +138,12 @@ def _target(method: str, target: str) -> tuple[str, int, str]:
 
 
 class EgressProxy:
-    """每条命令一个：只监听 127.0.0.1 的临时端口，``async with`` 退出时关闭并断开所有连接。"""
+    """每条命令一个：只监听 127.0.0.1 的临时端口或 ``unix_path``，``async with`` 退出时关闭并断开所有连接。"""
 
-    def __init__(self, rules: list[AllowRule], *, connect_timeout: float = 30.0,
+    def __init__(self, rules: list[AllowRule], *, connect_timeout: float = 30.0, unix_path: str | None = None,
                  resolve: Callable[[str, int], Awaitable[list[IPAddress]]] = _getaddrinfo):
         self.rules = rules
+        self.unix_path = unix_path
         self.connect_timeout = connect_timeout
         self.resolve = resolve
         self.denied: list[str] = []
@@ -149,8 +152,11 @@ class EgressProxy:
         self._conns: set[asyncio.Task[Any]] = set()
 
     async def __aenter__(self) -> "EgressProxy":
-        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
-        self.port = self._server.sockets[0].getsockname()[1]
+        if self.unix_path:
+            self._server = await asyncio.start_unix_server(self._serve, self.unix_path)
+        else:
+            self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+            self.port = self._server.sockets[0].getsockname()[1]
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -162,9 +168,10 @@ class EgressProxy:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(self._server.wait_closed(), 2)
 
-    def env(self) -> dict[str, str]:
-        """命令的代理环境变量。NO_PROXY 清空：不走代理的连接反正会被内核拒绝，不如让工具都走代理、拿到明确的 403。"""
-        url = f"http://127.0.0.1:{self.port}"
+    def env(self, port: int | None = None) -> dict[str, str]:
+        """命令的代理环境变量。``port`` 是命令连代理用的本机端口，默认是代理自己的（Linux 档是沙箱里转发器的）。
+        NO_PROXY 清空：不走代理的连接反正会被内核拒绝，不如让工具都走代理、拿到明确的 403。"""
+        url = f"http://127.0.0.1:{port or self.port}"
         return {**dict.fromkeys(_PROXY_ENV, url), "NO_PROXY": "", "no_proxy": "", "NODE_USE_ENV_PROXY": "1"}
 
     def allowed(self, host: str, port: int) -> bool:
