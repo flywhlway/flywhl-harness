@@ -116,6 +116,7 @@ async def test_settings_show_mcp_annotation_policy(ws):
         async with _client(create_app(h, auto_recover=False)) as c:
             m = (await c.get("/api/settings")).json()["mcp"][0]
     assert str(Path(ECHO_SERVER[1]).resolve()) in m.pop("files")   # 解释器在系统目录里时不列
+    assert m.pop("sandbox")["level"] == "off"
     assert m == {"name": "demo", "transport": "stdio", "tools": 2, "trust_annotations": False, "read_only": [],
                  "ignored_hints": 1, "unpinned": []}
 
@@ -414,8 +415,8 @@ def needs_bwrap(fn):
 
 @pytest.mark.parametrize("network", ["allow", "allowlist"])
 async def test_linux_sandbox_fails_closed(ws, network):
-    """没有 bubblewrap（macOS、精简容器），或要求了 Linux 上还没实现的出站白名单：拒绝执行，不退回沙箱外。"""
-    if network == "allow" and _bwrap_usable():
+    """没有 bubblewrap（macOS、精简容器）：拒绝执行，不退回沙箱外。"""
+    if _bwrap_usable():
         pytest.skip("本机有可用的 bubblewrap")
     h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "touch ran.txt"}}]}, "好"],
                      permissions__mode="bypass", permissions__sandbox="linux", permissions__sandbox_network=network)

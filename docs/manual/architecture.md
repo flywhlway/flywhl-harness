@@ -8,7 +8,7 @@
 | 运行时 | `runtime/manager.py`、`state.py`、`store.py`、`session.py`、`workspace.py` | `Harness` 创建并驱动 Run；状态机迁移；SQLite 持久化；会话分支；工作区与快照 |
 | Agent | `agent/loop.py`、`context.py`、`compaction.py`、`executor.py`、`budget.py`、`inbox.py`、`subagent.py` | 回合循环、上下文整形与压缩、工具执行、预算与循环守卫、插话收件箱、子代理 |
 | 模型接入 | `llm/resilient.py`、`openai_compat.py`、`anthropic.py`、`profiles.py`、`mock.py` | 统一消息模型与各家协议适配；重试、熔断、降级；演示模型 |
-| 工具 | `tools/fs.py`、`shell.py`、`extra.py`、`mcp.py`、`sandbox.py` | 内置工具、MCP 客户端、bash 沙箱 |
+| 工具 | `tools/fs.py`、`shell.py`、`extra.py`、`mcp.py`、`sandbox.py`、`confine.py`、`egress.py` | 内置工具、MCP 客户端、系统沙箱与出站代理 |
 | 策略 | `policy/permissions.py`、`bash_analyzer.py`、`hooks.py`、`approvals.py`、`sensitive.py` | 权限判定、命令风险分析、Hooks、审批、凭证位置识别 |
 | 观测 | `observe/trace.py`、`replay.py`、`evals.py` | 轨迹与 OTel span、确定性回放、评测统计 |
 

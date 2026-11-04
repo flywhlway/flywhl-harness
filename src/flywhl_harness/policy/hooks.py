@@ -211,8 +211,9 @@ class CommandHook:
     """
 
     def __init__(self, command: str, cwd: str | None = None, *, env: dict[str, str] | None = None,
-                 pass_env: list[str] | None = None):
+                 pass_env: list[str] | None = None, confinement: Any = None):
         self.command = command
+        self.confinement = confinement   # tools/confine.py 的 Confinement；None = 不进沙箱（直接构造时）
         self.cwd = cwd
         self.env = dict(env or {})
         self.pass_env = list(pass_env or [])
@@ -224,7 +225,7 @@ class CommandHook:
 
     def changed_files(self, base: str) -> list[str]:
         """启动后（或在这个目录第一次执行后）引用的文件有哪些变了：内容改了、符号链接换了指向、新出现或不见了。
-        Agent 能改工作区里的文件，改过的 hook 脚本会在系统沙箱外、以 harness 的身份运行。"""
+        Agent 能改工作区里的文件，改过的 hook 脚本会以 harness 的身份运行，它的决定还决定着工具调用放不放行。"""
         from .supply_chain import pin_files, referenced_files
 
         now = pin_files(referenced_files(self.command, base, self.env))
@@ -243,20 +244,23 @@ class CommandHook:
         changed = self.changed_files(base)
         if changed:   # 交给 HookBus：守卫类 hook 按阻断处理，其余跳过并告警——改过的脚本一次也不执行
             raise RuntimeError(f"引用的文件在启动后被改过：{'、'.join(changed)}，拒绝执行；确认改动无误后重启 harness")
-        proc = await asyncio.create_subprocess_shell(
-            self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=base,
-            env=self.child_env(inp.event), start_new_session=True,
-        )
-        try:
-            out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
-        except BaseException:
-            # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), 2)
-            raise
+        from ..tools.confine import Confinement   # 延迟导入：tools 依赖 policy
+
+        box = self.confinement or Confinement.resolve()
+        async with box.enter(["/bin/sh", "-c", self.command], base, self.child_env(inp.event)) as run:
+            proc = await asyncio.create_subprocess_exec(
+                *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=base, env=run.env, start_new_session=True,
+            )
+            try:
+                out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
+            except BaseException:
+                # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), 2)
+                raise
         stdout, stderr = out.decode("utf-8", "replace").strip(), err.decode("utf-8", "replace").strip()
         if proc.returncode == 2:
             return HookOutput(decision="deny" if inp.event == HookEvent.PRE_TOOL_USE else "block",

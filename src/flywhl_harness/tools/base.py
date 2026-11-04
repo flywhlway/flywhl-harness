@@ -86,6 +86,8 @@ class ToolContext:
     recovering: bool = False
     # 距离 Run 截止时间的剩余秒数（None 表示没有墙钟限额）：自管超时的工具据此收紧自己的超时
     time_left: float | None = None
+    # 这次调用过了人工门（``Tool.human_gate``）。只有执行器在人批准之后才设：默认 False，走不到审批的路径（回放、直接调用）一律不算
+    human_approved: bool = False
 
 
 @functools.cache
@@ -151,6 +153,11 @@ class Tool:
     def untrusted_for(self, args: dict[str, Any]) -> bool:
         """这次调用的输出是否来自不可信来源（污点）。默认取静态 untrusted_output；bash 下载网页时返回 True。"""
         return self.untrusted_output
+
+    def human_gate(self, args: dict[str, Any]) -> str | None:
+        """这次调用是否必须由人当场确认，返回给审批人看的说明。权限层在所有判定之后再看它：模式、规则、会话授权、
+        ``auto_approve`` 都越不过这道门，无人值守时直接拒绝。"""
+        return None
 
     def preview(self, args: dict[str, Any], ctx: "ToolContext") -> str | None:
         """审批前的变更预览（例如 diff）：让审批人看到“会改成什么样”，而不只是一行摘要。"""

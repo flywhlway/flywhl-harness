@@ -26,11 +26,14 @@ pytestmark = pytest.mark.live
 
 
 async def wait_event(h, run_id, pred, timeout=120.0):
+    seen = []
     async with asyncio.timeout(timeout):
         async for ev in h.subscribe(run_id):
             if pred(ev):
                 return ev
-    raise AssertionError("没有等到期望的事件")
+            seen.append(ev.type)
+    rec = await h.wait(run_id)
+    raise AssertionError(f"Run 结束了也没等到期望的事件：{rec.status}，{rec.error!r}，事件 {seen[-12:]}\n{transcript(h, rec.session_id)}")
 
 
 async def test_cancel_mid_stream_then_continue_session(ws):

@@ -46,6 +46,7 @@ from ..policy.permissions import PermissionPolicy, Rule
 from ..policy.supply_chain import unpinned_in
 from ..prompts import SUBAGENT_PROMPT, build_system_prompt
 from ..tools import default_tools
+from ..tools.confine import Confinement
 from ..tools.registry import ToolRegistry
 from ..types import unpaired_tool_calls
 from .session import SessionLog
@@ -184,9 +185,12 @@ class Harness:
         if loose and self.config.permissions.require_pinned:
             raise ValueError("permissions.require_pinned 已开启，以下 hook / MCP 服务器临时拉取的包没有锁定确切版本"
                              f"（npm 包写成 名字@1.2.3，Python 包写成 名字==1.2.3，镜像带 @sha256: 摘要），拒绝启动：{'；'.join(loose)}")
+        self.confinement = Confinement.from_config(self.config.permissions, [str(self.data_dir)])
         self.hooks = hooks or HookBus()
-        for hc in self.config.hooks:
-            cmd = CommandHook(hc.command, str(self.workspace_root), env=hc.env, pass_env=hc.pass_env)
+        for i, hc in enumerate(self.config.hooks):
+            box = self.confinement.scoped("hook", f"{i}-{hc.event}", {"sandbox": hc.sandbox, "sandbox_network": hc.sandbox_network,
+                                                                       "network_allow": hc.network_allow})
+            cmd = CommandHook(hc.command, str(self.workspace_root), env=hc.env, pass_env=hc.pass_env, confinement=box)
             self.hooks.add(Hook(hc.event, cmd, name=f"cmd:{hc.command[:30]}",
                                 matcher=hc.matcher, timeout=hc.timeout, fail_closed=hc.closed, source="project"))
         self.approvals = ApprovalBroker(self.store, on_ask=self.config.permissions.on_ask,
@@ -206,7 +210,8 @@ class Harness:
         if self.config.mcp_servers:
             from ..tools.mcp import load_mcp_tools
 
-            clients, mcp_tools = await load_mcp_tools(self.config.mcp_servers, cwd=str(self.workspace_root))
+            clients, mcp_tools = await load_mcp_tools(self.config.mcp_servers, cwd=str(self.workspace_root),
+                                                      confinement=self.confinement)
             self._mcp.extend(clients)
             for t in mcp_tools:
                 self.tools.register(t, replace=True)

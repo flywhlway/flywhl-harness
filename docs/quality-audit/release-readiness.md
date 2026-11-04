@@ -81,3 +81,26 @@ Top10 修复后按上面四个条件逐条复核，记录见 [fix-report.md](fix
 - 无人值守时用 `on_ask = "deny"` 加 `auto_approve` 规则，只放行写明的操作。
 
 bypass / `--yes` 仍不适合跑不可信任务。
+
+## 系统沙箱默认开启后复核（2026-11-04）
+
+| 残余风险 | 2026-10-31 | 2026-11-04 |
+|---|---|---|
+| 沙箱（QA-008） | 有两档，仍默认关闭；Linux 档没有出站白名单；命令 hook、MCP 服务器在沙箱外 | 已关闭。默认开启，用不了时拒绝执行；网络默认是空白名单，两档都有出站白名单；bash、命令 hook、MCP 服务器、`verify_command` 共用一层 |
+| 沙箱外的通道 | 没有专门查过 | 独立评审查出影子 git、回放两条，修复前在一次性容器里实证，已修复，见 [issues.md](issues.md) 文末 |
+| live 模型行为 | 没跑 | 33 个场景在真实 bubblewrap 里跑过。三次完整运行：两次各 2 条失败，一次全过；其中一次的两条没有定位到原因，见 [tests/live/README.md](../../tests/live/README.md) |
+
+测试（提交 `dd05852`）：
+- macOS，Python 3.12：离线 724 passed；系统沙箱用例 26 passed，7 skipped；
+- 一次性 Linux 容器（Python 3.12，bubblewrap）：离线 720 passed、4 skipped；系统沙箱用例 21 passed，12 个 macOS 专用的跳过；
+- 审计不变量套件：macOS 13 passed，Linux 12 passed、1 skipped；
+- 干净安装验收：装 wheel、不写配置，两个平台都是 23/23，含真实公网主机的放行与拦截；
+- 开销：每条命令多十几到二十几毫秒，表在 [18 章](../governance/workspace-sandbox.md#开销)。
+
+证据：
+- [验收 macOS](evidence/sandbox-acceptance-2026-11-04-macos.json)、[验收 Linux](evidence/sandbox-acceptance-2026-11-04-linux.json)；
+- [开销 macOS](evidence/sandbox-overhead-2026-11-04-macos.json)、[开销 Linux](evidence/sandbox-overhead-2026-11-04-linux.json)；
+- [测试结果](evidence/sandbox-default-pytest-2026-11-04.txt)、[修复前的失败输出](evidence/sandbox-default-before-fix-2026-11-04.txt)、[live 结果](evidence/live-2026-11-04.txt)。
+
+判定维持 **有条件就绪**：限于本机单用户。这一轮解决的是“默认姿态不安全”，生产放行还要看其余台账。
+系统沙箱和宿主共用内核，写进工作区、之后在沙箱外执行的东西也管不到，边界见 [18 章“这一层不管的事”](../governance/workspace-sandbox.md#这一层不管的事)。

@@ -16,7 +16,7 @@
 | 污点 | 当前上下文是否可能已被注入 | `RunContext.tainted` | 人审 |
 | hooks | 团队自定义的额外约束 | [16 Hooks](/governance/hooks)（只能收紧） | 沙箱 |
 | 人审 | 人是否认可这个具体动作 | `ApprovalBroker` | 沙箱、快照回滚 |
-| 沙箱 | 即使以上全部失效，损失能有多大 | [18 Workspace 与沙箱](/governance/workspace-sandbox) | 审计与恢复 |
+| 沙箱 | 即使以上全部失效，损失能有多大（要离开沙箱是一道单独的人工门，规则和模式都放行不了，见 [18 章](/governance/workspace-sandbox#离开沙箱)） | [18 Workspace 与沙箱](/governance/workspace-sandbox) | 审计与恢复 |
 | 审计 | 事后能否还原发生了什么 | 事件流、`approvals` 表、轨迹 | — |
 
 ## 判定流程

@@ -1,0 +1,22 @@
+# 2026-11-04 系统沙箱默认开启后的离线测试。pytest 经 scripts/safe_pytest.py 分两段运行
+
+## macOS，Python 3.12
+........................................................................ [ 89%]
+........................................................................ [ 99%]
+....                                                                     [100%]
+724 passed, 66 deselected in 24.96s
+== 第二段：os_sandbox 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）
+......ssssss...s.................                                        [100%]
+26 passed, 7 skipped, 757 deselected in 2.24s
+macos exit=0
+
+## 一次性 Linux 容器，FLYWHL_REQUIRE_SANDBOX=1
+== 第一段：bwrap 外层沙箱，只能写 /tmp/flywhl-test-q99_l3ds
+720 passed, 4 skipped, 66 deselected in 22.83s
+== 第二段：os_sandbox 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）
+21 passed, 12 skipped, 757 deselected in 2.37s
+linux-exit=0
+== 第一段：bwrap 外层沙箱，只能写 /tmp/flywhl-test-71547in4
+12 passed, 1 skipped, 1 warning in 1.24s
+== 第二段：os_sandbox 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）
+audit-exit=0

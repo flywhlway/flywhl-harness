@@ -13,6 +13,12 @@
 
 见 [security-round2.md](security-round2.md)。
 
+第三轮（2026-11-04）：QA-008 关闭。
+- 系统沙箱默认开启，用不了时拒绝执行，不退回沙箱外；
+- 网络默认是空白名单，Linux 档也有了出站白名单；
+- 命令 hook、MCP 服务器、`verify_command` 和 bash 共用一层；
+- 独立评审又查出两条沙箱外的通道（影子 git、回放），修复前都在一次性容器里实证过，见文末“第三轮新发现”。
+
 ## 索引
 
 | ID | 级别 | 模块 | 一句话 |
@@ -24,7 +30,7 @@
 | QA-005 | P1 | bash 分析、`grant_for` | 合并短选项和 `find -delete` 不是灾难性命令；会话授权过宽 |
 | QA-006 | P1 | `llm/profiles.py` | `model = "mock"` 在有密钥时发给真实供应商 |
 | QA-007 | P2 | `config.HookConfig` | 命令 hook 超时默认失败即放行 |
-| QA-008 | P2 | `tools/sandbox.py` | 沙箱默认关闭，开启后也不限制网络和钥匙串 |
+| QA-008 | P2 | `tools/sandbox.py` | 沙箱默认关闭，开启后也不限制网络和钥匙串（已关闭，2026-11-04） |
 | QA-009 | P2 | `runtime/store.py` | 会话库文件权限 0644 |
 | QA-010 | P2 | `web/` 布局 | 390px 宽度下对话被检查器挤出视口 |
 | QA-011 | P2 | 凭证清单 | bypass 下放行 `cat /etc/master.passwd` 和钥匙串查询 |
@@ -148,6 +154,9 @@
 
 ## QA-008 沙箱默认关闭，且原型不封网络
 
+> **已关闭（2026-11-04）。** 回归见 `tests/test_sandbox_default.py`。原条目要求的“`ps eww -p $PPID` 看不到父进程密钥”固化成了 `test_ps_cannot_read_the_harness_environment`：
+> 沙箱外读得到，macOS 沙箱里 `ps` 被拒绝，Linux 沙箱里看不到别的进程。下文保留审计时的原始结论。
+
 - **级别：** P2。代码注释已声明，默认配置没有打开。
 - **描述：** `PermissionConfig.sandbox` 默认 `off`。`macos` 档从 `(allow default)` 出发，拒绝凭证路径和大部分工作区外写入，不限制网络、进程和 Mach 服务。命令 hook 与 MCP 子进程不进沙箱。
 - **影响：** QA-001 的网络请求、QA-003 的 `ps`、QA-011 的钥匙串查询，即使用户打开了 macos 档也不在 Seatbelt 的拒绝范围内。文件类破坏会好一些。
@@ -219,3 +228,25 @@
 | 覆盖率数字 | 未安装 coverage |
 | 依赖 CVE | 未跑漏洞库 |
 | 容量与长时间 SSE | 只有 30 次空载 `GET /api/info` |
+
+## 第三轮新发现（2026-11-04）
+
+默认开启沙箱之后请了一次独立评审，下面都是当轮修复的。高危两条修复前在一次性容器里跑过回归用例，确认载荷真的执行了，
+输出见 [evidence/sandbox-default-before-fix-2026-11-04.txt](evidence/sandbox-default-before-fix-2026-11-04.txt)。
+
+| 级别 | 问题 | 修复 |
+|---|---|---|
+| 高 | 影子 git 是第五条沙箱外通道：沙箱里写一个带 `core.fsmonitor` 的嵌套仓库，下一次快照时 harness 替它执行 | 索引里不留 gitlink；不带密钥，不读全局配置，关掉 fsmonitor 与 hook |
+| 高 | 回放绕过人工门：回放是 bypass 模式，没有录制结果的 `outside_sandbox` 调用直接在沙箱外执行 | 工具只认执行器在人批准后给的标记 |
+| 中 | `.git/hooks`、`.git/config` 可写；自定义 `data_dir` 不受保护 | 只读，`.git` 不能整个替换，数据目录传进沙箱配置 |
+| 中 | 人工门的审批文案盖掉了命令分析给出的原因 | 两个原因都写 |
+| 中 | Linux 上 1024 以下的端口规则让所有命令起不来 | 这个端口不转发，规则照样经 HTTP 代理走 |
+| 中 | `verify_command` 每轮多留一个私有 `/tmp`，取消后进程留在后台 | 复用 harness 那一份，取消时杀进程组 |
+| 中 | MCP 的 `cwd` 在 `/tmp` 下时 Linux 上进不去；工作区过大的报错建议改用 macOS 档；遍历工作区阻塞事件循环 | 挂回工作目录，改掉报错，放进线程 |
+| 低 | `127.0.0.1:端口` 规则在 Linux 上得 403；转发器丢掉粘在 200 后面的字节；`list_tools` 失败和启动取消时泄漏服务器；宿主缓存变量盖掉独立缓存；批准后 hook 能换命令；手工构造的工具默认不进沙箱；代理的拒绝列表没有上限 | 逐条修复，各有回归 |
+
+查过不成立的一条：macOS 上硬链接和大小写变体绕过写保护。工作区内部的硬链接是对照，能建；链到工作区外或 `.flywhl` 被拒绝，`.FLYWHL` 也被拒绝。保留成回归用例。
+
+留下的边界写在 [18 章“这一层不管的事”](../governance/workspace-sandbox.md#这一层不管的事)。
+
+待查：live 回归的三次完整运行里，第 2 次有两条“Run 结束了也没等到期望的事件”，当时没有诊断信息，原因未定位，详见 [tests/live/README.md](../../tests/live/README.md)。

@@ -472,6 +472,8 @@ env = { GUARD_LEVEL = "strict" }   # 可选：写明取值的变量
 ```
 
 `Harness.__init__` 把每条配置包装成 `Hook(..., source="project")` 加入 HookBus，工作目录是工作区根。
+命令 hook 默认和 bash 一样跑在系统沙箱里，有自己的 `/tmp` 与可写目录（`FLYWHL_STATE_DIR`），单条 hook 可以设 `sandbox_network`、`network_allow`，用户配置里还可以设 `sandbox = "off"`，见 [18 章](/governance/workspace-sandbox#四条通道共用一层)。沙箱用不了时 hook 按失败处理。
+
 子进程的环境由 `CommandHook.child_env()` 生成：先按 bash 工具的规则剥离 `*KEY*`、`*TOKEN*`、带密码的 URL 等变量，
 再叠加 `pass_env` 与 `env`，最后设置 `FLYWHL_HOOK_EVENT`。项目配置里的 `env` 与 `pass_env` 会出现在信任确认里，
 其中 `PATH`、`BASH_ENV`、`DYLD_*` 这类能换掉实际执行程序的变量单独标出；设置页只显示变量名，不显示取值。

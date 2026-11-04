@@ -31,11 +31,13 @@ function posture(s) {
         : `无人处理的审批 ${fmt.dur(P.approval_timeout)} 后按拒绝处理` },
     { tone: "ok", icon: "shieldCheck", label: "托管基线", value: `${P.baseline} 条规则`,
       why: "读写凭证位置、灾难性命令在任何模式下都拒绝，完全放行也不例外" },
-    sb.level === "off" && sb.network !== "allow"
+    sb.problem
+      ? { tone: "bad", icon: "box", label: "命令沙箱", value: "不可用，子进程会被拒绝", why: `${sb.problem}。修好之前 bash、hook、MCP 服务器都不会运行；确实要无沙箱运行，在用户配置里写 sandbox = "off"` }
+      : sb.level === "off" && sb.network !== "allow"
       ? { tone: "bad", icon: "box", label: "命令沙箱", value: "未启用，bash 会被拒绝",
           why: `配置了网络策略 ${sb.network}，它要靠系统沙箱执行；没有沙箱时 bash 一律拒绝，不悄悄联网。请同时设置 permissions.sandbox` }
       : { tone: sb.level === "off" ? "warn" : "ok", icon: "box", label: "命令沙箱", value: sb.level === "off" ? "未启用" : `${LEVEL[sb.level] || sb.level} · ${NET[sb.network]}`,
-          why: sb.level === "off" ? "bash 只受命令分析与审批约束，没有内核级隔离；可用 --sandbox macos / linux 开启" : "凭证位置与钥匙串不可读，写入只限工作区与临时目录，本机套接字只放行列出的" },
+          why: sb.level === "off" ? "已明确关闭：bash 只受命令分析与审批约束，没有内核级隔离" : "凭证位置与钥匙串不可读，写入只限工作区与临时目录，本机套接字只放行列出的" },
     { tone: P.strip_secret_env ? "ok" : "warn", icon: "eye", label: "密钥剥离", value: P.strip_secret_env ? "已启用" : "已关闭",
       why: P.strip_secret_env ? "bash 子进程看不到名字像密钥的环境变量，模型执行 env 也读不到" : "bash 子进程继承全部环境变量，包括 API Key" },
     { tone: s.snapshots ? "ok" : "warn", icon: "history", label: "写前快照", value: s.snapshots ? "已启用" : "已关闭",
@@ -53,9 +55,9 @@ const NET = { allow: "网络不限", deny: "禁止联网", allowlist: "出站白
 const LEVEL = { macos: "macOS Seatbelt", linux: "Linux bubblewrap" };
 /** 沙箱网络一栏：白名单要把放行了哪些主机写出来，空白名单等于禁止联网 */
 function netLabel(sb) {
+  if (sb.problem) return none("沙箱不可用");
   if (sb.level === "off") return sb.network === "allow" ? none("不限（沙箱未启用）") : `${esc(NET[sb.network])}<div class="muted">未生效：沙箱未启用，bash 命令会被拒绝</div>`;
   if (sb.network === "deny") return "禁止对外连接（含 DNS 查询与本机套接字）";
-  if (sb.network === "allowlist" && sb.level === "linux") return `${esc(NET.allowlist)}<div class="muted">Linux 沙箱还不支持，bash 命令会被拒绝</div>`;
   if (sb.network === "allowlist") return sb.allow.length ? `只经出站代理连接：${sb.allow.map(code).join(" ")}` : "白名单为空，等同禁止联网";
   return "不限外网；本机 Unix 套接字除 DNS 外只放行列出的";
 }
@@ -64,6 +66,12 @@ const kv = (rows) => `<dl class="kv wide">${rows.map(([k, v]) => `<dt>${esc(k)}<
 const card = (iconName, title, body, aside = "") => `<section class="card"><div class="card-head">${icon(iconName)}<h2>${esc(title)}</h2>${aside ? `<span class="aside">${aside}</span>` : ""}</div><div class="card-body">${body}</div></section>`;
 const none = (text) => `<span class="muted">${esc(text)}</span>`;
 const code = (text) => `<code class="mono">${esc(text)}</code>`;
+/** hook / MCP 实际的沙箱状态：单条可以和全局不同 */
+const entryBox = ({ sandbox: b }) => !b ? ""
+  : b.problem ? `<div class="warn-line">${icon("alert", "sm")}系统沙箱不可用，不会运行</div>`
+  : b.level === "off" ? `<div class="warn-line">${icon("alert", "sm")}在系统沙箱外运行，能读凭证、能写工作区之外</div>`
+  : `<div class="muted">在系统沙箱里运行 · ${esc(NET[b.network] || b.network)}${b.allow.length ? `：${b.allow.map(code).join(" ")}` : ""}</div>`;
+
 /** hook / MCP 的供应链：按内容绑定的文件，没锁版本的包 */
 const supply = (x) => `${(x.files || []).length ? `<div class="muted">按内容绑定：${x.files.map(code).join(" ")}</div>` : ""}${(x.unpinned || []).length ? `<div class="warn-line">${icon("alert", "sm")}没锁版本：${x.unpinned.map(esc).join("；")}</div>` : ""}`;
 
@@ -90,7 +98,7 @@ function render(inner, s, app) {
         ["无人值守自动批准", P.auto_approve.length ? `<ul class="rule-list">${P.auto_approve.map((r) => `<li>${code(r)}</li>`).join("")}</ul>`
           + (P.on_ask === "deny" ? "" : none("on_ask = deny 时生效")) : none("无")]]),
         `${esc(s.tools)} 个工具`)}
-      ${card("terminal", "命令执行", kv([["系统沙箱", s.sandbox.level === "off" ? none("未启用") : esc(s.sandbox.level)],
+      ${card("terminal", "命令执行", kv([["系统沙箱", s.sandbox.problem ? none("不可用") : s.sandbox.level === "off" ? none("未启用") : esc(s.sandbox.level)],
         ["沙箱网络", netLabel(s.sandbox)],
         ...(s.sandbox.level === "off" ? [] : [["放行的套接字", s.sandbox.unix_sockets.length ? s.sandbox.unix_sockets.map(code).join(" ") : none("无")]]),
         ["密钥剥离", P.strip_secret_env ? "已启用" : "已关闭"], ["写前快照", s.snapshots ? "已启用" : "已关闭"],
@@ -99,10 +107,10 @@ function render(inner, s, app) {
         ["可信 Host", s.access.any_host ? "任意（依赖令牌）" : s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
       ${card("hook", "Hooks", s.hooks.length ? `<ul class="plain-list">${s.hooks.map((x) => `<li><div class="row1">${code(x.event)}<span class="muted">匹配</span>${code(x.matcher)}
         <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
-        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${supply(x)}</li>`).join("")}</ul>`
+        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${entryBox(x)}${supply(x)}</li>`).join("")}</ul>`
         : `<p class="muted">没有配置命令 hook。</p>`, s.hooks.length ? `${s.hooks.length} 个` : "")}
       ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具
-        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>${supply(m)}`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
+        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>${entryBox(m)}${supply(m)}`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
       ${card("gauge", "单次运行预算", kv([["最多轮次", fmt.int(B.max_turns)], ["最多工具调用", fmt.int(B.max_tool_calls)],
         ["token 上限", B.max_total_tokens ? fmt.int(B.max_total_tokens) : none("不限")], ["费用上限", B.max_cost_usd ? esc("$" + B.max_cost_usd) : none("不限")],
         ["墙钟上限", B.max_wall_seconds ? esc(fmt.dur(B.max_wall_seconds)) : none("不限")]]))}

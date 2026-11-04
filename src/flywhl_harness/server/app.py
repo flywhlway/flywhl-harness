@@ -294,6 +294,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             argv = mcp_argv(spec)
             return {"name": n, "transport": "stdio" if spec.get("command") else "http", "tools": len(tools),
                     "trust_annotations": spec.get("trust_annotations") is True,
+                    "sandbox": h.confinement.scoped("mcp", n, spec).status(),
                     "read_only": [t.name.removeprefix(prefix) for t in tools if str(t.effect) == "read"],
                     "ignored_hints": sum(1 for t in tools if getattr(t, "ignored_hints", None)),
                     # 供应链：引用的文件只给路径，没锁版本的只给包名（URL 里的账号、查询串去掉）——完整的启动参数里常带密钥
@@ -309,11 +310,12 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                             "rules": list(pc.rules), "baseline": len(MANAGED_BASELINE),
                             "strip_secret_env": pc.strip_secret_env, "require_pinned": pc.require_pinned,
                             "auto_approve": list(pc.auto_approve)},
-            "sandbox": {"level": pc.sandbox, "network": pc.sandbox_network, "allow": list(pc.network_allow),
-                        "unix_sockets": list(pc.unix_sockets)},
+            "sandbox": h.confinement.status(),
             "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
                        "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env}),   # 只给变量名
+                       "sandbox": h.confinement.scoped("hook", hc.event, {"sandbox": hc.sandbox, "sandbox_network": hc.sandbox_network,
+                                                                         "network_allow": hc.network_allow}).status(),
                        "files": [str(f) for f in referenced_files(hc.command, h.workspace_root, hc.env)],
                        "unpinned": unpinned_packages(hc.command, h.workspace_root, hc.env)} for hc in c.hooks],
             "mcp": [mcp_entry(n, spec) for n, spec in c.mcp_servers.items()],

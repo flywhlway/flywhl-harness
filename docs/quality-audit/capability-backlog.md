@@ -21,7 +21,7 @@
 | 审批快捷键 | 键盘 `A` | 把焦点移到第一个待审批操作上。只移动焦点，批准仍要再按 Enter |
 | 代码块复制与轻量高亮 | 会话时间线 | 不依赖外部库 |
 | 正则搜索移出事件循环 | `grep`、`search_ref` 工具 | 搜索在子进程里执行并有超时，灾难性正则不再卡住整个服务 |
-| 沙箱断网 | `sandbox_network = "deny"` | 只在 `sandbox = "macos"` 时生效；不受信任的项目配置只能收紧，不能放开 |
+| 沙箱断网 | `sandbox_network = "deny"` | 要有系统沙箱才生效；不受信任的项目配置只能收紧，不能放开 |
 | 访问令牌持久化 | `~/.flywhl/server_token`，权限 0600 | 令牌默认开启；服务重启后，书签和 Cookie 照常可用 |
 
 ## 第二批已实现
@@ -32,13 +32,29 @@
 |---|---|---|
 | 命令 hook 子进程剥离密钥环境变量 | `[[hooks]]` 的 `pass_env`、`env` | 与 bash、MCP 子进程同一套剥离规则；确实要用的变量在配置里点名，信任确认时逐项列出 |
 | 不再直接采信 MCP 工具注解 | `[mcp_servers.<名字>]` 的 `read_only_tools`、`trust_annotations` | 服务器自报的只读、幂等注解默认不采信，调用照常审批；放宽要在配置里点名工具 |
-| 出口白名单 | `sandbox_network = "allowlist"` + `network_allow`，或 `--net-allow` | bash 只能经本机出站代理连白名单主机；代理按解析出的地址再查一遍并重写 Host，命令结束时回收后台进程。目前只有 macOS 档 |
+| 出口白名单 | `sandbox_network = "allowlist"` + `network_allow`，或 `--net-allow` | bash 只能经本机出站代理连白名单主机；代理按解析出的地址再查一遍并重写 Host，命令结束时回收后台进程。macOS、Linux 两档都支持，默认开启，白名单默认为空 |
 | Linux 沙箱 | `sandbox = "linux"`（bubblewrap） | 写操作限制在工作区与临时目录，`.flywhl/`、`flywhl.toml` 只读，凭证位置按具体路径遮蔽；`/tmp` 换成本会话私有目录，宿主的 Unix 套接字遮住；`deny` 档另起网络命名空间 |
 | 沙箱限制 Mach 服务与本机 IPC | macOS 档默认生效 | 钥匙串、剪贴板、`open` / launchd、Unix 套接字都连不上；`unix_sockets` 列出的除外，它们启动时定下位置，不能放在沙箱可写的目录里 |
 | 识别整条路径放在变量里的写法 | 命令分析（`policy/bash_analyzer.py`） | 命令里赋过值的变量按取值展开，`cd` 之后的相对路径按切换后的目录判断；变量可能为空时按为空再判，`rm -rf $DIR/*` 任何模式都拒绝并提示改用 `${DIR:?}`；值要到运行时才知道的按越界处理 |
 | hook 与 MCP 的供应链检查 | 信任确认、`permissions.require_pinned`、「环境与安全」页 | 命令里写出的脚本一并算进信任哈希，命令 hook 每次执行前再核对，改过就拒绝执行；`npx`、`uvx`、`docker run` 这类临时拉取的包没锁到确切版本时标出，打开 `require_pinned` 后拒绝启动。认不出的选项、本地目录、找不到的脚本、脚本的内联依赖这类拿不准的一律算没锁；换了目录的写法在每个可能的目录下都找。脚本再导入的模块、经变量算出的路径、运行目录里的包管理器配置（`uv.toml`、`.npmrc`）核对不到，hook 与 MCP 宜在工作区外运行 |
 | 审批疲劳提示 | 时间线与终端的提示、审批卡片、「审批」页、`GET /api/approvals/stats` | 本会话最近 10 次人工决定里有 3 次在 2 秒内批准，或同一条“始终允许”规则人工批准满 3 次时提示；审批卡片写明“本会话始终允许”会添加哪条规则；「审批」页显示批准率、秒批比例、等待时长与批准最多的同类操作 |
 | 无人值守按规则自动批准 | `permissions.auto_approve`、`flywhl run --approve '规则'` | `on_ask = "deny"` 时，规则命中的需审批操作自动批准，其余照旧拒绝。高危命令、实际程序不在命令文本里的、托管基线要求确认的、PreToolUse hook 要求确认的，以及读过不可信内容之后的外部操作，规则写得再宽也不批准。项目配置里的这项要信任 |
+
+## 第三批已实现
+
+系统沙箱从可选的原型改成默认开启，测试集中在 `tests/test_sandbox_default.py`，设计记录见 [18 章](../governance/workspace-sandbox.md#默认开启-档位、网络与离开沙箱)。
+
+| 能力 | 入口 | 说明 |
+|---|---|---|
+| 系统沙箱默认开启 | `permissions.sandbox = "auto"`（默认） | 真跑一次探测 sandbox-exec 或 bubblewrap；用不了时拒绝执行并给出修法，不退回沙箱外。只有用户配置、`-c`、`--sandbox off` 能关，项目配置写的信任了也丢弃 |
+| 网络默认受控 | `sandbox_network = "auto"`（默认） | 有沙箱时是空白名单的 `allowlist`；被拦时结果里写明主机和放行办法 |
+| Linux 出站白名单 | `sandbox = "linux"` + `network_allow` | 宿主的代理听 Unix 套接字，沙箱里的转发器接过来；`localhost:端口` 透明转发 |
+| hook、MCP、验收命令进沙箱 | 默认生效；单条可设 `sandbox_network`、`network_allow`，用户配置里可设 `sandbox = "off"` | 和 bash 共用 `tools/confine.py`；hook 与 MCP 服务器各有独立的 `/tmp` 与可写目录（`FLYWHL_STATE_DIR`），包管理器缓存也放在那里 |
+| 沙箱外执行的人工门 | bash 的 `outside_sandbox` 参数 | 任何模式都要人确认，`auto_approve`、规则、会话授权放行不了；无人值守时拒绝；审批卡片写明“将在沙箱外执行”，不能“始终允许” |
+| 工作区只读位置 | 默认生效 | `.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config` 只读，`.git` 不能整个替换；`git add`、`git commit` 不受影响 |
+| 探测状态可见 | `flywhl doctor`、`chat` 与 `serve` 的启动信息、「环境与安全」页 | 显示实际生效的档位和网络策略，不是配置里写的 |
+| 干净安装验收 | `scripts/sandbox_acceptance.py`，CI 的 `sandbox-acceptance` 作业 | 装 wheel、不写配置，在 macOS、Linux 上验证文件、网络、子进程的边界，含对照 |
+| 沙箱开销 | `scripts/sandbox_overhead.py` | 每条命令的 p50、p95，结果写在 18 章 |
 
 ## 后续
 

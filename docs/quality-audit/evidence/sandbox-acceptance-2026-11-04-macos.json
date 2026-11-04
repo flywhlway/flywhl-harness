@@ -1,0 +1,145 @@
+{
+  "platform": "darwin",
+  "level": "macos",
+  "ok": true,
+  "checks": [
+    {
+      "stage": "default",
+      "check": "默认档位",
+      "ok": true,
+      "detail": "系统沙箱 macos · 网络 allowlist（0 条规则）"
+    },
+    {
+      "stage": "default",
+      "check": "对照：家目录里的普通文件读得到",
+      "ok": true,
+      "detail": "plain-control-5c1e\n[退出码 0]"
+    },
+    {
+      "stage": "default",
+      "check": "凭证读不到",
+      "ok": true,
+      "detail": "cat: <repo>/.sandbox-acceptance-3ul3u3a4/home/.ssh/probe_key: Operation not permitted\n\n[命令在系统沙箱里运行，读不到凭证，只能写工作区与临时目录。确实需要时用 outside_sandbox 申请在沙箱外执行，要人工确认]\n[退出码 1]"
+    },
+    {
+      "stage": "default",
+      "check": "工作区能写",
+      "ok": true,
+      "detail": "in\n\n[退出码 0]"
+    },
+    {
+      "stage": "default",
+      "check": "工作区外写不了",
+      "ok": true,
+      "detail": "touch: <repo>/.sandbox-acceptance-3ul3u3a4/outside.txt: Operation not permitted\n\n[命令在系统沙箱里运行，读不到凭证，只能写工作区与临时目录。确实需要时用 outside_sandbox 申请在沙箱外执行，要人工确认]\n[退出码 1]"
+    },
+    {
+      "stage": "default",
+      "check": "没放行的主机被拦，报错写明主机和放行办法",
+      "ok": true,
+      "detail": "出站白名单不包含 example.com:80（见 permissions.network_allow）\n\n[出站白名单拦下了 example.com:80。确实需要的话把主机加进 permissions.network_allow，或者启动时加 --net-allow example.com]\n[退出码 0]"
+    },
+    {
+      "stage": "default",
+      "check": "绕过代理直连也连不上",
+      "ok": true,
+      "detail": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"<home>/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py\", line 865, in create_connection\n    raise exceptions[0]\n  File \"<home>/.local/share/uv/python/cpython-3.12.13-mac"
+    },
+    {
+      "stage": "default",
+      "check": "flywhl doctor 显示实际生效的档位",
+      "ok": true,
+      "detail": "系统沙箱 macos · 网络 allowlist（0 条规则）\n逐个供应商检查：流式文本 → 工具调用往返（每项一两次很小的真实调用）\n没有可检查的模型：请在环境变量或 .env 中配置至少一个供应商的密钥（如 DEEPSEEK_API_KEY）。\n"
+    },
+    {
+      "stage": "allow",
+      "check": "放行的主机连得上",
+      "ok": true,
+      "detail": "HELLO\n[退出码 0]"
+    },
+    {
+      "stage": "allow",
+      "check": "同一台机器上没放行的端口连不上",
+      "ok": true,
+      "detail": "403\n[出站白名单拦下了 localhost:57930。确实需要的话把主机加进 permissions.network_allow，或者启动时加 --net-allow localhost]\n[退出码 0]"
+    },
+    {
+      "stage": "allow",
+      "check": "放行的公网主机连得上（TLS 穿过代理）",
+      "ok": true,
+      "detail": "200\n[退出码 0]"
+    },
+    {
+      "stage": "allow",
+      "check": "没放行的公网主机连不上",
+      "ok": true,
+      "detail": "000\n[出站白名单拦下了 example.org:443。确实需要的话把主机加进 permissions.network_allow，或者启动时加 --net-allow example.org]\n[退出码 56]"
+    },
+    {
+      "stage": "subprocess",
+      "check": "MCP 服务器：对照读得到",
+      "ok": true,
+      "detail": "{'secret': 'PermissionError', 'plain': 'plain-control-5c1e', 'outside': 'PermissionError', 'state': 'written'}"
+    },
+    {
+      "stage": "subprocess",
+      "check": "MCP 服务器：凭证读不到",
+      "ok": true,
+      "detail": "{'secret': 'PermissionError', 'plain': 'plain-control-5c1e', 'outside': 'PermissionError', 'state': 'written'}"
+    },
+    {
+      "stage": "subprocess",
+      "check": "MCP 服务器：工作区外写不了",
+      "ok": true,
+      "detail": "{'secret': 'PermissionError', 'plain': 'plain-control-5c1e', 'outside': 'PermissionError', 'state': 'written'}"
+    },
+    {
+      "stage": "subprocess",
+      "check": "MCP 服务器：有自己的可写目录",
+      "ok": true,
+      "detail": "{'secret': 'PermissionError', 'plain': 'plain-control-5c1e', 'outside': 'PermissionError', 'state': 'written'}"
+    },
+    {
+      "stage": "subprocess",
+      "check": "命令 hook：对照读得到",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "stage": "subprocess",
+      "check": "命令 hook：凭证读不到",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "stage": "subprocess",
+      "check": "命令 hook：工作区外写不了",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "stage": "subprocess",
+      "check": "命令 hook：有自己的可写目录",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "stage": "unavailable",
+      "check": "没有沙箱时拒绝执行，项目配置写 off 也不行",
+      "ok": true,
+      "detail": "沙箱不可用，命令未执行：sandbox-exec 启动失败（已经在别的沙箱里运行时不能嵌套）：sandbox-exec: sandbox_apply: Operation not permitted。确实要在没有沙箱的环境里运行，在用户配置 ~/.flywhl/config.toml 的 [permissions] 里写 sandbox = \"off\"，或者启动时加 --sandbox off"
+    },
+    {
+      "stage": "unavailable",
+      "check": "报错里有修法",
+      "ok": true,
+      "detail": "沙箱不可用，命令未执行：sandbox-exec 启动失败（已经在别的沙箱里运行时不能嵌套）：sandbox-exec: sandbox_apply: Operation not permitted。确实要在没有沙箱的环境里运行，在用户配置 ~/.flywhl/config.toml 的 [permissions] 里写 sandbox = \"off\"，或者启动时加 --sandbox off"
+    },
+    {
+      "stage": "off",
+      "check": "用户配置写 off 后可以运行",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

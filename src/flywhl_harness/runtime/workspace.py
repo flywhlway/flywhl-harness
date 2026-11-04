@@ -138,16 +138,21 @@ class ShadowGit:
         self.enabled = shutil.which("git") is not None
         self._lock = asyncio.Lock()
 
-    def _git(self, *args: str, check: bool = True) -> str:
+    def _git(self, *args: str, check: bool = True, errors: str = "strict") -> str:
+        from ..tools.shell import _clean_env   # 延迟导入：tools 依赖 runtime
+
+        # 影子仓库跑在系统沙箱外，读写的却是沙箱里的命令写过的工作区：不带密钥，不读全局配置，不跑任何 hook
         env = {
-            **os.environ,
+            **_clean_env(True),
             "GIT_DIR": str(self.git_dir),
             "GIT_WORK_TREE": str(self.work_tree),
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
         }
-        cmd = ["git", "-c", "user.name=flywhl", "-c", "user.email=flywhl@localhost",
-               "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args]
-        r = subprocess.run(cmd, cwd=self.work_tree, env=env, capture_output=True, text=True, timeout=60)
+        cmd = ["git", "-c", "user.name=flywhl", "-c", "user.email=flywhl@localhost", "-c", "core.autocrlf=false",
+               "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", *args]
+        r = subprocess.run(cmd, cwd=self.work_tree, env=env, capture_output=True, text=True, errors=errors, timeout=60)
         if check and r.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)} 失败：{r.stderr.strip()}")
         return r.stdout
@@ -162,9 +167,23 @@ class ShadowGit:
         # 影子仓库排除自身数据目录与常见大目录；工作区自己的 .gitignore 仍然生效
         (info / "exclude").write_text("\n".join(f"{d}/" for d in sorted(IGNORED_DIRS)) + "\n")
 
+    def _drop_gitlinks(self) -> None:
+        entries = self._git("ls-files", "--stage", "-z", errors="surrogateescape").split("\0")
+        links = [e.split("\t", 1)[1] for e in entries if e.startswith("160000 ")]
+        if links:
+            self._git("update-index", "--force-remove", "--", *links)
+
+    def _add_all(self) -> None:
+        """``git add -A``，但索引里不留 gitlink。工作区里的嵌套仓库会被收录成 gitlink，下一次 add 时 git 就进到里面跑
+        ``git status``，那个进程读的是嵌套仓库自己的配置：沙箱里的命令写一个 ``core.fsmonitor``，harness 就替它在沙箱外执行了。
+        ``-c`` 传不进去，git 给子模块的进程清掉了这些环境变量，所以不让 gitlink 进索引。嵌套仓库的内容本来也不在快照里。"""
+        self._drop_gitlinks()   # 升级之前的版本可能留下过
+        self._git("add", "-A")
+        self._drop_gitlinks()
+
     def _snapshot_sync(self, message: str) -> str | None:
         self._ensure()
-        self._git("add", "-A")
+        self._add_all()
         self._git("commit", "-q", "--allow-empty", "-m", message)
         return self._git("rev-parse", "HEAD").strip()
 
@@ -194,7 +213,7 @@ class ShadowGit:
         async with self._lock:
             def run() -> str:
                 self._commit(sha)
-                self._git("add", "-A")
+                self._add_all()
                 return self._git("diff", "--cached", sha, check=False)
             return await asyncio.to_thread(run)
 
@@ -203,15 +222,16 @@ class ShadowGit:
         async with self._lock:
             def run() -> list[str]:
                 self._commit(sha)
-                self._git("add", "-A")
+                self._add_all()
                 changed = [x for x in self._git("diff", "--cached", "--name-only", sha).splitlines() if x]
                 added = [x for x in self._git("diff", "--cached", "--name-only", "--diff-filter=A", sha).splitlines() if x]
-                self._git("checkout", sha, "--", ".")
+                if self._git("ls-tree", sha).strip():   # 空快照（比如工作区里只有嵌套仓库）里没有 . 这个路径，checkout 会报错
+                    self._git("checkout", sha, "--", ".")
                 for rel in added:
                     p = self.work_tree / rel
                     if p.is_file():
                         p.unlink()
-                self._git("add", "-A")
+                self._add_all()
                 self._git("commit", "-q", "--allow-empty", "-m", f"restore {sha[:10]}")
                 return changed
             return await asyncio.to_thread(run)
