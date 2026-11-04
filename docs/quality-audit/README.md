@@ -10,6 +10,12 @@
 > - 关闭 QA-007 和 QA-013，QA-008 部分处理；
 > - 离线套件 455 passed，审计套件 13 passed，详见 [security-round2.md](security-round2.md)；
 > - 过程中在开发机上发生了一次事故，复盘见 [incident-2026-10-31.md](incident-2026-10-31.md)。
+>
+> **第三轮（2026-11-04）：**
+> - 系统沙箱默认开启，QA-008 关闭；
+> - 离线套件 macOS 724 passed、Linux 720 passed，干净安装验收两个平台都是 23/23；
+> - 33 个 live 场景在真实沙箱里跑过，一次失败没有定位到原因；
+> - 复核记录见 [release-readiness.md](release-readiness.md) 末尾，新发现见 [issues.md](issues.md) 文末。
 
 ## 结论
 

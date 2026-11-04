@@ -1,0 +1,53 @@
+# 2026-11-04 live 回归：一次性 Linux 容器，deepseek:deepseek-flash，被测 bash 跑在真实 bubblewrap 里
+# 分类见 tests/live/README.md。三次完整运行，下面先列前两次的失败项，再给第 3 次的用量
+
+## 第 1 次
+合计 32 次运行 · 293838 tokens · $0.0329
+FAILED tests/live/test_live_agent.py::test_multi_step_read_task_keeps_reasoning
+FAILED tests/live/test_live_provider.py::test_configured_fallback_chain_from_env
+2 failed, 31 passed, 1 warning in 201.33s (0:03:21)
+
+## 第 2 次
+合计 33 次运行 · 285869 tokens · $0.0255
+FAILED tests/live/test_live_runtime.py::test_steer_mid_run_is_followed - Asse...
+FAILED tests/live/test_live_runtime.py::test_pause_and_resume_at_safe_point
+2 failed, 31 passed, 1 warning in 191.11s (0:03:11)
+
+## 第 3 次
+======================= 真实模型用量（deepseek:deepseek-flash） ========================
+多步只读任务                         completed        in=    647 out=   316 cache=   6912  $0.00061
+并行调用                           completed        in=    450 out=   176 cache=   4480  $0.00037
+写入审批                           completed        in=    835 out=   256 cache=   9344  $0.00061
+拒绝并给出理由                        completed        in=    930 out=   335 cache=  12032  $0.00075
+编辑 + 验收命令                      completed        in=    945 out=   299 cache=  12032  $0.00071
+计划与验收                          completed        in=   1759 out=   723 cache=  24320  $0.00154
+规划模式只读                         completed        in=    820 out=   853 cache=  10624  $0.00133
+子代理契约                          completed        in=   1959 out=  1523 cache=  11008  $0.00248
+压缩·交代事实                        completed        in=    208 out=     3 cache=   2176  $0.00008
+压缩·读日志0                        completed        in=  10226 out=  1970 cache=   9344  $0.00549
+压缩·读日志1                        completed        in=    376 out=   136 cache=   6912  $0.00032
+压缩·读日志2                        completed        in=    482 out=   142 cache=   7296  $0.00036
+压缩·读日志3                        completed        in=    424 out=   136 cache=   7808  $0.00034
+压缩·回忆                          completed        in=    167 out=     5 cache=   4096  $0.00008
+预算收尾                           budget_exhausted in=    755 out=   262 cache=   4608  $0.00057
+提示注入                           completed        in=    684 out=   290 cache=   6656  $0.00059
+大结果句柄                          completed        in=  10026 out=   261 cache=  28032  $0.00349
+续聊 deepseek                    completed        in=    331 out=    41 cache=   4479  $0.00018
+续聊 kimi                        completed        in=   2135 out=    71 cache=   1536  $0.00261
+续聊 minimax                     completed        in=    392 out=    63 cache=   4431  $0.00048
+续聊 deepseek                    completed        in=    426 out=    41 cache=   4864  $0.00021
+降级链：模型不存在                      completed        in=    192 out=     4 cache=   2176  $0.00008
+跨供应商降级                         completed        in=    713 out=    76 cache=   1792  $0.00016
+配置的降级链                         completed        in=    457 out=    29 cache=   2048  $0.00012
+多供应商 dashscope                 completed        in=    976 out=   104 cache=   4096  $0.00026
+多供应商 kimi                      completed        in=    463 out=    85 cache=   3072  $0.00130
+多供应商 minimax                   completed        in=    184 out=    71 cache=   4344  $0.00042
+多供应商 openrouter                completed        in=   2536 out=   197 cache=   2432  $0.00064
+Claude 经 OpenRouter            completed        in=      6 out=   282 cache=   3588  $0.00066
+DeepSeek Anthropic 端点          completed        in=    621 out=   186 cache=   6784  $0.00045
+取消后继续                          completed        in=    198 out=    29 cache=   2176  $0.00011
+录制真实轨迹                         completed        in=    383 out=   168 cache=   4480  $0.00034
+Web API 端到端                    completed        in=    565 out=   184 cache=   6912  $0.00043
+合计 33 次运行 · 278478 tokens · $0.0282
+33 passed, 1 warning in 299.25s (0:04:59)
+live-exit=0

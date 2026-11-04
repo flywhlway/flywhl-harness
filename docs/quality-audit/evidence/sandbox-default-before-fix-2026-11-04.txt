@@ -1,0 +1,15 @@
+git version 2.47.3
+     +  where False = ToolResult(content='(无输出)\n[退出码 0]', is_error=False, details={'command': 'touch ran.txt', 'exit_code': 0, 'duration_ms': 4, 'total_lines
+/home/tester/src/tests/test_sandbox_default.py:635: AssertionError: assert (False)
+E   AssertionError: assert (False)
+     +  where False = ToolResult(content='(无输出)\n[退出码 0]', is_error=False, details={'command': 'touch ran.txt', 'exit_code': 0, 'duration_ms': 0, 'total_lines
+/home/tester/src/tests/test_sandbox_default.py:643: AssertionError: assert (False)
+=========================== short test summary info ============================
+FAILED tests/test_sandbox_default.py::test_shadow_git_never_runs_what_a_nested_repo_configured
+FAILED tests/test_sandbox_default.py::test_gitlink_left_by_an_earlier_version_is_dropped_before_add
+FAILED tests/test_sandbox_default.py::test_bash_will_not_leave_the_sandbox_unless_told_a_human_agreed
+FAILED tests/test_sandbox_default.py::test_replay_cannot_reach_the_outside_sandbox_path
+4 failed, 44 deselected in 0.23s
+== 第二段：os_sandbox 用例在外层沙箱之外运行（它们执行的命令本身在系统沙箱里）
+
+48 deselected in 0.06s
