@@ -136,11 +136,12 @@ async def test_subagent_returns_structured_contract(ws):
 
 
 async def test_compaction_preserves_key_facts(ws):
-    """窗口刻意设小：多轮之后触发压缩，压缩后模型仍记得最初交代的关键事实。"""
+    """窗口刻意设小：多轮之后触发压缩，压缩后模型仍记得最初交代的关键事实。
+    日志每行都差不多，模型读完第一个文件就可能改用 wc、grep 抽查后面的，所以阈值要小到读完第一个就够。"""
     for i in range(4):
         (ws / f"log{i}.txt").write_text("\n".join(f"第 {i}-{j} 行：系统运行正常，指标平稳，无异常。" for j in range(300)),
                                         encoding="utf-8")
-    h = live_harness(ws, context__context_window=24_000, context__compact_threshold=0.6, context__reserve_tokens=2000,
+    h = live_harness(ws, context__context_window=14_000, context__compact_threshold=0.6, context__reserve_tokens=2000,
                      context__keep_recent_tokens=3000, context__tool_result_max_tokens=8000, max_tokens=2048)
     async with h:
         s = h.create_session("压缩")
@@ -149,7 +150,7 @@ async def test_compaction_preserves_key_facts(ws):
             await run(h, f"读取 log{i}.txt 的全部内容，用一句话概括。", session_id=s.id, label=f"压缩·读日志{i}")
         res = await run(h, "本次任务的暗号是什么？只回答暗号本身。", session_id=s.id, label="压缩·回忆")
         compactions = [e for r in h.store.list_runs(s.id) for e in h.store.list_events(r.id) if e.type == E.COMPACTION_END]
-    assert compactions, "窗口设小后应当触发压缩"
+    assert compactions, "窗口设小后应当触发压缩\n" + transcript(h, s.id)
     assert "蓝鲸-42" in res.text, transcript(h, s.id)
 
 
