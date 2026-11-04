@@ -78,9 +78,9 @@ sequenceDiagram
     L->>DB: append assistant message (checkpoint anchor)
     L->>X: run_batch([write])
     X->>X: validate, permission=ask, PreToolUse hooks
-    X->>DB: create approval; CAS running to waiting_human
+    X->>DB: create approval, CAS running to waiting_human
     UI->>API: POST /api/approvals/{id} (approve)
-    X->>DB: CAS waiting_human to running; shadow-git snapshot; step started
+    X->>DB: CAS waiting_human to running, shadow-git snapshot, step started
     X->>X: run write (raced against timeout / cancel)
     X->>DB: one transaction: append tool result + step completed
     L->>M: next turn (with the tool result)
@@ -88,7 +88,7 @@ sequenceDiagram
     L->>L: Stop check (hooks / plan / verify command)
     L->>DB: append assistant message
     H->>DB: CAS running to completed
-    H-->>UI: run_end / status events; SSE stream_end
+    H-->>UI: run_end and status events, SSE stream_end
 ```
 
 Each step maps to code:

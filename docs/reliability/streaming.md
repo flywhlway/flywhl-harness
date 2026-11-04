@@ -39,7 +39,7 @@ flowchart LR
 | `EventHub` | 带 `seq` 的 `Event` | 编号、持久化、扇出（只扇出已落库的事件） |
 | `Harness.subscribe()` | 有序、无重复的事件流 | 断线续传的核心 |
 | `server/app.py` | SSE 文本帧 | 心跳、断开检测、续传入口 |
-| `web/app.js` | DOM | 去重、合并渲染、以持久化状态校正 |
+| `web/views/session.js` | DOM | 去重、合并渲染、以持久化状态校正 |
 
 ## 为什么选 SSE
 
@@ -410,7 +410,7 @@ model_retry(d) {
 
 ## 前端渲染：增量只是草稿
 
-`web/app.js` 的事件处理有三层，越往后越“权威”：
+`web/views/session.js` 的事件处理有三层，越往后越“权威”：
 
 ```javascript
 function connect(runId, after) {

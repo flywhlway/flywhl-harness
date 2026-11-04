@@ -16,7 +16,7 @@ The design keeps the run independent of any connection, numbers every event, and
 
 ## How it works
 
-**The path of a token.** Provider stream events become `Event`s in `AgentLoop._call_model()`, pass through `Harness._drive()` into `EventHub.publish()`, then to `Harness.subscribe()`, the SSE endpoint in `server/app.py`, and `EventSource` in `web/app.js`. The run executes in a background task started by `_launch()`. A connection is only a subscriber, so refreshing or closing a tab does not touch the run. Only an explicit `POST /api/runs/{rid}/cancel` does.
+**The path of a token.** Provider stream events become `Event`s in `AgentLoop._call_model()`, pass through `Harness._drive()` into `EventHub.publish()`, then to `Harness.subscribe()`, the SSE endpoint in `server/app.py`, and `EventSource` in `web/views/session.js`. The run executes in a background task started by `_launch()`. A connection is only a subscriber, so refreshing or closing a tab does not touch the run. Only an explicit `POST /api/runs/{rid}/cancel` does.
 
 **SSE rather than WebSocket.** The event stream is one-way, and stop, steer and approve are rare enough for plain `POST`. SSE gives automatic reconnect with `Last-Event-ID` for free. The cost is the browser's per-domain connection limit on HTTP/1.1, so serve it behind HTTP/2.
 
@@ -58,7 +58,7 @@ A steer cannot land mid-turn because the only valid place in history is after a 
 | `agent/loop.py` `AgentLoop._body()` / `_drain_inbox()` | Steer and follow-up injection points |
 | `agent/inbox.py` `Inbox` | Steer and follow-up queues |
 | `llm/anthropic.py` `AnthropicProvider._kwargs()` | Enables `eager_input_streaming` |
-| `web/app.js` `connect()` / `onEvent()` | Reconnect, dedupe, draft rendering |
+| `web/views/session.js` `connect()` / `onEvent()` | Reconnect, dedupe, draft rendering |
 
 ## Related chapters
 
