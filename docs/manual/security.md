@@ -74,9 +74,9 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 ## 配置信任
 
-启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、关闭沙箱、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
+启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。关闭沙箱不在其中：项目配置里的 `sandbox = "off"` 信任了也不算。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
 
-hook 与 MCP 服务器跑在系统沙箱之外，按供应链对待：命令里写出的脚本（`python3 scripts/guard.py`）一并算进信任哈希，命令 hook 每次执行前再核对，Agent 改过脚本就拒绝执行；`npx`、`uvx`、`docker run` 临时拉取又没锁到确切版本的包会在确认提示和设置页里标出（认不出的选项、本地目录这类拿不准的情况一律算没锁），`permissions.require_pinned = true` 时直接拒绝启动。包管理器还会读运行目录里的 `uv.toml`、`.npmrc` 来换包源，hook 与 MCP 服务器最好在工作区外的目录运行。
+hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了工作区之外，但工作区它们能写，仍按供应链对待：命令里写出的脚本（`python3 scripts/guard.py`）一并算进信任哈希，命令 hook 每次执行前再核对，Agent 改过脚本就拒绝执行；`npx`、`uvx`、`docker run` 临时拉取又没锁到确切版本的包会在确认提示和设置页里标出（认不出的选项、本地目录这类拿不准的情况一律算没锁），`permissions.require_pinned = true` 时直接拒绝启动。包管理器还会读运行目录里的 `uv.toml`、`.npmrc` 来换包源，hook 与 MCP 服务器最好在工作区外的目录运行。
 
 `.env` 同理：默认只读取各家密钥与模型选择，地址、代理、权限模式等变量被忽略；确实需要时写进环境变量，或用 `--env-file` 显式加载。
 
@@ -91,7 +91,12 @@ hook 与 MCP 服务器跑在系统沙箱之外，按供应链对待：命令里�
 
 - 文件工具经 `Workspace.resolve()` 解析路径并跟随符号链接，越出工作区即拒绝。
 - 写操作前打影子 git 快照（`.flywhl/shadow.git`，不碰你自己的 `.git`），可在 Web 的“历史”页回滚。
-- macOS 上设 `sandbox = "macos"`（Linux 上是 `"linux"`，用 bubblewrap），bash 跑在系统沙箱里：凭证位置由内核拒绝，写入限于工作区与临时目录，docker.sock、ssh-agent、钥匙串、`open` 这类能让沙箱外的进程代劳的通道也被拒绝（本机数据库的套接字可以在 `unix_sockets` 里放行）；再设 `sandbox_network = "deny"` 可断网，macOS 上设 `"allowlist"` 并在 `network_allow` 里列出主机，就只能连这些主机。它是原型级隔离，生产环境请用容器或 microVM。
+- 系统沙箱默认开启（macOS 用 sandbox-exec，Linux 用 bubblewrap），bash、命令 hook、MCP 服务器和 `verify_command` 都在里面：凭证位置由内核拒绝，写入限于工作区与临时目录，docker.sock、ssh-agent、钥匙串、`open` 这类能让沙箱外的进程代劳的通道也被拒绝（本机数据库的套接字可以在 `unix_sockets` 里放行）。
+- 网络默认只放行 `network_allow` 里的主机，默认一个都没有，被拦时结果里写明主机和放行办法。`sandbox_network = "deny"` 整体断网。
+- 用不了沙箱时命令拒绝执行，不退回沙箱外。Linux 上 `apt install bubblewrap`；确实要在没有沙箱的环境里运行，在用户配置里写 `sandbox = "off"` 或加 `--sandbox off`，项目配置写的不算。
+- 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。
+- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。所以 `git config`、`git remote add` 在沙箱里会失败，`git add`、`git commit` 不受影响。
+- 系统沙箱挡的是误操作和注入驱动的越界，和宿主共用内核。跑不可信代码、多租户时请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。
 
 深入阅读：[16 Hooks](/governance/hooks)、[17 权限与人审](/governance/permissions-hitl)、[18 Workspace 与沙箱](/governance/workspace-sandbox)、[19 安全](/governance/security)。

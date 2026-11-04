@@ -23,7 +23,7 @@
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
 | **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
 | **生命周期** | 14 态状态机 + CAS 迁移（接管时钉住观察到的版本）；协作式取消（可中断/不可中断/结果未知）；暂停恢复 + 漂移说明；失败重试；心跳租约 + 周期性崩溃接管（kill -9 后副作用恰好一次）；关闭服务时暂停、重启后继续 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` |
-| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；可选的系统沙箱（macOS sandbox-exec、Linux bubblewrap 两档，原型，默认关闭；可断网，macOS 档可只放行白名单主机）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
+| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；默认开启的系统沙箱（macOS sandbox-exec、Linux bubblewrap，bash、命令 hook、MCP 服务器、验收命令都在里面，网络默认只放行白名单，用不了时拒绝执行）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
 | **执行环境** | 路径约束与逃逸检测；影子 git 快照 / 回滚；密钥不进子进程；端云幂等指令下发 | `runtime/workspace.py`、`runtime/dispatch.py` |
 | **多 Agent** | 子代理（隔离上下文 + 回传契约 + 违约修正）；DAG 调度（并发配额、失败策略、关键路径） | `agent/subagent.py`、`runtime/scheduler.py` |
 | **度量** | 轨迹导出 + OTel GenAI 风格 span；确定性回放 / 反事实分叉；评测（Wilson 区间、McNemar 检验、过早停止率） | `observe/` |
@@ -145,12 +145,14 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 读不到真实家目录，原因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
 要看覆盖率：`FLYWHL_COVERAGE=1 .venv/bin/python -m pytest -q`，再运行 `.venv/bin/python -m coverage report`。
 
-2026-10-31 的复现结果：
+2026-11-04 的复现结果：
 
 | 环境 | 离线用例 | 系统沙箱用例 |
 |---|---|---|
-| macOS，Python 3.12.13 | 670 项通过 | 11 项通过，6 项 Linux 专用的跳过 |
-| 一次性 Linux 容器 | 667 项通过，3 项跳过 | 6 项通过，11 项 macOS 专用的跳过 |
+| macOS，Python 3.12.13 | 724 项通过 | 26 项通过，7 项跳过（6 项 Linux 专用，1 项只在 CI 上要求） |
+| 一次性 Linux 容器 | 720 项通过，4 项跳过 | 21 项通过，12 项 macOS 专用的跳过 |
+
+干净安装验收（`scripts/sandbox_acceptance.py`：装 wheel、不写配置）在这两个环境都是 23 项通过。
 
 ## 真实模型测试
 

@@ -74,7 +74,9 @@
 | `registry.py` | 顺序稳定的注册表、`subset()` |
 | `fs.py` | `read` / `write` / `edit` / `ls` / `grep`，过期读取保护、严格 UTF-8、原子写、审批 diff 预览 |
 | `shell.py` | `bash`：进程组、两段式终止、流式输出、保尾截断、密钥环境变量剥离、git 命令行级加固 |
-| `sandbox.py` | macOS sandbox-exec 档位（原型）：从凭证清单生成 Seatbelt 配置、写操作限制在工作区与临时目录、可选断网、不可用时拒绝执行 |
+| `sandbox.py` | 探测可用档位；生成 macOS Seatbelt 配置与 Linux bubblewrap 参数：凭证位置不可读写、写操作限制在工作区与临时目录、网络策略；Linux 出站白名单的转发器 |
+| `confine.py` | 把配置解析成实际生效的档位，起出站代理，给 hook 与 MCP 服务器分独立目录；bash、命令 hook、MCP 服务器、验收命令共用这一层，用不了时抛 `SandboxUnavailable` |
+| `egress.py` | 出站代理：按主机白名单放行，解析出的地址再核一遍，Linux 上听 Unix 套接字 |
 | `extra.py` | `todo_write`、`read_ref`、`search_ref`、`latest_todos()` |
 | `regex_search.py` | 正则搜索放进子进程执行（`grep`、`search_ref` 共用）：超时或取消时直接杀掉，灾难性回溯不卡事件循环 |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
@@ -136,6 +138,7 @@
 | `tests/test_providers.py` | 用录制的真实 SSE 与错误响应离线验证各家差异：并行工具调用拼接、三种思考来源、思考回传方式、思考开关翻译、流不完整与流中错误、错误分类、模型写法解析、跨供应商降级链、`.env` 加载 |
 | `tests/live/` | 真实模型端到端（`pytest -m live`，默认不跑）：接入层、Agent 机制、运行时与 Web API，见 `tests/live/README.md` |
 | `tests/test_security.py` | hook 决策归一化、命令 hook 超时被杀、命令分析的绕过写法、灾难性命令全模式拒绝、工作区外读取、命令替换不被 allow 规则放行、网络输出污点、伪造提醒标签、改参重跑守卫、审批预览、MCP 注解默认值、影子仓库隔离、Web 服务访问控制 |
+| `tests/test_sandbox_default.py` | 默认开启的系统沙箱：档位解析、项目配置的限制、沙箱外执行的人工门（含回放与批准后改写），bash、命令 hook、MCP 服务器、验收命令四条通道读不到凭证哨兵、写不了工作区外，只读位置、影子 git 不执行嵌套仓库配置、出站代理与转发器 |
 | `tests/test_hardening.py` | 第二轮加固：伪装成只读的执行、仓库配置驱动 git、符号链接与判定后换链接、凭证清单、正则子进程、hook 改写与失败策略、沙箱断网、Web 令牌 / CSP / 请求体、回滚参数、断线续传、终端控制序列 |
 
 示例 `examples/01`–`10` 的说明见 [02 快速上手](/guide/quickstart) 与仓库 README。
