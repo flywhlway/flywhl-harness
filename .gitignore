@@ -18,3 +18,4 @@ docs/.vitepress/dist/
 .DS_Store
 .env
 .claude/
+.idea/

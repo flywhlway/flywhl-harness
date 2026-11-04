@@ -1,4 +1,4 @@
-# 覆盖率基线（2026-11-03，macOS 26.6.2，Python 3.12.13，dev @ ea52610 加 M0 改动）
+# 覆盖率基线（2026-11-03，macOS 26.6.2，Python 3.12.13，dev @ ea52610 加本次基线改动）
 
 $ FLYWHL_COVERAGE=1 .venv/bin/python -m pytest -q
 第一段（seatbelt 外层沙箱）：671 passed, 50 deselected
@@ -77,4 +77,4 @@ TOTAL                                         9611   1542   3510    457    81%
 - `tools/regex_search.py` 的搜索在子进程里执行（防灾难性正则卡住事件循环），所以偏低。
 - `tools/sandbox.py` 的 Linux 档只在 Linux 上运行，macOS 上的数字不含这部分。CI 的 coverage-audit 作业在 Ubuntu 上跑，
   没有 bubblewrap 时只隔离环境变量、不跑 macOS 专用用例，两边的数字不能直接比较。
-- 只出报告，不设门禁。门禁的做法留到 M4 定（路线图 D6）。
+- 只出报告，不设门禁。
