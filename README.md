@@ -2,6 +2,8 @@
 
 [![tests](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml)
 
+简体中文 | [English](README.en.md)
+
 > **Agent = Model + Harness.** 模型负责“想”，harness 负责其余的一切。
 
 一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 1.5 万行（其中大量是中文注释），
@@ -30,11 +32,14 @@
 
 ## 三分钟上手
 
-```bash
-cd flywhl-harness
-uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv && pip install -e ".[dev,anthropic]"
+需要 Python 3.11+，支持 macOS 和 Linux。Linux 上要先装 [bubblewrap](https://github.com/containers/bubblewrap)（`sudo apt install bubblewrap`）：
+bash 工具默认在系统沙箱里运行，没有沙箱时拒绝执行，不会退回沙箱外。
 
-.venv/bin/flywhl serve -w playground                # 打开终端打印的带令牌链接
+```bash
+pipx install flywhl-harness      # 或 uv tool install flywhl-harness
+
+mkdir agent-demo
+flywhl serve -w agent-demo       # 打开终端打印的带令牌链接
 ```
 
 访问令牌默认开启：首次启动生成并保存到 `~/.flywhl/server_token`（权限 0600）。链接里的令牌在首次访问时换成 Cookie，之后用书签直接打开，重启服务也不失效。
@@ -49,11 +54,24 @@ uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv &
 接入真实模型（默认 `deepseek:deepseek-flash`）：
 
 ```bash
-cp .env.example .env                 # 填入密钥；flywhl 启动时从当前目录的 .env 读取密钥与模型选择
-.venv/bin/flywhl doctor              # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
-.venv/bin/flywhl serve -w playground # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
-.venv/bin/flywhl chat --model kimi:kimi-k2.6                 # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、
-                                                             # anthropic:claude-opus-5-5、ollama:qwen3.5:9b-mlx
+cd agent-demo
+export DEEPSEEK_API_KEY=sk-...       # 也可以写进启动目录的 .env
+flywhl doctor                        # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
+flywhl serve -w .                    # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
+flywhl chat --model kimi:kimi-k2.6   # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、ollama:qwen3.5:9b-mlx
+```
+
+Anthropic 官方 SDK 是可选依赖：`pipx install 'flywhl-harness[anthropic]'`，之后用 `--model anthropic:claude-opus-5-5`。
+
+网络默认只放行白名单，模型要装包时把主机加进去，比如 `--net-allow pypi.org --net-allow files.pythonhosted.org`。
+升级前看 [CHANGELOG](CHANGELOG.md) 的“行为变化”。
+
+想读代码、跑示例和测试，就克隆仓库：
+
+```bash
+git clone https://github.com/flywhlway/flywhl-harness && cd flywhl-harness
+uv sync --all-extras                 # 或 python -m venv .venv && .venv/bin/pip install -e ".[dev,anthropic]"
+.venv/bin/flywhl serve -w playground
 ```
 
 ## 命令行
@@ -102,6 +120,8 @@ asyncio.run(main())
 
 ## 示例（全部无需 API Key）
 
+示例不在 wheel 里，要先克隆仓库。
+
 | 示例 | 演示 |
 |---|---|
 | `examples/01_minimal_loop.py` | 自定义工具、并行只读调用、五种异常都变成模型可读的错误 |
@@ -118,7 +138,7 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/11_kill9_cli_recover.py
-.venv/bin/python -m pytest -q          # 687 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python -m pytest -q          # 724 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
 
 `examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
