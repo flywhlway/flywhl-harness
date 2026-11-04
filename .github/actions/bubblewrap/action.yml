@@ -1,0 +1,12 @@
+# Linux 上系统沙箱要 bubblewrap。Ubuntu 24.04 还默认不让无特权进程建 user namespace，bwrap 起不来
+name: 启用 Linux 系统沙箱
+description: 安装 bubblewrap 并放开 user namespace 限制；其他平台什么都不做
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq bubblewrap
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

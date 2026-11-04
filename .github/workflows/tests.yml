@@ -37,10 +37,41 @@ jobs:
           enable-cache: true
       - name: 安装依赖（按 uv.lock 锁定版本）
         run: uv sync --locked --all-extras   # 含 anthropic SDK，覆盖 Anthropic 协议的离线回归
+      - uses: ./.github/actions/bubblewrap
       - name: 离线测试（不含 live）
         run: uv run pytest -q
+        env:
+          FLYWHL_REQUIRE_SANDBOX: "1"     # 沙箱起不来时失败：否则沙箱用例全部跳过，作业还是绿的
       - name: 演示：kill -9 后另一个进程接管并完成
         run: uv run python examples/11_kill9_cli_recover.py
+
+  # 装 wheel、不写配置，验证凭证读不到、工作区外写不了、网络默认受控，hook 与 MCP 服务器同样如此；没有沙箱时拒绝执行
+  sandbox-acceptance:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: ./.github/actions/bubblewrap
+      - name: 打包并装进干净的虚拟环境
+        run: |
+          uv build --wheel
+          uv venv "$RUNNER_TEMP/fresh"
+          uv pip install --python "$RUNNER_TEMP/fresh/bin/python" dist/*.whl
+      - name: 验收
+        run: '"$RUNNER_TEMP/fresh/bin/python" scripts/sandbox_acceptance.py --internet --json sandbox-acceptance.json'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandbox-acceptance-${{ matrix.os }}
+          path: sandbox-acceptance.json
 
   # 覆盖率与依赖漏洞：只出报告、不设门禁，结果写进作业摘要并作为产物上传
   coverage-audit:
@@ -54,6 +85,7 @@ jobs:
           enable-cache: true
       - name: 安装依赖（按 uv.lock 锁定版本）
         run: uv sync --locked --all-extras
+      - uses: ./.github/actions/bubblewrap
       - name: 离线测试并收集覆盖率（scripts/safe_pytest.py 两段收集后合并）
         run: FLYWHL_COVERAGE=1 uv run pytest -q
       - name: 覆盖率报告
