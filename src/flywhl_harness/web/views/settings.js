@@ -66,6 +66,12 @@ const kv = (rows) => `<dl class="kv wide">${rows.map(([k, v]) => `<dt>${esc(k)}<
 const card = (iconName, title, body, aside = "") => `<section class="card"><div class="card-head">${icon(iconName)}<h2>${esc(title)}</h2>${aside ? `<span class="aside">${aside}</span>` : ""}</div><div class="card-body">${body}</div></section>`;
 const none = (text) => `<span class="muted">${esc(text)}</span>`;
 const code = (text) => `<code class="mono">${esc(text)}</code>`;
+/** hook / MCP 实际的沙箱状态：单条可以和全局不同 */
+const entryBox = ({ sandbox: b }) => !b ? ""
+  : b.problem ? `<div class="warn-line">${icon("alert", "sm")}系统沙箱不可用，不会运行</div>`
+  : b.level === "off" ? `<div class="warn-line">${icon("alert", "sm")}在系统沙箱外运行，能读凭证、能写工作区之外</div>`
+  : `<div class="muted">在系统沙箱里运行 · ${esc(NET[b.network] || b.network)}${b.allow.length ? `：${b.allow.map(code).join(" ")}` : ""}</div>`;
+
 /** hook / MCP 的供应链：按内容绑定的文件，没锁版本的包 */
 const supply = (x) => `${(x.files || []).length ? `<div class="muted">按内容绑定：${x.files.map(code).join(" ")}</div>` : ""}${(x.unpinned || []).length ? `<div class="warn-line">${icon("alert", "sm")}没锁版本：${x.unpinned.map(esc).join("；")}</div>` : ""}`;
 
@@ -101,10 +107,10 @@ function render(inner, s, app) {
         ["可信 Host", s.access.any_host ? "任意（依赖令牌）" : s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
       ${card("hook", "Hooks", s.hooks.length ? `<ul class="plain-list">${s.hooks.map((x) => `<li><div class="row1">${code(x.event)}<span class="muted">匹配</span>${code(x.matcher)}
         <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
-        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${supply(x)}</li>`).join("")}</ul>`
+        <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${entryBox(x)}${supply(x)}</li>`).join("")}</ul>`
         : `<p class="muted">没有配置命令 hook。</p>`, s.hooks.length ? `${s.hooks.length} 个` : "")}
       ${card("plug", "MCP 服务器", s.mcp.length ? kv(s.mcp.map((m) => [m.name, `${esc(m.transport)} · ${esc(m.tools)} 个工具
-        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>${supply(m)}`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
+        <div class="muted">${m.trust_annotations ? "采信服务器自报的注解" : `不采信服务器自报的注解${m.ignored_hints ? `（${esc(m.ignored_hints)} 个工具自称只读、幂等或封闭世界，已忽略）` : ""}`}${(m.read_only || []).length ? `；按只读处理：${m.read_only.map(code).join(" ")}` : ""}</div>${entryBox(m)}${supply(m)}`])) : `<p class="muted">没有连接 MCP 服务器。</p>`)}
       ${card("gauge", "单次运行预算", kv([["最多轮次", fmt.int(B.max_turns)], ["最多工具调用", fmt.int(B.max_tool_calls)],
         ["token 上限", B.max_total_tokens ? fmt.int(B.max_total_tokens) : none("不限")], ["费用上限", B.max_cost_usd ? esc("$" + B.max_cost_usd) : none("不限")],
         ["墙钟上限", B.max_wall_seconds ? esc(fmt.dur(B.max_wall_seconds)) : none("不限")]]))}
