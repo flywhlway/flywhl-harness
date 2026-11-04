@@ -75,7 +75,7 @@ async def test_rejection_reason_steers_the_model(ws):
     async with h:
         res = await run(h, "把文字“处理完成”写入 out.txt。", label="拒绝并给出理由")
     assert res.status == "completed", transcript(h, res.session_id)
-    assert not (ws / "out.txt").exists()
+    assert not (ws / "out.txt").exists(), transcript(h, res.session_id)
     assert (ws / "result.txt").exists(), transcript(h, res.session_id)   # 模型读懂了拒绝理由并换了方案
     assert any(e.type == E.TOOL_END and e.data.get("status") == "rejected" for e in res.events)
 
