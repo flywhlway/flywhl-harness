@@ -82,6 +82,8 @@ class ToolExecutor:
                 rc.store.step_finished(rc.run_id, p.call.id, (msg.details or {}).get("status", "ok"),
                                        {"is_error": msg.is_error, "content": clip(msg.text, 2000)})
             persisted.add(p.call.id)
+            if note := (msg.details or {}).get("approver_note"):
+                rc.remind(f"用户在审批时拒绝了 {p.call.name} 调用，给出的指示是：{note}")
             publish(E.TOOL_END, self._end_data(p.call, msg))  # 落盘之后才发布：事件不领先于持久化
 
         async def driver() -> None:
@@ -237,6 +239,10 @@ class ToolExecutor:
                                             waited=time.monotonic() - asked, remembered=dec.remember):
                     publish(E.NOTICE, {"level": "warn", "code": "approval_fatigue", "text": text})
             if not dec.approved:
+                if dec.reason and not dec.by.startswith(("policy:", "system")):
+                    # 人写的理由是用户的指示，不放进工具结果：系统提示词说工具结果是数据，模型会把它当不可信内容，不照做。
+                    # 记在 details 里，落盘时转成 reminder：回放走同一条路，上下文不分叉
+                    return done(ToolResult.error("用户拒绝了该操作。请按随后的用户指示调整方案。", approver_note=dec.reason), "rejected")
                 why = f"：{dec.reason}" if dec.reason else ""
                 return done(ToolResult.error(f"用户拒绝了该操作{why}。请调整方案（例如改用只读方式），或询问用户的意图。"), "rejected")
             if dec.edited_args:

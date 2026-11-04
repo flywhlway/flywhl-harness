@@ -19,10 +19,12 @@ from flywhl_harness.events import E
 from flywhl_harness.llm.base import ErrorKind, ModelRequest, Provider, ProviderError
 from flywhl_harness.llm.resilient import ResilientProvider
 from flywhl_harness.observe.evals import mcnemar_exact, wilson_interval
+from flywhl_harness.policy.approvals import ApprovalDecision
 from flywhl_harness.runtime.dispatch import CommandDispatcher, EdgeExecutor, FlakyTransport
 from flywhl_harness.runtime.retry import CircuitBreaker, RetryBudget, RetryPolicy, retry_async
 from flywhl_harness.runtime.scheduler import CycleError, DagScheduler, TaskSpec, UpstreamFailed, critical_path
 from flywhl_harness.tools.schema import schema_from_signature, validate
+from flywhl_harness.types import MsgKind
 
 from .conftest import make_harness, tool_ends
 
@@ -295,6 +297,36 @@ async def test_deterministic_replay(ws):
     assert rep.status == "completed" and rep.same_tool_sequence and rep.same_final_text
     assert rep.divergence is None
     assert svc.count() == before, "回放不得重放副作用"
+
+
+async def test_human_rejection_reason_reaches_the_model_as_a_reminder(ws):
+    """系统提示词说工具结果是数据：理由放在工具结果里，模型会当成不可信内容不照做，所以走 reminder；回放也要重现这条提醒。"""
+    from flywhl_harness.observe.replay import replay_run
+
+    h = make_harness(ws, [{"tool_calls": [{"name": "write", "args": {"path": "out.txt", "content": "x"}}]}, "好"], on_ask="wait")
+
+    async def no(rec):
+        return ApprovalDecision(False, by="user", reason="改写 result.txt")
+
+    h.approvals.resolver = no
+    res = await h.run("写文件")
+    end = tool_ends(res.events)[0]
+    assert end["status"] == "rejected" and "result.txt" not in end["content"]
+    log = h.log(res.session_id).context().messages
+    notes = [m.text for m in log if m.kind == MsgKind.REMINDER]
+    assert len(notes) == 1 and "<system-reminder>" in notes[0] and "改写 result.txt" in notes[0]
+    assert log.index(next(m for m in log if m.kind == MsgKind.REMINDER)) > log.index(next(m for m in log if m.role == "tool"))
+
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools)
+    assert rep.divergence is None
+
+
+async def test_policy_rejection_stays_in_the_tool_result(ws):
+    """无人值守时的拒绝理由是 harness 写的，不是用户的指示，不走提醒通道。"""
+    h = make_harness(ws, [{"tool_calls": [{"name": "write", "args": {"path": "out.txt", "content": "x"}}]}, "好"], on_ask="deny")
+    res = await h.run("写文件")
+    assert "无人值守" in tool_ends(res.events)[0]["content"]
+    assert not [m for m in h.log(res.session_id).context().messages if m.kind == MsgKind.REMINDER]
 
 
 # ---------------------------------------------------------------------- 统计与 schema

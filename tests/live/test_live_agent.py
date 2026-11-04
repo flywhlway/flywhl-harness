@@ -66,7 +66,7 @@ async def test_write_requires_approval_with_preview(ws):
 
 async def test_rejection_reason_steers_the_model(ws):
     def decide(rec):
-        if rec.args.get("path", "").endswith("out.txt"):
+        if "out.txt" in json.dumps(rec.args, ensure_ascii=False):   # 不只看 path：模型也可能用 bash 写
             return ApprovalDecision(False, by="live-test", reason="不要写 out.txt，请改为写入 result.txt")
         return ApprovalDecision(True, by="live-test")
 
