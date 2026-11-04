@@ -249,4 +249,4 @@
 
 留下的边界写在 [18 章“这一层不管的事”](../governance/workspace-sandbox.md#这一层不管的事)。
 
-待查：live 回归的三次完整运行里，第 2 次有两条“Run 结束了也没等到期望的事件”，当时没有诊断信息，原因未定位，详见 [tests/live/README.md](../../tests/live/README.md)。
+待查：live 回归的三次完整运行里，第 2 次有两条“Run 结束了也没等到期望的事件”，当时没有诊断信息，原因未定位，详见 [tests/live/README.md](../../tests/live/README.md)。2026-11-05 的 4 次完整运行都没有复现，原因仍未定位。

@@ -16,6 +16,10 @@
 > - 离线套件 macOS 724 passed、Linux 720 passed，干净安装验收两个平台都是 23/23；
 > - 33 个 live 场景在真实沙箱里跑过，一次失败没有定位到原因；
 > - 复核记录见 [release-readiness.md](release-readiness.md) 末尾，新发现见 [issues.md](issues.md) 文末。
+>
+> **0.2.0 门禁（2026-11-05）：**
+> - 离线套件 macOS 726 passed、Linux 723 passed，33 个 live 场景通过；
+> - 结果、例外和没闭环的事见[门禁记录](evidence/release-gate-0.2.0.md)。
 
 ## 结论
 
