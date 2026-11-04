@@ -39,7 +39,7 @@ jobs:
         run: |
           test -f "dist/flywhl_harness-${TAG#v}-py3-none-any.whl" || { ls dist; echo "dist 里没有 ${TAG#v} 的 wheel"; exit 1; }
       - name: 元数据检查
-        run: uvx -q twine@6.2.0 check --strict dist/*
+        run: uvx -q twine@7.0.0 check --strict dist/*
       - name: 依赖漏洞（有已知漏洞就停）
         run: |
           uv export --frozen --no-dev --extra anthropic --no-emit-project --format requirements-txt -o requirements-runtime.txt
