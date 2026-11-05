@@ -41,6 +41,7 @@ import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from .sensitive import CREDENTIAL_HINTS, SECRET_HINTS, sensitivity  # 与文件工具的托管基线共用一份敏感路径清单
 
@@ -103,6 +104,8 @@ _GLOB_LIMIT = 1024    # glob 匹配超过这么多个就不逐个确认真实位
 _GLOB_DEPTH = 3       # 含通配符的路径段超过这么多层同样不展开：*/*/*/*/x 会把整个仓库走一遍
 _DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
 _HOME = ("~", "$HOME", "${HOME}")
+# 紧贴在短选项后面的路径：date -f/etc/passwd。/ 后面要有内容：cut -d/、awk -F/ 的 / 是分隔符
+_GLUED_PATH = re.compile(r"-[A-Za-z0-9]+((?:~|\$HOME|\$\{HOME\})?/[^/].*)", re.DOTALL)
 # $( ... )（允许一层嵌套括号）、反引号、<( ... ) / >( ... )
 _SUBST = re.compile(r"\$\(((?:[^()]|\([^()]*\))*)\)|`([^`]*)`|[<>]\(((?:[^()]|\([^()]*\))*)\)")
 _BLOCK_DEV = re.compile(r"/dev/(r?disk|sd|nvme|hd|xvd|mmcblk|vd|md|dm-|mapper/)")
@@ -594,19 +597,22 @@ def _bash_lines(cmd: str, bodies: dict[str, list[str]] | None = None) -> str:
 
 _ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
                 "\\": "\\", "'": "'", '"': '"', "?": "?"}
-_ANSI_ESC = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8})|c(.))", re.S)
+_ANSI_ESC = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x\{([0-9a-fA-F]*)\}?|x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{1,4})"
+                       r"|U([0-9a-fA-F]{1,8})|c(.))", re.S)
 
 
 def _ansi_c(body: str) -> str:
-    """按 bash 的规则解码 ``$'...'`` 的正文（\\n、\\xHH、\\uHHHH、八进制、\\e、\\cX……）。
+    """按 bash 的规则解码 ``$'...'`` 的正文（\\n、\\xHH、\\x{HH}、\\uHHHH、八进制、\\e、\\cX……）。
     不认识的转义（\\<、\\.）和 bash 一样保留反斜杠——不借用 Python 的 unicode_escape，它对未知转义的处理会随版本变成报错。
     bash 的字符串到 NUL 为止：``$'rm\\x00junk'`` 就是 ``rm``"""
     def one(m: re.Match) -> str:
-        simple, octal, hx, u4, u8, ctl = m.groups()
+        simple, octal, braced, hx, u4, u8, ctl = m.groups()
         if simple:
             return _ANSI_SIMPLE[simple]
         if octal:
             return chr(int(octal, 8) & 0xFF)
+        if braced is not None:     # bash 的 \\x{...}：位数不限，取低 8 位，} 可以省略，没有数字就是 NUL
+            return chr(int(braced or "0", 16) & 0xFF)
         if hx:
             return chr(int(hx, 16))
         if u4 or u8:
@@ -777,10 +783,16 @@ def _assign(word: str, a: CommandAnalysis, *, nameref: bool = False) -> None:
 
 
 def _prefix(word: str, a: CommandAnalysis) -> None:
-    """记下前置赋值 ``FOO=bar cmd`` 的值（含命令替换时不知道，不记），见 _apply_prefix。"""
+    """记下前置赋值 ``FOO=bar cmd`` 的值（含命令替换时不知道），见 _apply_prefix。``FOO+=bar cmd`` 接在原来的值后面，
+    变量可能没赋过时就是普通赋值（``D+=/ sh -c 'rm -rf ${D}usr'``）。"""
     name, _, value = word.partition("=")
-    if not name.endswith("+"):
-        a.prefix[name] = None if "$(" in value or "`" in value or value.endswith("$") else value
+    known: str | None = None if "$(" in value or "`" in value or value.endswith("$") else value
+    if name.endswith("+"):
+        name = name[:-1]
+        old = a.vars.get(name) or []
+        if known is not None and len(old) == 1 and old[0] is not None and name in a.sure:
+            known = old[0] + known
+    a.prefix[name] = known
 
 
 def _scope_for(a: CommandAnalysis, mode: str) -> tuple:
@@ -1363,6 +1375,11 @@ def _within(real: str, root: str) -> bool:
     return real == root or real.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def _in_workspace(path: str, a: CommandAnalysis) -> bool:
+    """绝对路径字面上在工作区里。紧贴在选项后的路径不经过 analyze() 开头的改写，这里补上。"""
+    return bool(a.workspace) and _within(posixpath.normpath(path), a.workspace.rstrip("/"))
+
+
 def _is_outside(path: str, a: CommandAnalysis) -> bool:
     """工作区内的绝对路径在 analyze() 开头已被替换成 ./ 前缀，这里剩下的绝对路径都在工作区外；
     相对路径按每个可能的当前目录拼起来，用 normpath 判断是否经 .. 爬出了工作区，再按真实路径判断——
@@ -1473,11 +1490,24 @@ def _brace_range(lo: int, hi: int, incr: str | None) -> range:
     return range(lo, hi + sign, sign * (abs(int(incr or 1)) or 1))
 
 
+def _program_words(seg: list[str]) -> set[int]:
+    """段里 sed / awk 程序文本的位置。程序几乎都写在引号里，shell 不展开里面的花括号，shlex 却已经去掉了引号：
+    ``awk 'BEGIN{print "a", "b"; system("x")}'`` 按逗号展开之后程序就碎了，后半截成了数据文件。"""
+    for k, w in enumerate(seg):
+        name = w.rsplit("/", 1)[-1]
+        if name in ("sed", "awk", "gawk", "mawk"):
+            return {k + 1 + j for j in _script_args(name, seg[k + 1:]).words}
+        if not (_ASSIGN.fullmatch(w) or w in RESERVED or w.startswith("-") or name in WRAPPERS):
+            break
+    return set()
+
+
 def _classify(seg: list[str], a: CommandAnalysis, stdin: list[str] | None = None) -> None:
     # 花括号展开发生在命令执行之前、作用于每个词：rm -rf {~,build} 实际执行的是 rm -rf ~ build
     expanded: list[str] = []
-    for w in seg:
-        words, complete = _expand_braces(w)
+    programs = _program_words(seg)
+    for k, w in enumerate(seg):
+        words, complete = ([w], True) if k in programs else _expand_braces(w)
         if not complete:
             a.bump("external", "花括号展开的结果过多，无法静态分析")
         expanded.extend(words)
@@ -1538,11 +1568,14 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
         if _BLOCK_DEV.match(target):
             a.flag_catastrophic(f"{cmd} 写入块设备 {target}")
     # 工作区边界：参数（含 --opt=/path 的值）里出现工作区外路径；sed / awk 的程序文本不是路径
-    programs = _program_args(cmd, args)
+    programs = _script_args(cmd, args).words
     for j, w in enumerate(args, start=1):
         if j in redirect_targets or j - 1 in programs:
             continue
         val = w.split("=", 1)[1] if w.startswith("-") and "=" in w else w
+        if cmd in READ_CMDS and (m := _GLUED_PATH.fullmatch(w)) and not _in_workspace(m[1], a) \
+                and not (cmd == "sort" and w.startswith("-T")):    # sort -T 是放临时文件的目录，不读内容
+            val = m[1]
         if _is_outside(val, a):
             if _opaque(val, a):
                 why = f"路径 {val} 里的变量要到运行时才知道值，位置无法静态判断，按工作区外处理"
@@ -1561,7 +1594,7 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
             if text.strip():
                 _recurse(text, a, f"{cmd} 的标准输入")
     if cmd in SHELLS and (script := _shell_script(plain)) is not None:
-        _recurse(script, a, f"{cmd} -c")
+        _shell_c(cmd, script, a)
         if cmd in _FOREIGN_SHELLS:
             a.bump("write", f"{cmd} 的语法和 sh 不同，按可写处理")
     elif cmd == "eval":
@@ -1646,8 +1679,8 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
             elif cmd == "export" or "x" in opts:
                 a.exported.add(name)
         a.bump("write", f"{cmd} 修改 shell 变量")
-    elif cmd in ("sed", "perl") and any(re.fullmatch(r"-[A-Za-z]*i.*|--in-place.*", x) for x in args):
-        a.bump("write", f"{cmd} -i 原地修改文件")   # 含合写的短选项：sed -Ei、sed -ni.bak
+    elif cmd == "perl" and any(re.fullmatch(r"-[A-Za-z]*i.*|--in-place.*", x) for x in args):
+        a.bump("write", "perl -i 原地修改文件")     # 含合写的短选项
     elif cmd == "sed":
         _sed(args, a)
     elif cmd in ("awk", "gawk", "mawk"):
@@ -1692,38 +1725,77 @@ def _written_args(cmd: str, args: list[str]) -> list[str]:
     return operands if cmd == "tee" else operands[-1:] if cmd in ("cp", "mv") else []
 
 
-def _program_args(cmd: str, args: list[str]) -> set[int]:
-    """sed / awk 的程序文本在 args 里的位置。``sed -n '/x/p'`` 的 ``/x/p`` 不是路径，不参与工作区边界判断；
-    程序里写文件、执行命令由 _sed / _awk 单独判断。程序来自 -f 文件时，第一个位置参数是数据文件，照常判断。"""
-    if cmd == "sed":
-        code, takes = ("-e", "--expression"), {"-l", "--line-length", "-f", "--file"}
-    elif cmd in ("awk", "gawk", "mawk"):
-        code, takes = ("-e", "--source"), {"-F", "-v", "-f", "--file", "-i", "--include", "-l", "--load", "-W"}
-    else:
-        return set()
-    out: set[int] = set()
-    explicit, i = False, 0
+def _getopt(args: list[str], takes: str, optional: str, longs: dict[str, str]) -> tuple[list[tuple[str, str, int]], list[int]]:
+    """按 getopt 走一遍参数：选项和位置参数可以穿插，``--`` 之后都是位置参数。返回 ([(选项字母, 值, 值所在的下标)],
+    位置参数的下标)。takes 是必须带值的短选项，optional 是值只能紧贴的短选项；longs 是长选项到短字母的对照，
+    长选项可以缩写，有歧义时取排在前面的，所以要紧的写在前面。不在对照里的长选项当作不带值。"""
+    opts: list[tuple[str, str, int]] = []
+    pos: list[int] = []
+    i = 0
     while i < len(args):
         x = args[i]
-        if x in code and i + 1 < len(args):
-            out.add(i + 1)
-            explicit, i = True, i + 2
-            continue
-        if x.startswith(("--expression=", "--source=")):
-            out.add(i)
-            explicit = True
-        elif x.startswith(("-f", "--file")):
-            explicit = True
-        if x in takes:
-            i += 2
-            continue
-        if x.startswith("-"):
-            i += 1
-            continue
-        if not explicit:
-            out.add(i)
-        break
-    return out
+        if x == "--":
+            pos += range(i + 1, len(args))
+            break
+        if not x.startswith("-") or x == "-":
+            pos.append(i)
+        elif x.startswith("--"):
+            key, eq, val = x.partition("=")
+            c = next((v for k, v in longs.items() if k.startswith(key)), "")
+            if c and c in takes and not eq and i + 1 < len(args):
+                i += 1
+                val = args[i]
+            if c:
+                opts.append((c, val, i))
+        else:
+            for j, c in enumerate(x[1:], start=1):
+                if c in takes or c in optional:
+                    val = x[j + 1:]
+                    if not val and c in takes and i + 1 < len(args):
+                        i += 1
+                        val = args[i]
+                    opts.append((c, val, i))
+                    break
+                opts.append((c, "", i))
+        i += 1
+    return opts, pos
+
+
+class _Script(NamedTuple):
+    text: str                           # 程序文本，多段按行接起来
+    words: set[int]                     # 程序文本所在的词：不是路径，不过工作区边界
+    loaded: bool                        # 程序从文件加载，内容看不到
+    opts: list[tuple[str, str, int]]    # 见 _getopt
+
+
+_SED_OPTS = ("eflI", "i", {"--expression": "e", "--file": "f", "--in-place": "i", "--line-length": "l"})
+_AWK_OPTS = ("eEfFilvW", "dDLop", {"--source": "e", "--file": "f", "--exec": "E", "--include": "i", "--load": "l", "--debug": "D",
+                                   "--dump-variables": "d", "--pretty-print": "o", "--profile": "p",
+                                   "--field-separator": "F", "--assign": "v"})
+
+
+def _script_args(cmd: str, args: list[str]) -> _Script:
+    """sed / awk 的程序来自哪里：``-e``、``--expression``、``--source`` 的值，都没有也没从文件加载时是第一个位置参数，
+    其余位置参数是数据文件，照常按路径判断。别的命令没有程序文本。"""
+    if cmd == "sed":
+        code, load, spec = "e", "f", _SED_OPTS
+    elif cmd in ("awk", "gawk", "mawk"):
+        code, load, spec = "e", "fEilD", _AWK_OPTS
+    else:
+        return _Script("", set(), False, [])
+    opts, pos = _getopt(args, *spec)
+    letters = {c for c, _, _ in opts}
+    redirects = {j for k, w in enumerate(args) if _OPERATOR.fullmatch(w)
+                 for j in (k, k + 1, *([k - 1] if k and args[k - 1].isdigit() else []))}   # 2>/dev/null 切出来是三个词
+    pos = [k for k in pos if k not in redirects and (args[k] or "i" not in letters)]      # BSD 的 sed -i ''
+    # gawk 的 -W 名字=值 就是 --名字=值，mawk 的 -W exec 文件也是从文件加载：都按看不到内容算
+    risky = [o for o, c in spec[2].items() if c == code or c in load]
+    wide = [v.split("=", 1)[0] for c, v, _ in opts if c == "W"]
+    loaded = bool(letters & set(load)) or any(w and o.startswith("--" + w) for w in wide for o in risky)
+    parts = [(v, k) for c, v, k in opts if c == code]
+    if not parts and not loaded and pos:
+        parts = [(args[pos[0]], pos[0])]
+    return _Script("\n".join(v for v, _ in parts), {k for _, k in parts}, loaded, opts)
 
 
 def _short_opts(args: list[str], takes_value: str) -> set[str]:
@@ -1790,36 +1862,191 @@ def _positional(args: list[str], takes_value: set[str]) -> list[str]:
     return out
 
 
-# sed 的 w / W（写文件）、e（把模式空间当命令执行）、r / R（读文件）命令，以及 s 命令的 w / e 标志
-_SED_IO = re.compile(r"(^|[;{}\s])[0-9,$]*\s*[wWerR](\s|[;}]|$)|/[gpIiMm0-9]*[we](\s|[;}]|$)")
+_SED_NUM = re.compile(rf"(?:\d|{_VAR_REF.pattern})+(?:~(?:\d|{_VAR_REF.pattern})+)?")   # 地址里的变量当作数字
+_SED_PLAIN = frozenset("=dDgGhHnNpPxzF")     # 不带参数的命令
+_SED_COUNT = frozenset("lLqQ")               # 可以跟一个数字
+_SED_LABEL = frozenset(":btTv")              # 跟一个标签，到空白、; 或 } 为止
+_SED_LINE = frozenset("aicerRwW")            # 参数一直到行尾：文本、文件名或要执行的命令
+_SED_EFFECT = frozenset("erRwW")             # 执行命令、读写别的文件
+
+
+def _sed_bracket(t: str, i: int) -> int:
+    """t[i] 是 ``[``：返回方括号表达式之后的位置（里面的分隔符不算数，``s/[^/]*$//``）。没有配对时只跳过这个 ``[``。"""
+    j = i + 1
+    j += t[j:j + 1] == "^"
+    j += t[j:j + 1] == "]"
+    while j < len(t) and t[j] != "\n":
+        if t[j] == "]":
+            return j + 1
+        if t[j:j + 2] in ("[:", "[.", "[="):
+            j = t.find(t[j + 1] + "]", j + 2)
+            if j < 0:
+                break
+            j += 1
+        j += 1
+    return i + 1
+
+
+def _sed_delim(t: str, i: int, d: str, regex: bool = True) -> int | None:
+    """从 i 起找没转义的分隔符 d，返回它的位置；找不到返回 None。"""
+    while i < len(t):
+        c = t[i]
+        if c == d:
+            return i
+        if c == "\n":
+            return None
+        if c == "\\":
+            i += 2
+        elif c == "[" and regex:
+            i = _sed_bracket(t, i)
+        else:
+            i += 1
+    return None
+
+
+def _sed_addr(t: str, i: int, step: bool = False) -> int | None:
+    """跳过一个地址，返回它之后的位置（没有地址就是 i）；正则地址没闭合返回 None。step：第二个地址还能写 ``+N``、``~N``。"""
+    if step and t[i:i + 1] in ("+", "~"):
+        i += 1
+    if m := _SED_NUM.match(t, i):
+        return m.end()
+    if t[i:i + 1] in (_LIT, "$"):
+        return i + 1
+    if t[i:i + 1] == "/":
+        end = _sed_delim(t, i + 1, "/")
+    elif t[i:i + 1] == "\\" and i + 1 < len(t):
+        end = _sed_delim(t, i + 2, t[i + 1])
+    else:
+        return i
+    if end is None:
+        return None
+    end += 1
+    while t[end:end + 1] in ("I", "M"):
+        end += 1
+    return end
+
+
+def _sed_line(t: str, i: int, continued: bool = False) -> int:
+    """i 所在的行尾。continued：行尾的反斜杠续行（a、i、c 的文本）。"""
+    while (end := t.find("\n", i)) != -1:
+        if not continued or (end - len(t[i:end].rstrip("\\")) - i) % 2 == 0:
+            return end
+        i = end + 1
+    return len(t)
+
+
+def _sed_commands(t: str) -> list[tuple[str, str]] | None:
+    """按 sed 的语法走一遍程序，返回有副作用的命令 [(字母, 参数)]：e、r、R、w、W，``s`` 的 e、w 标志也算成这两个命令，
+    e 的参数是替换文本（模式空间就是它要执行的内容）。写法认不出时返回 None。
+
+    先跳过地址（数字、``$``、``first~step``、``/re/``、``\\cREc``、``addr,+N``、``!``），地址后面的第一个字母才是命令：
+    只有这样才分得清 ``s/e/w/``、``/e/p`` 里的字母是数据。"""
+    found: list[tuple[str, str]] = []
+    i, n = 0, len(t)
+    while True:
+        while i < n and t[i] in " \t\n;{}":
+            i += 1
+        if i >= n:
+            return found
+        addressed = i
+        i = _sed_addr(t, i)
+        if i is not None and i > addressed:
+            while t[i:i + 1] in (" ", "\t"):
+                i += 1
+            if t[i:i + 1] == ",":
+                i += 1
+                while t[i:i + 1] in (" ", "\t"):
+                    i += 1
+                start, i = i, _sed_addr(t, i, step=True)
+                if i == start:
+                    return None
+        if i is None:
+            return None
+        while t[i:i + 1] in (" ", "\t", "!"):
+            i += 1
+        if i >= n:
+            return None if i > addressed else found
+        c, i = t[i], i + 1
+        if c == "{":
+            continue
+        if c == "#":
+            i = _sed_line(t, i)
+            continue
+        if c in _SED_LINE:
+            end = _sed_line(t, i, continued=c in "aic")
+            if c in _SED_EFFECT:
+                found.append((c, t[i:end].strip()))
+            i = end
+        elif c in ("s", "y"):
+            mid = _sed_delim(t, i + 1, t[i:i + 1], regex=c == "s") if t[i:i + 1] not in ("", "\n", "\\") else None
+            end = None if mid is None else _sed_delim(t, mid + 1, t[i], regex=False)
+            if end is None:
+                return None
+            replacement, i = t[mid + 1:end], end + 1
+            while c == "s" and t[i:i + 1] and t[i] in "gpiImMew0123456789":
+                if t[i] == "e":
+                    found.append(("e", replacement))
+                if t[i] == "w":
+                    end = _sed_line(t, i)
+                    found.append(("w", t[i + 1:end].strip()))
+                    i = end - 1
+                i += 1
+        elif c in _SED_LABEL:
+            while t[i:i + 1] in (" ", "\t"):
+                i += 1
+            while i < n and t[i] not in " \t\n;}":
+                i += 1
+        elif c in _SED_COUNT:
+            while t[i:i + 1] and t[i] in " \t0123456789":
+                i += 1
+        elif c not in _SED_PLAIN:
+            return None
+        while t[i:i + 1] in (" ", "\t"):
+            i += 1
+        if i < n and t[i] not in ";\n}#":
+            return None
 
 
 def _sed(args: list[str], a: CommandAnalysis) -> None:
-    if any(re.fullmatch(r"-[A-Za-z]*f.*", x) or x.startswith("--file") for x in args):
+    script = _script_args("sed", args)
+    if any(c in "iI" for c, _, _ in script.opts):
+        a.bump("write", "sed -i 原地修改文件")     # 含合写的短选项：sed -Ei、sed -ni.bak
+    if script.loaded:
         a.bump("external", "sed -f 从文件读取程序，内容无法静态分析")
         a.inline = True
-    elif _SED_IO.search(" ".join(x for x in args if not x.startswith("-"))):
-        a.bump("external", "sed 程序含 w/e/r 命令（写文件、执行命令或读别的文件）")
-    else:
+        return
+    commands = _sed_commands(script.text)
+    if commands is None:
+        a.bump("external", "sed 程序认不出，里面可能有写文件或执行命令的命令")
+    elif not commands:
         a.bump("read", "sed 流式处理")
+    for c, arg in commands or ():
+        a.bump("external", "sed 程序含 w/e/r 命令（写文件、执行命令或读别的文件）")
+        if c == "e":
+            a.inline = True
+            if arg:
+                _recurse(arg, a, "sed 的 e 命令")
 
 
-_AWK_CODE = ("-f", "--file", "-E", "--exec", "-i", "--include", "-l", "--load", "-D", "--debug")
-_AWK_WRITE = ("-d", "--dump-variables", "-o", "--pretty-print", "-p", "--profile")
 _AWK_READ = re.compile(r'getline\b[^;})|&>\n]*<\s*(?:"([^"]*)")?')   # getline x < "文件"：文件名不是字面量时位置不定
+# 程序里执行命令、写文件、加载扩展。@名字( 是 gawk 的间接调用：名字是变量，取值可以是 system
+_AWK_EFFECT = re.compile(r'system\s*\(|\|&?\s*getline|print[^;}]*(>|\|)|@(ns)?include|@load|(?<![\w".-])@\s*[A-Za-z_]\w*\s*\(')
+# 运行时改写 ARGV：要读的文件换掉了，命令行上看不到
+_AWK_ARGV = re.compile(r"\bARGV\s*\[[^\]]*\]\s*[-+*/%^]?=(?!=)|\b(?:g?sub|gensub|split|patsplit|match)\s*\([^;{}]*\bARGV\b")
 
 
 def _awk(cmd: str, args: list[str], a: CommandAnalysis) -> None:
-    opts = [x for x in args if x.startswith("-")]
-    prog = " ".join(x for x in args if not x.startswith("-"))
-    if any(x.startswith(_AWK_CODE) for x in opts):
+    script = _script_args(cmd, args)
+    if script.loaded:
         a.bump("external", f"{cmd} 从文件加载程序或扩展（-f / -E / -i / -l），内容无法静态分析")
         a.inline = True
-    elif re.search(r"system\s*\(|\|&?\s*getline|print[^;}]*(>|\|)|@(ns)?include|@load", prog):
+    elif _AWK_EFFECT.search(script.text):
         a.bump("external", f"{cmd} 程序里执行命令、写文件或加载扩展")
-    elif any(m[1] is None or _is_outside(m[1], a) for m in _AWK_READ.finditer(prog)):
+    elif _AWK_ARGV.search(script.text):
+        a.bump("external", f"{cmd} 程序改写 ARGV，要读的文件在命令行上看不到")
+    elif any(m[1] is None or _is_outside(m[1], a) for m in _AWK_READ.finditer(script.text)):
         a.bump("external", f"{cmd} 程序用 getline 读工作区外或位置不定的文件")
-    elif any(x.startswith(_AWK_WRITE) for x in opts):
+    elif any(c in "dop" for c, _, _ in script.opts):
         a.bump("write", f"{cmd} 把调试信息写入文件")
     else:
         a.bump("read", f"{cmd} 流式处理")
@@ -1877,10 +2104,16 @@ def _requote(words: list[str]) -> str:
     return " ".join(out)
 
 
+_SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+
+
 def _shell_opts(args: list[str]) -> tuple[set[str], list[str]]:
     """拆开 shell 的选项，返回 (短选项字母, 选项之后的参数)。短选项可以合写（``-lc``、``-ec``、``-xc``）；
-    ``-o``/``-O`` 与 ``--rcfile`` 这类选项带一个值。"""
+    ``-o``/``-O`` 与 ``--rcfile`` 这类选项带一个值。fish 的 ``--command``、``--init-command`` 就是 ``-c``，可以缩写，
+    脚本放到返回的参数最前面。别的长选项是否带值没有表可查：后面跟一个词、再跟 ``-c`` 时这个词是它的值
+    （``zsh --emulate sh -c '…'``）。"""
     letters: set[str] = set()
+    scripts: list[str] = []
     i = 0
     while i < len(args):
         x = args[i]
@@ -1890,22 +2123,52 @@ def _shell_opts(args: list[str]) -> tuple[set[str], list[str]]:
         if x in ("--rcfile", "--init-file"):
             i += 2
         elif x.startswith("--"):
+            name, eq, val = x.partition("=")
             i += 1
+            if len(name) > 2 and any(o.startswith(name) for o in ("--command", "--init-command")):
+                letters.add("c")
+                if not eq and i < len(args):
+                    val = args[i]
+                    i += 1
+                scripts.append(val)
+            elif not eq and i + 1 < len(args) and not args[i].startswith("-") and _SHELL_C.fullmatch(args[i + 1]):
+                i += 1
         elif len(x) > 1 and x[0] in "-+":
             if x[0] == "-":
                 letters |= set(x[1:])
             i += 2 if x[-1] in "oO" else 1
         else:
             break
-    return letters, args[i:]
+    return letters, scripts + args[i:]
 
 
-def _shell_script(args: list[str]) -> str | None:
-    """``bash -c`` 的脚本：选项之后的第一个参数。没有 ``-c`` 时返回 None。"""
+def _shell_script(args: list[str]) -> list[str] | None:
+    """``bash -c`` 的脚本和它后面的参数（``$0``、``$1``……）：选项之后的词。没有 ``-c`` 时返回 None。"""
     letters, rest = _shell_opts(args)
     if "c" not in letters:
         return None
-    return rest[0] if rest else ""
+    return rest or [""]
+
+
+def _shell_c(cmd: str, words: list[str], a: CommandAnalysis) -> None:
+    """``sh -c 脚本 名字 参数……``：脚本后面的词绑到 ``$0``、``$1``…… 再分析（``sh -c 'rm -rf "$1"' _ ~``）。
+    它们是取值，不会被当成命令再解析一遍。这些变量只在 -c 的子 shell 里算数，分析完恢复。"""
+    script, *rest = words
+    if not rest:
+        _recurse(script, a, f"{cmd} -c")
+        return
+    for view in _arg_views(script.replace(_LIT, "$").split(), rest[1:], a):
+        saved = _bind_positional(view, a)
+        saved["0"] = (a.vars.get("0"), "0" in a.sure)
+        a.vars["0"] = [rest[0]]
+        a.sure.add("0")
+        hidden = set(saved) - a.exported    # 子进程只看得到导出的变量，见 _scope_for
+        a.exported |= hidden
+        try:
+            _recurse(script, a, f"{cmd} -c")
+        finally:
+            a.exported -= hidden
+            _restore_positional(saved, a)
 
 
 def _reads_stdin(args: list[str]) -> bool:
@@ -1945,6 +2208,10 @@ def _find_actions(args: list[str], a: CommandAnalysis) -> None:
             _recurse(_requote([root if w == "{}" else w for w in action]), a, f"find {x}")
 
 
+_PS_LONG_VALUES = {"--cols", "--columns", "--format", "--group", "--Group", "--lines", "--pid", "--ppid", "--quick-pid",
+                   "--rows", "--sid", "--sort", "--tty", "--user", "--User", "--width"}
+
+
 def _ps_shows_env(args: list[str]) -> bool:
     """ps 是否会打印进程环境：``-E``（macOS）或 BSD 风格的 ``e``（``ps eww``、``ps axe``，macOS 与 Linux 都是）。
     ``ps -e`` / ``ps -ef`` 是“所有进程”，不打印环境。带值的选项（``-p 1``、``-o pid``、``U deploy``）跳过它的值。"""
@@ -1955,6 +2222,7 @@ def _ps_shows_env(args: list[str]) -> bool:
             skip = False
             continue
         if x.startswith("--"):
+            skip = x in _PS_LONG_VALUES   # ps --format etime：etime 是值，不是 BSD 写法的 e
             continue
         dash = x.startswith("-")
         word = x[1:] if dash else x
