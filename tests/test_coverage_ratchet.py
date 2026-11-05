@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("coverage_ratchet", ROOT / "scripts" / "coverage_ratchet.py")
+SCRIPT = ROOT / "scripts" / "coverage_ratchet.py"
+if not SCRIPT.is_file():
+    pytest.skip("scripts/coverage_ratchet.py 不在 sdist 里", allow_module_level=True)
+
+spec = importlib.util.spec_from_file_location("coverage_ratchet", SCRIPT)
 ratchet = importlib.util.module_from_spec(spec)
 sys.modules["coverage_ratchet"] = ratchet
 spec.loader.exec_module(ratchet)

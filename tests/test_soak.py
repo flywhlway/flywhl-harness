@@ -13,11 +13,14 @@ import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "soak.py"
+if not SCRIPT.is_file():
+    pytest.skip("scripts/soak.py 不在 sdist 里", allow_module_level=True)
 
 
 @pytest.fixture(scope="module")
 def soak():
-    spec = importlib.util.spec_from_file_location("soak", ROOT / "scripts" / "soak.py")
+    spec = importlib.util.spec_from_file_location("soak", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     sys.modules["soak"] = module
     spec.loader.exec_module(module)
