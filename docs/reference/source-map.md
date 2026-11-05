@@ -111,7 +111,7 @@
 |---|---|
 | `observe/trace.py` | `export_trajectory()`、`to_otel_spans()` |
 | `observe/export.py` | `session_markdown()`：会话导出为 Markdown，`flywhl export` 与导出接口共用 |
-| `observe/replay.py` | `replay_run()`、`RecordedTool`、`HybridProvider` |
+| `observe/replay.py` | `replay_run()`、`replay_trajectory()`（只靠保存的轨迹回放）、`RecordedTool`、`HybridProvider` |
 | `observe/evals.py` | `EvalCase`、`run_eval()`、`wilson_interval()`、`mcnemar_exact()` |
 | `server/app.py` | FastAPI：会话/Run（含暂停、恢复、重试）/审批/上下文检查器/快照 REST；SSE（`Last-Event-ID`、心跳、断开检测）；lifespan 中启动周期性恢复；访问控制中间件（Host 白名单、跨站写请求检查、默认开启的访问令牌）、安全响应头（CSP）、请求体上限；会话导出、当前生效的设置 |
 | `web/app.js` | 控制台入口：路由（深链接 `#/s/<会话>`、`#/runs`、`#/approvals`、`#/tools`、`#/settings`）、侧边栏、命令面板、全局快捷键、审批计数轮询 |

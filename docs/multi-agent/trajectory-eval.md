@@ -97,10 +97,11 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
 | 字段 | 内容 | 用途 |
 |---|---|---|
 | `format` | `flywhl-trajectory/1` | 版本号：轨迹会被长期保存、被不同版本的工具读取 |
-| `run` | 状态、版本、尝试次数、usage、结果 | 结局与成本 |
+| `run` | 状态、版本、尝试次数、usage、结果，`config.replay` 里是当时的水位、预算等设置 | 结局与成本；回放时重建设置 |
 | `session` | 冻结的系统提示、模型、工具名列表 | 回放时用它重建同样的设定 |
+| `history` | 同一会话里前几次 Run 留下的条目 | 这次 Run 的上下文，回放时先铺好 |
 | `messages` | 本 Run 写入的消息 | 回放的数据源：assistant 消息 = 模型输出，tool 消息 = 工具结果 |
-| `compactions` | 本 Run 中的压缩条目 | 解释上下文为什么突然变短 |
+| `compactions` | 本 Run 中的压缩条目 | 解释上下文为什么突然变短；模型写的摘要回放时要用 |
 | `steps` | 工具调用 journal：`call_id`、`effect`、`idem_key`、`input_hash`、`status`、`attempt`、起止时间 | 副作用审计、幂等对账 |
 | `events` | 除 `message_update` 外的全部事件 | 控制面时间线；文本增量太多且可由消息重建，所以去掉 |
 | `fingerprints` | 可重演的模型调用的上下文指纹，按调用顺序（出错、中止、压缩调用不计） | 回放时与 `ReplayProvider` 的游标逐个比对 |
@@ -110,7 +111,7 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
 三个实现细节：
 
 - 消息优先从会话**当前路径**（`store.path`）中按 `run_id` 筛选；如果之后会话分支切走了，当前路径上没有这个 Run 的消息，就退回到全部条目中筛选——轨迹不会因为用户后来切了分支而变空；
-- **指纹按“能否重演”过滤**：`message_start` 在每次模型调用开始时就记下指纹，但并不是每次调用都留下了可回放的 assistant 消息——调用出错（`stop_reason=error`）、流式中途被取消（`aborted`），或进程崩溃后恢复同一个 Run，都会多出一个没有对应消息的指纹。回放时 `ReplayProvider` 只按有效 assistant 消息推进游标，如果指纹不过滤，从那一步起下标就错开，报出并不存在的分叉。按 `message_id` 与有效消息求交集，再排除 `purpose == "compaction"`（压缩调用在回放时用确定性摘要代替，不消耗录制），两条序列才一一对齐；
+- **指纹按“能否重演”过滤**：`message_start` 在每次模型调用开始时就记下指纹，但并不是每次调用都留下了可回放的 assistant 消息——调用出错（`stop_reason=error`）、流式中途被取消（`aborted`），或进程崩溃后恢复同一个 Run，都会多出一个没有对应消息的指纹。回放时 `ReplayProvider` 只按有效 assistant 消息推进游标，如果指纹不过滤，从那一步起下标就错开，报出并不存在的分叉。按 `message_id` 与有效消息求交集，再排除 `purpose == "compaction"`（压缩调用用单独的摘要序列回放，不消耗 assistant 录制），两条序列才一一对齐；
 - 子 Run 用 `store.child_runs(run_id)` 按 `parent_run_id` 直接查询，按创建时间排序，不需要扫描全部 Run。
 
 `examples/08_replay_eval.py` 录制的那次运行（读 `todo.txt` → 发通知 → 回答）导出后是：6 条消息（user、assistant、tool、assistant、tool、assistant）、2 个工具 step、27 个事件（含创建时 `queued` 的那条 status 事件）、3 个指纹（3 次模型调用）、6 个 span（1 个 `invoke_agent` + 3 个 `chat` + 2 个 `execute_tool`）。
@@ -128,10 +129,9 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
 
 ### replay_run 的步骤
 
-`src/flywhl_harness/observe/replay.py` 的 `replay_run()` 把上面的设定组装起来：
+`src/flywhl_harness/observe/replay.py` 的 `replay_run()` 导出轨迹后交给 `replay_trajectory()`，后者也可以直接吃保存下来的 JSON，不需要原来的数据库和工作区：
 
 ```python
-traj = export_trajectory(store, run_id, include_children=False)
 msgs = [Message.from_dict(m) for m in traj["messages"]]
 prompt = next((m.text for m in msgs if m.role == "user" and m.kind == "prompt"), traj["run"]["prompt"] or "")
 recorded_tools = {m.tool_call_id: m for m in msgs if m.role == "tool" and m.tool_call_id}
@@ -139,16 +139,20 @@ assistant = [m for m in msgs if m.role == "assistant" and m.stop_reason not in (
 fps = traj["fingerprints"] if fork_at is None else traj["fingerprints"][:fork_at]
 
 ws = _copy_workspace(traj["session"]["workspace"])
-cfg = replace(config or HarnessConfig(), workspace=ws, data_dir=str(Path(ws) / ".flywhl"))
+cfg = replace(config or _recorded_config(settings), workspace=ws, data_dir=str(Path(ws) / ".flywhl"))
 cfg.permissions = replace(cfg.permissions, on_ask="allow")  # 回放不需要再次人工审批
 cfg.snapshots = False
-# ... 为会话冻结的每个工具名注册一个 RecordedTool（真实工具作为 fallback）
-rp = ReplayProvider(assistant, fps)
+# ... 确定性回放不重跑验收命令；为会话冻结的每个工具名注册一个 RecordedTool（真实工具作为 fallback）
+inputs = _external_inputs(msgs, kinds)     # 人的插话、恢复说明，以及验收反馈，按录制时的位置分组
+rp = ReplayProvider(assistant, fps, summaries=[c["summary"] for c in traj.get("compactions") or []])
 provider = HybridProvider(rp, live, fork_at)
 model = live_model or traj["session"]["model"] or "replay"
 h = Harness(cfg, provider=provider, model=model, tools=registry, store=Store(":memory:"))
 s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass")
-res = await h.run(prompt, session_id=s.id)
+# ... 把 history 铺进新会话
+run = await h.start_run(s.id, prompt)
+rp.on_turn = feed                          # 第 i 条录制回复结束时，把这之后进来的外部输入交给 steer
+rec = await h.wait(run.id)
 ```
 
 逐条说明“为什么这样写”：
@@ -157,14 +161,18 @@ res = await h.run(prompt, session_id=s.id)
 - **内存 Store + 临时工作区**：回放产生的会话、事件不污染原库，写操作不碰原工作区；
 - **用冻结的系统提示新建会话**：回放的设定来自轨迹，而不是当前配置——除非你有意修改它来观察分叉；
 - **审批自动通过、关闭快照**：回放的目的是比对行为，不是再走一遍人审；
-- **用 Harness 本身跑**：回放走的是真实的 Loop、真实的执行管线、真实的上下文管理，只把两处非确定性来源（模型、工具）换成了录制。正因如此，harness 代码的任何变化都会在回放中体现出来。
+- **用 Harness 本身跑**：回放走的是真实的 Loop、真实的执行管线、真实的上下文管理，只把非确定性来源换成了录制。正因如此，harness 代码的任何变化都会在回放中体现出来。
+- **录制时从外部进来的东西都从轨迹里取**：除了模型输出和工具结果，还有三样。模型写的压缩摘要是模型输出；人的插话、排队消息、恢复说明是外部输入；验收命令的结果也是，而且工作区已经是终态，重跑会直接通过，回放就比录制少走几步，指纹还查不出来。其余提醒（预算、循环、计划）由 harness 重新算，这正是回放要检查的部分。
+
+判定看 `ReplayReport.deterministic`：上下文指纹和工具序列都要一致；录制时走到结局的（完成、预算耗尽），状态和最终答案也要一致。被取消或崩溃的 Run 走不到结局，轨迹耗尽后回放以 `failed` 结束，这是预期结果。
 
 ### ReplayProvider：按顺序吐出录制，顺带比对指纹
 
 ```python
 async def stream(self, req: ModelRequest, cancel: CancelToken) -> AsyncIterator[StreamEvent]:
     if req.purpose == "compaction":
-        # 压缩摘要不在录制的 assistant 序列里：用确定性摘要代替，保证回放可重复
+        # 压缩摘要不在录制的 assistant 序列里，但它同样是模型的输出，要从录制里取
+        # 录制里没有（比如改了压缩阈值，回放时多压缩了一次）才用确定性摘要
         # ...
         return
     i = self.cursor

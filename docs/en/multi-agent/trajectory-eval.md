@@ -14,8 +14,11 @@ No two runs of an agent are identical. Three things follow. You need to reproduc
 
 **Deterministic replay.** `replay_run()` runs the real `Harness` with the real loop and execution pipeline, and swaps only the two nondeterministic sources for recordings. It uses an in-memory store, a copy of the workspace in a temp directory, the frozen system prompt, auto-approval and no snapshots.
 
-- `ReplayProvider` returns recorded assistant messages in order and compares each request's fingerprint with the recording. It keeps only the first mismatch as `divergence`, because everything after is mismatched too. It keeps returning the recorded output even after a mismatch, so tool sequence and final text can still match. The fingerprint is the only signal that the harness changed. If the new code makes more model calls than were recorded, it raises `IndexError`, which is itself a regression signal. Compaction requests get a deterministic summary and consume no recording.
+- `ReplayProvider` returns recorded assistant messages in order and compares each request's fingerprint with the recording. It keeps only the first mismatch as `divergence`, because everything after is mismatched too. It keeps returning the recorded output even after a mismatch, so tool sequence and final text can still match. The fingerprint is the only signal that the harness changed. If the new code makes more model calls than were recorded, it raises `IndexError`, which is itself a regression signal. Compaction requests get the recorded summary, and a deterministic one only when the recording has none.
 - `RecordedTool` matches results by `call_id` and returns them with `replayed: True`. External side effects are not executed again.
+- Everything that came from outside during recording is read from the trajectory: model-written compaction summaries, steering and follow-up messages, resume notes, and verify-command results. Other reminders are recomputed, which is what replay is there to check.
+- `replay_trajectory()` replays a saved trajectory with neither the original database nor the workspace. Earlier runs in the session come from `history`, settings from `run.config.replay`.
+- `ReplayReport.deterministic` is the verdict. A cancelled or crashed run cannot reach the same ending, so only its fingerprints and tool sequence are compared.
 
 **Counterfactual replay.** With `fork_at=N`, `HybridProvider` uses recordings for the first N model calls and a live model after that. Recorded tool results cover the calls that came from the recording. After the fork, new call IDs have no recording, so the real tool runs, except that `EXTERNAL`-effect tools are dry-run. This is shadow traffic done offline.
 
@@ -24,7 +27,7 @@ No two runs of an agent are identical. Three things follow. You need to reproduc
 - The workspace copy is the current one, so state before the fork point is not restored. Shadow-git snapshots could restore it.
 - Forked runs use `bypass` mode, so `WRITE`-level commands really run, on the copy. Run fork evaluations in a sandbox.
 - Subagent internals are not replayed (`include_children=False`).
-- Verify commands and wall-clock budgets can behave differently in the copy and change the call count.
+- Wall-clock budgets can behave differently on replay and change the call count. Verify commands are not rerun in deterministic replay, but they do run in forks.
 
 **Judging success by artifact.** `EvalCase.check` receives the workspace and the `RunResult`, and looks at files and test output, not at what the model claimed. `run_eval()` gives every case and every trial a fresh temp workspace and a fresh harness, calls `start()` so MCP tools are loaded, and records pass/fail, status, turns, tokens and cost. `EvalReport.premature_stop_rate` is the share of runs that ended `completed` but failed the check. A budget or error failure is at least honest; this one is not.
 

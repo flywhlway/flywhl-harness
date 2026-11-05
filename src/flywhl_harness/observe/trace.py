@@ -37,7 +37,7 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
     history = [{"id": e.id, "kind": e.kind, "payload": e.payload} for e in path[:first] if e.kind in ("message", "compaction")]
     messages = [e.payload for e in entries if e.kind == "message"]
     # 指纹与回放时的模型调用一一对齐：只保留最终落盘为有效 assistant 消息的那些调用
-    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的确定性摘要）
+    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的摘要序列）
     replayable = {m.get("id") for m in messages if m.get("role") == "assistant"
                   and m.get("stop_reason") not in ("error", "aborted")}
     fingerprints = [ev.data["fingerprint"] for ev in events
