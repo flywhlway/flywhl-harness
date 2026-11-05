@@ -99,6 +99,12 @@ def test_read_events_without_stream_end_is_an_interruption(soak):
         asyncio.run(soak.read_events(sse_client("id: 1\nevent: status\ndata: {}\n\n"), "r_1"))
 
 
+def test_serve_cmd_keeps_token_starting_with_dash_in_one_argument(soak, tmp_path):
+    # 分开写的话 argparse 把 -abc 当成选项，服务以退出码 2 起不来，大约 1/64 的令牌会撞上
+    cmd = soak.serve_cmd(tmp_path, tmp_path / "flywhl.toml", 8765, "-abc")
+    assert "--token=-abc" in cmd and "--token" not in cmd
+
+
 def test_prepare_writes_durability_only_when_set(soak, tmp_path):
     for name, durability, present in (("a", "normal", True), ("b", "default", False)):
         base = tmp_path / name

@@ -412,16 +412,21 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def serve_cmd(base: Path, config: Path, port: int, token: str) -> list[str]:
+    # 令牌必须用 --token=值 的写法：urlsafe 令牌可能以 - 开头，分开写时 argparse 会把它当成选项
+    return [sys.executable, "-m", "flywhl_harness.cli", "serve", "--host", "127.0.0.1", "--port", str(port), f"--token={token}",
+            "--trust", "--provider", "mock", "-w", str(base / "workspace"), "-c", str(config)]
+
+
 def run_sse(args: argparse.Namespace, base: Path) -> dict[str, Any]:
     durability = durability_setting(args.durability)
     config = prepare(base, durability)
     token, port = secrets.token_urlsafe(32), free_port()
-    cmd = [sys.executable, "-m", "flywhl_harness.cli", "serve", "--host", "127.0.0.1", "--port", str(port), "--token", token,
-           "--trust", "--provider", "mock", "-w", str(base / "workspace"), "-c", str(config)]
     tally, samples = Tally(), []
     log_path = base / "serve.log"
     with open(log_path, "wb") as log:
-        proc = spawn(cmd, cwd=base / "workspace", env=child_env(base), stdout=log, stderr=subprocess.STDOUT)
+        proc = spawn(serve_cmd(base, config, port, token), cwd=base / "workspace", env=child_env(base),
+                     stdout=log, stderr=subprocess.STDOUT)
         print(f"flywhl serve pid {proc.pid}，端口 {port}，{args.sessions} 个会话，{args.seconds:.0f} 秒", flush=True)
         try:
             asyncio.run(drive(args, proc, port, token, base, tally, samples))
@@ -454,7 +459,8 @@ def describe_fds(fds: dict[str, Any]) -> str:
 def report_sse(result: dict[str, Any]) -> None:
     took = result["run_seconds"]
     print(f"\n运行 {result['runs']} 个，事件 {result['events']} 条，失败 {result['failed']} 次，durability = {result['durability']}")
-    print(f"运行耗时（只记录）：p50 {took['p50_s']}s，p99 {took['p99_s']}s，最大 {took['max_s']}s")
+    if result["runs"]:
+        print(f"运行耗时（只记录）：p50 {took['p50_s']}s，p99 {took['p99_s']}s，最大 {took['max_s']}s")
     print(f"RSS：{describe_rss(result['rss'])}")
     print(f"句柄：{describe_fds(result['fds'])}")
     for failure in result["failures"]:
