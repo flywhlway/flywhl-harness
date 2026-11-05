@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from .._utils import short_hash
 from ..cancel import CancelToken
@@ -32,22 +32,29 @@ def context_fingerprint(req: ModelRequest) -> str:
 class ReplayProvider(Provider):
     name = "replay"
 
-    def __init__(self, recorded: list[Message], fingerprints: list[str] | None = None, chunk: int = 24):
+    def __init__(self, recorded: list[Message], fingerprints: list[str] | None = None, chunk: int = 24,
+                 summaries: list[str] | None = None, on_turn: Callable[[int], None] | None = None):
         self.recorded = [m for m in recorded if m.role == "assistant"]
         self.fingerprints = fingerprints or []
         self.chunk = chunk
+        self.summaries = list(summaries or [])    # 录制时模型写的压缩摘要，按发生顺序
+        self.on_turn = on_turn                    # 第 i 条录制回复结束时调用：录制时在这之后进来的外部输入由它补上
         self.cursor = 0
+        self.summary_cursor = 0
         self.divergence: dict | None = None
 
     async def stream(self, req: ModelRequest, cancel: CancelToken) -> AsyncIterator[StreamEvent]:
         if req.purpose == "compaction":
-            # 压缩摘要不在录制的 assistant 序列里：用确定性摘要代替，保证回放可重复
+            # 压缩摘要不在录制的 assistant 序列里，但它同样是模型的输出，要从录制里取：换成别的文字，后面每一步的上下文都会分叉。
+            # 录制里没有（比如改了压缩阈值，回放时多压缩了一次）才用确定性摘要
             from ..types import TextBlock
             from .mock import deterministic_summary
 
+            k = self.summary_cursor
+            self.summary_cursor += 1
+            text = self.summaries[k] if k < len(self.summaries) else deterministic_summary(req)
             yield StreamEvent("start")
-            yield StreamEvent("done", message=Message(role="assistant", content=[TextBlock(deterministic_summary(req))],
-                                                      stop_reason="end_turn"))
+            yield StreamEvent("done", message=Message(role="assistant", content=[TextBlock(text)], stop_reason="end_turn"))
             return
         i = self.cursor
         self.cursor += 1
@@ -67,4 +74,6 @@ class ReplayProvider(Provider):
         for k, c in enumerate(msg.tool_calls):
             yield StreamEvent("toolcall_start", index=k + 1, info={"id": c.id, "name": c.name})
             yield StreamEvent("toolcall_end", index=k + 1, tool_call=c)
+        if self.on_turn is not None:
+            self.on_turn(i)
         yield StreamEvent("done", message=msg)
