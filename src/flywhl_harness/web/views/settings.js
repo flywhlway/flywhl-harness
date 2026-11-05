@@ -21,8 +21,7 @@ function posture(s) {
   return [
     { tone: ac.token ? "ok" : "warn", icon: "lock", label: "访问令牌", value: ac.token ? "已启用" : "已关闭",
       why: ac.token ? "页面与 API 都要求令牌；令牌保存在 ~/.flywhl/server_token（仅属主可读）" : "以 --no-token 启动：本机任何程序都能在这里批准命令、切换权限" },
-    { tone: ac.any_host ? "warn" : "ok", icon: "globe", label: "Host 校验", value: ac.any_host ? "接受任意 Host" : ac.hosts.join(" · "),
-      why: ac.any_host ? "监听所有网卡：只靠访问令牌把关，建议放在反向代理与 HTTPS 之后" : "其他主机名一律拒绝，挡住 DNS 重绑定" },
+    { tone: "ok", icon: "globe", label: "Host 校验", value: ac.hosts.join(" · "), why: "其他主机名一律拒绝，挡住 DNS 重绑定" },
     { tone: P.mode === "bypass" ? "bad" : "ok", icon: mode.icon, label: "默认权限模式", value: mode.label, why: mode.desc },
     { tone: P.on_ask === "allow" ? "bad" : "ok", icon: "user", label: "无人值守时",
       value: P.on_ask === "deny" && P.auto_approve.length ? "按规则自动批准" : ON_ASK[P.on_ask] || P.on_ask,
@@ -104,7 +103,7 @@ function render(inner, s, app) {
         ["密钥剥离", P.strip_secret_env ? "已启用" : "已关闭"], ["写前快照", s.snapshots ? "已启用" : "已关闭"],
         ["完成验收", s.verify_command ? code(s.verify_command) : none("未配置")]]))}
       ${card("lock", "访问控制", kv([["访问令牌", s.access.token ? "已启用" : "已关闭"],
-        ["可信 Host", s.access.any_host ? "任意（依赖令牌）" : s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
+        ["可信 Host", s.access.hosts.map(code).join(" ")], ["工作区", code(s.workspace)]]))}
       ${card("hook", "Hooks", s.hooks.length ? `<ul class="plain-list">${s.hooks.map((x) => `<li><div class="row1">${code(x.event)}<span class="muted">匹配</span>${code(x.matcher)}
         <span class="badge ${x.fail_closed ? "success" : "warning"} square">${x.fail_closed ? "出错即拒绝" : "出错放行"}</span></div><div class="cmd">${esc(x.command)}</div>
         <div class="muted">${(x.env || []).length ? `密钥类变量已剥离，另外传入：${x.env.map(code).join(" ")}` : "密钥类环境变量已剥离"}</div>${entryBox(x)}${supply(x)}</li>`).join("")}</ul>`

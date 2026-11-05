@@ -225,7 +225,7 @@ src/flywhl_harness/
 - **SQLite 而非 PostgreSQL**：单文件、WAL、事务——足以讲清四层模型与 CAS；生产中替换为 PG + 对象存储 + outbox。
 - **串行执行 hooks**：便于参数改写的链式传递（Claude Code 选择并行执行）。
 - **默认需要审批**：与 pi 的 “YOLO + 容器” 不同，这里把权限与人审作为可学习的机制实现出来；`bypass` 模式只应在隔离环境中使用。
-- **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定）+ 跨站写请求检查 + 访问令牌（默认开启，`--no-token` 只允许回环地址）+ CSP（禁止内联脚本与被嵌入）。
+- **Web 服务有访问控制**：Host 白名单（防 DNS 重绑定，监听所有网卡时也不关闭）+ 跨站写请求检查 + 访问令牌（默认开启，`--no-token` 只允许回环地址，Agent 运行的命令连得到控制台端口时也拒绝启动）+ CSP（禁止内联脚本与被嵌入）。监听非回环地址要显式加 `--expose`，并且必须带令牌。
 - **Anthropic 模型默认开启 server-side fallback**（`fallbacks: "default"`），被安全策略拒答时服务端改用推荐的备用模型；
   只在官方端点上发送（经 OpenRouter 等网关调用时自动关闭），可通过 `AnthropicProvider(server_fallback=False)` 关闭。
 - **启动目录的 `.env` 只接受密钥与模型选择**：工作区默认就是启动目录，可能是不可信的仓库；它的 `.env` 若能设置 `*_BASE_URL`、
