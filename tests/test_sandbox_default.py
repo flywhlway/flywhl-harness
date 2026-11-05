@@ -930,10 +930,10 @@ def test_hard_links_are_the_same_file(repo):
     assert _gate(boxed_writer(), "copy", repo).human_only
 
 
-def test_case_variants_are_gated_where_the_filesystem_folds_case(repo):
-    fold = (repo / ".GIT").exists()
-    assert _gate(boxed_writer(), ".GIT/CONFIG", repo).human_only is fold
-    assert _gate(boxed_writer(), "FLYWHL.TOML", repo).human_only   # 还不存在的文件按路径比，这里宁可多问
+def test_case_variants_are_gated(repo):
+    """不分大小写的卷上这就是同一个文件。分大小写的卷上是另一个文件，这里宁可多问一次。"""
+    assert _gate(boxed_writer(), ".GIT/CONFIG", repo).human_only
+    assert _gate(boxed_writer(), "FLYWHL.TOML", repo).human_only
 
 
 def test_a_data_dir_inside_the_workspace_is_frozen_too(repo):
