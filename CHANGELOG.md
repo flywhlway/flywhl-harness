@@ -22,6 +22,20 @@
 
 **English summary.** `flywhl serve` no longer disables the Host allowlist on `0.0.0.0` and `::`, and `*` is refused by both `--allow-host` and `create_app`. Listening on a non-loopback address now requires `--expose` plus a token, and a manual `--token` there needs at least 16 characters. A wildcard listen trusts only loopback names and `--allow-host` entries, so remote browsers get 403 until you add the address, and the printed link uses a loopback address. `--no-token` is refused when commands the agent runs can reach the console port, because they could otherwise approve their own human gate: sandbox off, `sandbox_network = "allow"`, or an allowlist rule for that loopback port, globally or on a single hook or MCP server. `access.any_host` is gone from `/api/settings`.
 
+**会话库默认按断电耐久落盘。** 新配置项 `durability` 默认 `full`：`synchronous=FULL`，加上 `fullfsync` 和 `checkpoint_fullfsync`。
+之前是 `NORMAL`，断电可能丢掉最后几次提交，其中可能有执行前写的工具 intent，恢复时看不到记录，非幂等调用会再执行一次。
+保证只覆盖会话库，影子 git 和工作区文件不在内。
+
+代价是提交变慢，而提交在事件循环线程上执行。在一台 Apple M5 Pro 的内置 SSD 上，提交 p50 从约 0.05ms 变成约 4ms。
+单个会话按快模型的速度输出时每轮慢 0～15%，4 个会话并发时每轮慢 0.7～1.1 倍，机器负载越高越慢，事件循环最长卡过将近 1 秒。
+数字只代表那台机器的那种磁盘，见[压测记录](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md)。
+
+要回到之前的行为，写 `durability = "normal"`。它放宽了保证，写在项目配置里要先信任才生效。取值写错时加载就报错。
+
+### 新增
+
+- `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
+
 ## [0.2.0] - 2026-11-05
 
 第一个发布到 PyPI 的版本。v0.1.0 之后的主线是安全边界：系统沙箱从可选原型变成默认开启，命令分析、凭证保护、供应链检查都重做了一轮。

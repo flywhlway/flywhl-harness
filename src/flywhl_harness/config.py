@@ -106,6 +106,15 @@ class PermissionConfig:
             auto_approve_rule(r)    # 写错了在加载时就报出来，不要等到第一次审批
 
 
+DURABILITY_LEVELS = ("full", "normal")
+
+
+def check_durability(value: Any) -> str:
+    if value not in DURABILITY_LEVELS:
+        raise ValueError(f"durability 只能是 {'、'.join(DURABILITY_LEVELS)}，实际是 {value!r}")
+    return value
+
+
 @dataclass
 class HookConfig:
     """进程外命令 hook（协议与 Claude Code 兼容：stdin JSON，exit 2 阻断）。"""
@@ -165,6 +174,9 @@ class HarnessConfig:
     heartbeat_seconds: float = 2.0
     stale_after_seconds: float = 10.0      # 心跳超过该时长视为 Worker 崩溃
     snapshots: bool = True                 # 写操作前用影子 git 打工作区快照
+    # 会话库的落盘强度：full 每次提交都刷到盘上，断电不丢已提交的事务；normal 提交更快，断电可能丢最后几次提交，
+    # 其中可能有执行前写的工具 intent，恢复时看不到记录，非幂等调用会再执行一次。影子 git 和工作区文件都不在这个保证里
+    durability: str = "full"
     max_stop_blocks: int = 3               # Stop 验收最多阻止停止的次数
     verify_command: str | None = None      # Stop 验收命令（如 "pytest -q"）
     verify_todos: bool = True              # Stop 验收：计划中仍有未完成项时阻止结束
@@ -177,6 +189,9 @@ class HarnessConfig:
     permissions: PermissionConfig = field(default_factory=PermissionConfig)
     hooks: list[HookConfig] = field(default_factory=list)
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        check_durability(self.durability)
 
     # ------------------------------------------------------------------ 加载
     @classmethod
@@ -383,6 +398,8 @@ def split_untrusted(data: dict[str, Any], base: Path | None = None,
     safe: dict[str, Any] = {}
     risky: list[str] = []
     for key, value in data.items():
+        if key == "durability":     # 取值写错和键写错一样直接报错，不该变成一次信任确认，也不该被当成未信任悄悄忽略
+            check_durability(value)
         if key == "permissions" and isinstance(value, dict):
             perms: dict[str, Any] = {}
             for k, v in value.items():
@@ -591,5 +608,7 @@ def _merge(dc: Any, data: dict[str, Any], *, layer: bool = False) -> None:
             if not isinstance(value, dict):
                 raise ValueError(f"mcp_servers 必须是表，实际是 {value!r}")
             setattr(dc, key, {name: check_mcp_server(name, spec) for name, spec in value.items()})
+        elif key == "durability":   # setattr 不经过 __post_init__
+            setattr(dc, key, check_durability(value))
         else:
             setattr(dc, key, value)
