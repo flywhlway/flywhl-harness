@@ -216,7 +216,8 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 |---|---|---|
 | 模型选择、限额、上下文、循环守卫、提示词、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
 | `permissions` 中只收紧的部分：`deny` / `ask` 规则、`plan` 模式、`on_ask = "deny"`、`sandbox = "auto"` / `"macos"` / `"linux"`、`sandbox_network = "deny"` | 直接生效 | 只会让审批更严 |
-| 其余字段，以及 `allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、其余的 `sandbox_network` 取值、`network_allow` | 忽略并提示 | 执行命令、改变请求去向、放宽审批或移动读写范围 |
+| 其余字段，以及 `allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、`sandbox_network = "allowlist"` / `"auto"`、`network_allow` | 忽略并提示 | 执行命令、改变请求去向、放宽审批或移动读写范围 |
+| `sandbox = "off"`、`sandbox_network = "allow"`（全局、单条 hook、单个 MCP 服务器） | 丢弃，信任了也一样 | 关沙箱、放开网络是用户的决定，只能写在用户配置、`-c` 文件或命令行 |
 | `sandbox = "off"`，包括单条 hook、MCP 服务器上的 | 信任了也丢弃并提示 | 信任一个仓库的配置，不等于同意拆掉隔离 |
 
 白名单登记的是安全的一侧，以后新增的字段默认需要信任，不会因为忘了登记而成为漏洞。信任的流程：
@@ -473,7 +474,7 @@ write 在 accept_edits 下本该自动放行，因为 `fetch_page` 的输出带�
 | 回放 / 恢复时重复副作用 | 幂等键 + 对账 | 回放不执行副作用 | — | 已实现（[14 幂等](/reliability/idempotency)） |
 | 回放或脚本直接调用，走不到审批就离开沙箱 | 工具只认执行器在人批准后给的标记 | — | — | 已修复，有测试 |
 | 沙箱里的命令写好配置，等 harness 在沙箱外执行（嵌套仓库的 `core.fsmonitor`） | 影子 git 不收录 gitlink，关掉 fsmonitor 与 hook，不读全局配置 | 环境变量剥离 | — | 已修复，有测试 |
-| 沙箱里的命令改 `.git/hooks`、`.git/config`，等用户下次提交时执行 | 这两处与数据目录只读，`.git` 不能整个替换 | — | — | 已实现，有测试；`Makefile`、`.envrc`、子模块配置管不到，见 [18 章](/governance/workspace-sandbox) |
+| 沙箱里的命令改 `.git/hooks`、`.git/config`，等用户下次提交时执行 | 这两处与数据目录只读，`hooks` 不存在也保护；`.git` 不能整个替换，是文件时文件本身只读 | — | — | 已实现，有测试；`Makefile`、`.envrc`、子模块配置管不到，见 [18 章](/governance/workspace-sandbox) |
 
 ## 动手验证
 

@@ -145,6 +145,42 @@ sandbox = "off"
     assert "sandbox" not in cfg.mcp_servers["x"]
 
 
+def test_project_config_cannot_open_the_sandbox_network_even_when_trusted(tmp_path, monkeypatch):
+    """放开网络和关沙箱一样：陌生仓库不能靠一次回车换到它，工作区会被传走。具体主机的白名单仍然走信任确认。"""
+    _project(tmp_path, monkeypatch, '''
+[permissions]
+sandbox_network = "allow"
+
+[[hooks]]
+event = "stop"
+command = "true"
+sandbox_network = "allow"
+
+[mcp_servers.x]
+command = "true"
+sandbox_network = "allow"
+network_allow = ["api.example.com"]
+''')
+    with pytest.warns(UntrustedConfigWarning, match="不能关闭系统沙箱，也不能放开它的网络"):
+        cfg = HarnessConfig.load(trust=lambda req: True)
+    assert cfg.permissions.sandbox_network == "auto"
+    assert cfg.hooks[0].sandbox_network is None
+    assert "sandbox_network" not in cfg.mcp_servers["x"] and cfg.mcp_servers["x"]["network_allow"] == ["api.example.com"]
+
+
+def test_user_config_and_explicit_file_can_open_the_network(tmp_path, monkeypatch):
+    home = tmp_path / "fw"
+    home.mkdir()
+    (home / "config.toml").write_text('[permissions]\nsandbox_network = "allow"\n', encoding="utf-8")
+    monkeypatch.setenv("FLYWHL_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    assert HarnessConfig.load().permissions.sandbox_network == "allow"
+    monkeypatch.delenv("FLYWHL_HOME")
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text('[permissions]\nsandbox_network = "allow"\n', encoding="utf-8")
+    assert HarnessConfig.load(str(explicit)).permissions.sandbox_network == "allow"
+
+
 def test_user_config_and_explicit_file_can_turn_it_off(tmp_path, monkeypatch):
     home = tmp_path / "fw"
     home.mkdir()
@@ -834,6 +870,35 @@ async def test_git_works_but_what_later_runs_on_the_host_stays_read_only(ws):
 
 
 @real_sandbox
+async def test_hooks_stay_read_only_when_the_repo_has_no_hooks_directory(ws):
+    """git init --template= 建出来的仓库没有 hooks：沙箱里写进去的钩子，用户下次在终端 git commit 时就在沙箱外执行了。"""
+    run_git(ws, "init", "-q", "--template=")
+    assert not (ws / ".git" / "hooks").exists()
+    code, _ = await in_box(Confinement(LEVEL, "deny"), ws, "mkdir -p .git/hooks && echo 'touch ran' > .git/hooks/pre-commit")
+    assert code != 0 and not (ws / ".git" / "hooks" / "pre-commit").exists()
+
+
+@real_sandbox
+async def test_git_file_of_a_linked_worktree_stays_read_only(ws):
+    """linked worktree 的 .git 是个文件：改掉 gitdir 就换了一份仓库配置，下一条沙箱外的 git 命令读的是它。"""
+    main = ws / "main"
+    main.mkdir()
+    git = ("-c", "user.name=t", "-c", "user.email=t@t")
+    run_git(main, "init", "-q")
+    run_git(main, *git, "commit", "-q", "--allow-empty", "-m", "x")
+    linked = ws / "linked"
+    run_git(main, "worktree", "add", "-q", str(linked))
+    before = (linked / ".git").read_bytes()
+    box = Confinement(LEVEL, "deny")
+    assert (await in_box(box, linked, "echo 'gitdir: ./evil' > .git"))[0] != 0
+    assert (await in_box(box, linked, "rm -f .git"))[0] != 0
+    assert (await in_box(box, linked, "mv .git renamed"))[0] != 0
+    assert (linked / ".git").read_bytes() == before
+    code, out = await in_box(box, linked, "git status --porcelain")   # 读仓库不受影响
+    assert code == 0, out
+
+
+@real_sandbox
 async def test_git_init_still_works_in_an_empty_workspace(ws):
     code, out = await in_box(Confinement(LEVEL, "deny"), ws, "git init -q")
     assert code == 0 and (ws / ".git" / "HEAD").exists(), out
@@ -918,6 +983,20 @@ def test_frozen_locations_need_a_human_in_every_spelling(repo, path, cls):
     assert r.decision == Decision.ASK and r.human_only and r.risk == "critical" and "只读" in r.reason
 
 
+def test_missing_hooks_directory_is_gated_for_file_tools_too(repo):
+    shutil.rmtree(repo / ".git" / "hooks", ignore_errors=True)
+    assert _gate(boxed_writer(), ".git/hooks/pre-commit", repo).human_only
+
+
+def test_git_file_of_a_linked_worktree_is_gated_for_file_tools_too(tmp_path):
+    (tmp_path / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    assert _gate(boxed_writer(), ".git", tmp_path).human_only
+
+
+def test_a_directory_named_hooks_is_only_frozen_inside_a_real_git_directory(tmp_path):
+    assert sandbox._read_only(os.path.realpath(tmp_path), []) == []      # 还没有 .git：git init 要能运行
+
+
 def test_absolute_paths_and_symlinks_land_on_the_same_gate(repo):
     assert _gate(boxed_writer(), repo / ".git" / "config", repo).human_only
     (repo / "alias").symlink_to(repo / ".git")
@@ -988,6 +1067,31 @@ async def test_execution_checks_again_after_the_decision(repo):
 async def test_edit_is_checked_at_execution_too(repo):
     res = await boxed_writer(EditTool).execute({"path": ".git/config", "old_string": "[core]", "new_string": "[x]"}, _ctx(repo))
     assert res.is_error and (repo / ".git" / "config").read_text(encoding="utf-8") == "[core]\n"
+
+
+async def test_unavailable_sandbox_refuses_commands_but_a_human_can_still_run_one_outside(repo):
+    """沙箱用不了时普通命令拒绝执行，outside_sandbox 仍是一扇人开的门：批准的是这一条命令，没批准的一律不跑。"""
+    tool = BashTool()
+    tool.confinement = Confinement("off", "allow", problem="没有沙箱")
+    assert tool.human_gate({"command": "true", "outside_sandbox": True})
+    plain = await tool.execute({"command": "touch plain"}, _ctx(repo))
+    assert plain.is_error and "沙箱不可用" in plain.content and not (repo / "plain").exists()
+    unapproved = await tool.execute({"command": "touch gated", "outside_sandbox": True}, _ctx(repo))
+    assert unapproved.is_error and not (repo / "gated").exists()
+    approved = await tool.execute({"command": "touch gated", "outside_sandbox": True}, _ctx(repo, approved=True))
+    assert not approved.is_error and (repo / "gated").exists()
+
+
+def test_bwrap_masks_a_missing_hooks_directory_read_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "require_bwrap", lambda executable=None: "bwrap")   # 只看参数，不运行：macOS 上也能跑
+    (tmp_path / ".git").mkdir()
+    hooks = str(tmp_path.resolve() / ".git" / "hooks")
+    argv = sandbox.bwrap_argv("true", tmp_path, writable=())
+    at = argv.index("--tmpfs", argv.index(str(tmp_path.resolve() / ".git")))
+    assert argv[at:at + 4] == ["--tmpfs", hooks, "--remount-ro", hooks]
+    (tmp_path / ".git" / "hooks").mkdir()
+    argv = sandbox.bwrap_argv("true", tmp_path, writable=())
+    assert "--remount-ro" not in argv and ["--ro-bind", hooks, hooks] == argv[argv.index(hooks) - 1:argv.index(hooks) + 2]
 
 
 async def test_a_human_approved_write_goes_through(repo):

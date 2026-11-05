@@ -344,28 +344,33 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
+# 项目配置写了也丢弃的取值，信任过也一样：关沙箱、放开网络都是用户的决定，仓库只能收紧。具体主机的 network_allow 不在其中，走信任确认
+_NEVER_FROM_PROJECT = {"sandbox": "off", "sandbox_network": "allow"}
+
+
 def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
-    """项目配置关不掉沙箱，信任过也一样：关沙箱的决定属于用户，仓库只能收紧。``permissions.sandbox`` 与 hook、MCP 服务器
-    各自的 ``sandbox = "off"`` 都去掉。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
-    dropped = []
+    """项目配置关不掉沙箱，也放不开沙箱的网络：``permissions`` 与 hook、MCP 服务器各自的设置都去掉。
+    放开网络和关沙箱同等处理，否则工作区靠一次信任确认就能被传走。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
+    dropped: list[str] = []
+
+    def keep(spec: Any, where: str) -> Any:
+        if not isinstance(spec, dict):
+            return spec
+        bad = [k for k, v in _NEVER_FROM_PROJECT.items() if spec.get(k) == v]
+        dropped.extend(f"{where}.{k} = {spec[k]!r}" for k in bad)
+        return {k: v for k, v in spec.items() if k not in bad}
+
     out = dict(data)
-    perms = data.get("permissions")
-    if isinstance(perms, dict) and perms.get("sandbox") == "off":
-        out["permissions"] = {k: v for k, v in perms.items() if k != "sandbox"}
-        dropped.append("permissions.sandbox")
-    hooks = data.get("hooks")
-    if isinstance(hooks, list):
-        dropped += [f"hooks[{i}].sandbox" for i, h in enumerate(hooks) if isinstance(h, dict) and h.get("sandbox") == "off"]
-        out["hooks"] = [{k: v for k, v in h.items() if k != "sandbox"} if isinstance(h, dict) and h.get("sandbox") == "off" else h
-                        for h in hooks]
-    servers = data.get("mcp_servers")
-    if isinstance(servers, dict):
-        off = [n for n, s in servers.items() if isinstance(s, dict) and s.get("sandbox") == "off"]
-        dropped += [f"mcp_servers.{n}.sandbox" for n in off]
-        out["mcp_servers"] = {n: {k: v for k, v in s.items() if k != "sandbox"} if n in off else s for n, s in servers.items()}
+    if "permissions" in data:
+        out["permissions"] = keep(data["permissions"], "permissions")
+    if isinstance(data.get("hooks"), list):
+        out["hooks"] = [keep(h, f"hooks[{i}]") for i, h in enumerate(data["hooks"])]
+    if isinstance(data.get("mcp_servers"), dict):
+        out["mcp_servers"] = {n: keep(s, f"mcp_servers.{n}") for n, s in data["mcp_servers"].items()}
     if dropped:
-        warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
-                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} 不生效：项目配置不能关闭系统沙箱，也不能放开它的网络。确实要改，写在用户配置 "
+                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off、--network allow",
+                      UntrustedConfigWarning, stacklevel=3)
     return out
 
 

@@ -273,12 +273,25 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     return "\n".join(lines)
 
 
+def _git_frozen(ws: str) -> list[str]:
+    """``.git`` 里写不得的位置。工作区还没有 ``.git`` 时什么都不保护：``git init`` 要能在空工作区里运行。
+
+    - ``.git`` 是目录：``hooks`` 没有也要保护，``git init --template=`` 建出来的仓库就没有它，沙箱里建一个就是沙箱外执行的钩子；
+    - ``.git`` 是文件（linked worktree、子模块）：``gitdir:`` 指向哪里，用的就是哪份配置，所以文件本身只读。
+
+    路径和解析后的路径都算：``hooks`` 是软链接时，把链接换掉也绕过了只读。"""
+    git = os.path.join(ws, ".git")
+    if not os.path.isdir(git):
+        return [git] if os.path.lexists(git) else []
+    hooks, config = os.path.join(git, "hooks"), os.path.join(git, "config")
+    names = [hooks, *([config] if os.path.exists(config) else [])]
+    return list(dict.fromkeys([*names, *map(os.path.realpath, names)]))
+
+
 def _read_only(ws: str, protected: Iterable[str]) -> list[str]:
     """工作区里写不得的位置，都是之后会在沙箱外起作用的东西：``protected`` 是 harness 的数据目录（影子仓库、会话库），
-    ``.git/hooks``、``.git/config`` 在用户下一次 ``git commit`` 或一条获准离开沙箱的 ``git push`` 时执行。
-    只保护已有的：``git init`` 还要能在空工作区里运行。"""
-    git = [os.path.realpath(os.path.join(ws, ".git", name)) for name in ("hooks", "config")]
-    paths = [*(p for p in git if os.path.exists(p)), *(os.path.realpath(p) for p in protected)]
+    ``.git`` 里的内容在用户下一次 ``git commit`` 或一条获准离开沙箱的 ``git push`` 时执行，见 ``_git_frozen()``。"""
+    paths = [*_git_frozen(ws), *(os.path.realpath(p) for p in protected)]
     return [p for p in paths if not _under(ws, p)]   # 工作区放在数据目录里时，不能把整个工作区变成只读
 
 
@@ -445,6 +458,9 @@ def bwrap_argv(command: str | list[str], workspace: str | Path, *, writable: Ite
     git = os.path.join(ws, ".git")
     if os.path.isdir(git) and not os.path.islink(git):   # 挂载点改不了名：整个 .git 换掉就绕过了里面的只读
         argv += ["--bind", git, git]
+        hooks = os.path.join(git, "hooks")
+        if not os.path.lexists(hooks):   # 不存在的路径没法 ro-bind：盖一层只读的空 tmpfs。bwrap 会在 .git 里留下一个空目录做挂载点
+            argv += ["--tmpfs", hooks, "--remount-ro", hooks]
     for p in (os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml"), *_read_only(ws, protected)):
         if os.path.exists(p) and _under(p, ws):   # 工作区之外的本来就写不了，/tmp 下的这样一挂反而露出来了
             argv += ["--ro-bind", p, p]
