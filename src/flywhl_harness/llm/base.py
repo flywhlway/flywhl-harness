@@ -95,9 +95,10 @@ _OVERFLOW_HINTS = ("context_length", "context length", "maximum context", "too l
 # 按限流处理会白白退避重试，必须先于状态码识别出来
 _BILLING_HINTS = ("insufficient balance", "insufficient_balance", "insufficient_quota", "exceeded_current_quota",
                   "arrearage", "余额不足", "欠费", "账户已欠费")
-# 模型不存在：OpenAI 是 404，DeepSeek 是 400 + “supported API model names”，降级链需要把它识别为 NOT_FOUND
+# 模型不存在：OpenAI 是 404，DeepSeek 是 400 + “supported API model names”，OpenRouter 是 400 + “not a valid model ID”，
+# 降级链需要把它识别为 NOT_FOUND
 _MODEL_NOT_FOUND_HINTS = ("model_not_found", "model not found", "does not exist", "supported api model names",
-                          "unknown model", "model_not_exist", "model not exist")
+                          "unknown model", "model_not_exist", "model not exist", "not a valid model")
 
 
 def classify_http_error(status: int, body: str, headers: dict[str, str] | None = None, provider: str | None = None) -> ProviderError:

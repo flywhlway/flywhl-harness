@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from flywhl_harness import ScriptedProvider
 from flywhl_harness.agent.compaction import find_cut_index
 from flywhl_harness.agent.context import ContextManager
@@ -141,3 +143,37 @@ async def test_compaction_usage_is_charged(ws):
     res = await Compactor(h.provider, h.model, h.config.context).compact(
         h.log(s.id), h.log(s.id).context(), CancelToken(), tokens_before=4000, force=True)
     assert isinstance(res.usage, Usage) and res.usage.output_tokens > 0
+
+
+class _Summarizer(ScriptedProvider):
+    """压缩调用依次得到给定的输出：字符串是模型的回复，异常是调用失败。"""
+
+    def __init__(self, outputs):
+        super().__init__(["x"])
+        self.outputs = list(outputs)
+
+    async def complete(self, req, cancel=None):
+        out = self.outputs.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return Message(role="assistant", content=[TextBlock(text=out)])
+
+
+@pytest.mark.parametrize("second", ["我来读取 log2.txt 的内容。", "", RuntimeError("网络中断")],
+                         ids=["接着对话往下说", "空回复", "调用失败"])
+async def test_bad_summary_keeps_what_the_last_summary_preserved(ws, second):
+    """真实模型上出现过：第二次压缩没有拿到摘要，第一次保留下来的事实跟着丢了。"""
+    from flywhl_harness.agent.compaction import Compactor
+    from flywhl_harness.cancel import CancelToken
+
+    h = make_harness(ws, ["x"])
+    s = h.create_session("t")
+    log = h.log(s.id)
+    provider = _Summarizer(["## 目标\n读日志\n\n## 关键上下文\n暗号：蓝鲸-42", second])
+    compactor = Compactor(provider, h.model, h.config.context)
+    for _ in range(2):
+        for _ in range(6):
+            log.append_message(user_message("内容" * 400))
+        res = await compactor.compact(log, log.context(), CancelToken(), tokens_before=4000, force=True)
+    assert res.used_fallback and "蓝鲸-42" in res.summary
+    assert "蓝鲸-42" in log.context().messages[0].text

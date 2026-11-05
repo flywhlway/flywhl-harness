@@ -165,6 +165,8 @@ class OpenAICompatProvider(Provider):
             body["tool_choice"] = req.tool_choice
         if req.temperature is not None:
             body["temperature"] = req.temperature
+        if self.name == "openrouter" and req.model.startswith("anthropic/"):
+            body["cache_control"] = {"type": "ephemeral"}    # 别家由服务端自动缓存，Claude 不带这个标记就不缓存
         body.update(self.options)
         return body
 

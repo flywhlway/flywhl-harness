@@ -40,7 +40,8 @@ async def test_cancel_mid_stream_then_continue_session(ws):
     h = live_harness(ws, thinking="disabled")
     async with h:
         s = h.create_session("取消")
-        r = await h.start_run(s.id, "写一篇 3000 字的文章，介绍 Agent Harness 的历史。")
+        # 要的是流式文本。不说清楚的话，有的模型会先开子代理调研，几分钟都没有文本
+        r = await h.start_run(s.id, "不要调用任何工具，直接在回复里写一篇 3000 字的文章，介绍 Agent Harness 的历史。")
         await wait_event(h, r.id, lambda e: e.type == E.MESSAGE_UPDATE and e.data.get("kind") == "text")
         t0 = time.monotonic()
         await h.cancel(r.id, reason="测试取消")
@@ -49,7 +50,7 @@ async def test_cancel_mid_stream_then_continue_session(ws):
         assert rec.status == "cancelled" and elapsed < 10, (rec.status, elapsed)   # 流式中途取消能及时断开连接
         aborted = [m for m in h.log(s.id).context().messages if m.role == "assistant"]
         assert aborted and aborted[-1].stop_reason == "aborted" and aborted[-1].text    # 已生成的文本保留并标记
-        res = await run(h, "上一条被打断了，没关系。现在只回复：继续正常", session_id=s.id, label="取消后继续")
+        res = await run(h, "上一条被打断了，不用再写了，也不要调用工具。现在只回复：继续正常", session_id=s.id, label="取消后继续")
     assert res.status == "completed" and "继续正常" in res.text, transcript(h, s.id)   # 带着半截消息的历史仍合法
 
 

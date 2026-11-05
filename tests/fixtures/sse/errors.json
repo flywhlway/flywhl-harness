@@ -22,5 +22,9 @@
   "kimi_context_overflow": {
     "status": 400,
     "body": "{\"error\":{\"message\":\"Invalid request: Your request exceeded model token limit: 262144 (requested: 300014)\",\"type\":\"invalid_request_error\"}}"
+  },
+  "openrouter_bad_model": {
+    "status": 400,
+    "body": "{\"error\":{\"message\":\"flywhl-bench/no-such-model is not a valid model ID\",\"code\":400}}"
   }
 }

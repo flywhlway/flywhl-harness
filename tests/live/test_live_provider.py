@@ -45,6 +45,10 @@ async def test_doctor_passes_for_live_model():
 
 
 async def test_thinking_switch_is_honoured():
+    if live_model() == "openrouter:anthropic/claude-haiku-5.5":
+        pytest.skip("这个模型开了思考也不返回推理（reasoning_tokens 为 0），测不了开关")
+    if not PROFILES[live_model().partition(":")[0]].thinking_param:
+        pytest.skip("这家没有思考开关")
     p, model = provider_for(live_model(), thinking="disabled")
     evs, off = await stream_all(p, model, [user("1+1 等于几？只回答数字。")], max_tokens=200)
     assert not off.thinking and not any(e.type == "thinking_delta" for e in evs)
