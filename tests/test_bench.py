@@ -247,8 +247,9 @@ def test_unknown_failure_class_is_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------- 流水线
-async def test_pipeline_runs_end_to_end_with_a_scripted_model(tmp_path):
+async def test_pipeline_runs_end_to_end_with_a_scripted_model(tmp_path, monkeypatch):
     """脚本化模型照参考答案做题：结果、轨迹、回放、脱敏、报告走一遍。沙箱敏感题的区分度在容器彩排里验证。"""
+    monkeypatch.setenv("BENCH_WORK", str(tmp_path))      # 镜像里默认是 /work，测试沙箱里只读
     plan = load_plan()
     plan["q2"] = {**plan["q2"], "trials": 1}
     tasks = [t for t in TASKS if t.id == "fix-pagination"]

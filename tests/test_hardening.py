@@ -248,23 +248,43 @@ def test_existing_git_config_env_is_preserved(monkeypatch):
     assert env["GIT_CONFIG_KEY_1"] == "core.fsmonitor"
 
 
+def _git_status(path) -> list[str]:
+    out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=path, check=True, capture_output=True, text=True)
+    return [line[3:] for line in out.stdout.splitlines()]
+
+
 def test_data_dir_stays_out_of_git(tmp_path):
     """数据目录在工作区里，里面是会话库。不忽略的话工作区永远不干净，git add -A 还会把它带进仓库。"""
     from flywhl_harness import HarnessConfig
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    HarnessConfig(workspace=str(tmp_path)).data_path()
-    (tmp_path / ".flywhl" / "harness.db").write_text("sentinel", encoding="utf-8")
-    out = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    assert out.stdout == ""
+    data = HarnessConfig(workspace=str(tmp_path)).data_path()
+    for name in ("harness.db", "harness.db-wal", "external_notify.db", "shadow.git/HEAD", "shadow-ab12.git/HEAD"):
+        (data / name).parent.mkdir(exist_ok=True)
+        (data / name).write_text("sentinel", encoding="utf-8")
+    assert _git_status(tmp_path) == []
 
 
-def test_data_dir_leaves_an_existing_directory_alone(tmp_path):
+def test_user_files_in_the_data_dir_stay_trackable(tmp_path):
+    """目录早就有了也要忽略会话库；用户自己的配置和技能不能跟着被藏起来。"""
     from flywhl_harness import HarnessConfig
 
-    (tmp_path / "mine").mkdir()
-    HarnessConfig(workspace=str(tmp_path), data_dir="mine").data_path()
-    assert not (tmp_path / "mine" / ".gitignore").exists()
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".flywhl" / "skills" / "x").mkdir(parents=True)
+    (tmp_path / ".flywhl" / "config.toml").write_text("", encoding="utf-8")
+    (tmp_path / ".flywhl" / "skills" / "x" / "SKILL.md").write_text("", encoding="utf-8")
+    data = HarnessConfig(workspace=str(tmp_path)).data_path()
+    (data / "harness.db").write_text("sentinel", encoding="utf-8")
+    assert sorted(_git_status(tmp_path)) == [".flywhl/config.toml", ".flywhl/skills/x/SKILL.md"]
+
+
+def test_existing_ignore_file_in_the_data_dir_is_left_alone(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    (tmp_path / ".flywhl").mkdir()
+    (tmp_path / ".flywhl" / ".gitignore").write_text("mine\n", encoding="utf-8")
+    HarnessConfig(workspace=str(tmp_path)).data_path()
+    assert (tmp_path / ".flywhl" / ".gitignore").read_text(encoding="utf-8") == "mine\n"
 
 
 def test_git_author_identity_survives_the_secret_filter(monkeypatch):

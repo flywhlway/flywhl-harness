@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -243,16 +244,18 @@ class HarnessConfig:
         return ensure_data_dir(p)
 
 
+# harness 自己写进数据目录的文件。config.toml 和 skills/ 是用户的，可能要提交，不能一起忽略
+DATA_DIR_IGNORE = ".gitignore\n*.db\n*.db-*\nshadow*.git/\n"
+
+
 def ensure_data_dir(path: Path) -> Path:
-    """建数据目录。里面是会话库、审批记录和快照：只给属主，并放一个忽略一切的 .gitignore，
-    不然工作区永远不干净，``git add -A`` 还会把它们带进仓库。只在自己新建时放，已有的目录可能是用户的。"""
-    try:
-        path.mkdir(mode=0o700, parents=True)
-    except FileExistsError:
-        if path.is_dir():
-            return path
-        raise
-    (path / ".gitignore").write_text("*\n", encoding="utf-8")
+    """建数据目录。新建时只给属主：里面有会话库、审批记录和快照，它们也不能被 ``git add -A`` 带进仓库。
+    目录可能早就有了（比如先写了 config.toml），所以不看是谁建的，还没有 .gitignore 就写一份，已有的不动。"""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ignore = path / ".gitignore"
+    if not ignore.exists():
+        with contextlib.suppress(OSError):   # 写不了也不影响运行
+            ignore.write_text(DATA_DIR_IGNORE, encoding="utf-8")
     return path
 
 
