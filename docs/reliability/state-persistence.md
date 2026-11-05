@@ -612,7 +612,7 @@ _DURABILITY_PRAGMAS = {
 
 代价落在提交耗时上。`Store` 的写操作在事件循环线程里同步执行，慢提交会直接卡住 SSE 和审批。
 在一台 Apple M5 Pro 的内置 SSD（APFS）上，`F_FULLFSYNC` 一次约 4ms，`full` 的提交 p50 约 4ms，`normal` 约 0.05ms。
-单个会话按快模型的速度输出时，每轮只慢 15%；4 个会话并发时每轮慢一倍，事件循环最长卡过将近 1 秒。
+单个会话按快模型的速度输出时，每轮慢 0～15%；4 个会话并发时每轮慢 0.7～1.1 倍，机器负载越高越慢，事件循环最长卡过将近 1 秒。
 这些数字只代表那台机器的那种磁盘，慢磁盘没有测，方法和完整结果见[压测记录](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md)。
 能接受断电丢最后几次提交时，可以写 `durability = "normal"`：它放宽了保证，写在项目配置里要先信任才生效。
 
