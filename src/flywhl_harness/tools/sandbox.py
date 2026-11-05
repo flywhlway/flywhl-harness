@@ -283,19 +283,27 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
 _GIT_REDIRECTS = ("commondir", "config.worktree")   # git 用它们决定去哪读配置和钩子，写得了它们就等于写得了 config
 
 
-def absent_git_redirects(workspace: str | Path) -> list[str]:
-    """``.git`` 里现在还没有的重定向文件。Linux 上不存在的文件挂不成只读：bwrap 留下的空占位文件会让 git 读
-    ``commondir`` 时直接报错退出，所以这些位置在命令结束后由 ``sweep_git_redirects`` 清理。"""
-    git = os.path.join(os.path.realpath(workspace), ".git")
-    return [p for p in (os.path.join(git, n) for n in _GIT_REDIRECTS) if not os.path.lexists(p)]
+def git_redirects_to_sweep(workspace: str | Path) -> list[str]:
+    """Linux 上要盯着的文件名。不存在的文件挂不成只读，bwrap 留下的空占位文件又会让 git 读 ``commondir`` 时报错退出，
+    所以由 ``sweep_git_redirects`` 在运行期间反复清理。``commondir`` 只该出现在 ``.git/worktrees/<名字>/`` 里，主仓库的
+    ``.git`` 里有就是放进来的，不管什么时候放的。``config.worktree`` 可能是用户自己的，只盯着现在还没有的情况。"""
+    mine = os.path.lexists(os.path.join(os.path.realpath(workspace), ".git", "config.worktree"))
+    return ["commondir", *([] if mine else ["config.worktree"])]
 
 
-def sweep_git_redirects(paths: Iterable[str]) -> None:
-    """删掉沙箱里的命令新建的重定向文件，下一条沙箱外的 git 命令就不会照着它们去读工作区里的配置。"""
-    for p in paths:
-        with contextlib.suppress(OSError):
-            os.unlink(p)
-            log.warning("沙箱里的命令新建了 %s，git 会照着它读配置和钩子，已删除", p)
+def sweep_git_redirects(workspace: str | Path, names: Iterable[str]) -> None:
+    """删掉 ``.git`` 里的这些文件。``.git`` 可能被沙箱里的命令换成了软链接，所以不跟随，删的只能是工作区自己的。"""
+    try:
+        fd = os.open(os.path.join(os.path.realpath(workspace), ".git"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    try:
+        for name in names:
+            with contextlib.suppress(OSError):
+                os.unlink(name, dir_fd=fd)
+                log.warning("工作区 .git 里出现了 %s，git 会照着它读配置和钩子，已删除", name)
+    finally:
+        os.close(fd)
 
 
 def _git_frozen(ws: str) -> list[str]:

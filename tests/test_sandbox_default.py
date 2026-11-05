@@ -31,11 +31,11 @@ from flywhl_harness.policy.permissions import Decision, PermissionPolicy
 from flywhl_harness.runtime.workspace import ShadowGit, Workspace
 from flywhl_harness.tools import confine, default_tools, sandbox
 from flywhl_harness.tools.base import ToolContext
-from flywhl_harness.tools.confine import OFF_HINT, Confinement, SandboxUnavailable
+from flywhl_harness.tools.confine import OFF_HINT, Confinement, SandboxUnavailable, _git_redirect_watch
 from flywhl_harness.tools.egress import _DENIED_LIMIT, EgressProxy, parse_rules
 from flywhl_harness.tools.fs import EditTool, WriteTool
 from flywhl_harness.tools.mcp import MCPClient, MCPError, load_mcp_tools
-from flywhl_harness.tools.sandbox import _RELAY, EGRESS_PORT, Detected
+from flywhl_harness.tools.sandbox import _RELAY, EGRESS_PORT, Detected, git_redirects_to_sweep, sweep_git_redirects
 from flywhl_harness.tools.shell import BashTool, _sandbox_hint
 
 from .conftest import make_harness, tool_ends
@@ -907,6 +907,54 @@ async def test_files_that_redirect_git_cannot_be_planted(ws, name):
     await in_box(Confinement(LEVEL, "deny"), ws, f"echo evil > .git/{name}")
     assert not (ws / ".git" / name).exists()
     run_git(ws, "status", "--short")
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="macOS 写不进去，不靠清理")
+@real_sandbox
+async def test_a_redirect_file_planted_earlier_is_cleared_on_entry(ws):
+    """进程被强杀时来不及清理，留下的 commondir 下次进沙箱前清掉。"""
+    run_git(ws, "init", "-q")
+    (ws / ".git" / "commondir").write_text("evil\n")
+    code, out = await in_box(Confinement(LEVEL, "deny"), ws, "test ! -e .git/commondir")
+    assert code == 0, out
+
+
+def test_sweep_removes_the_redirect_and_nothing_else(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "commondir").write_text("x")
+    (tmp_path / ".git" / "HEAD").write_text("x")
+    sweep_git_redirects(tmp_path, git_redirects_to_sweep(tmp_path))
+    assert sorted(p.name for p in (tmp_path / ".git").iterdir()) == ["HEAD"]
+
+
+def test_a_config_worktree_that_was_already_there_is_not_swept(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config.worktree").write_text("x")
+    assert git_redirects_to_sweep(tmp_path) == ["commondir"]
+
+
+def test_sweep_does_not_follow_a_swapped_git_link(tmp_path):
+    """.git 被换成软链接时，删到的会是链接指向的目录，比如别的 linked worktree 的元数据。"""
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "commondir").write_text("keep")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / ".git").symlink_to(other)
+    sweep_git_redirects(ws, ["commondir"])
+    assert (other / "commondir").read_text() == "keep"
+
+
+async def test_a_file_planted_while_the_command_runs_is_cleared_quickly(tmp_path):
+    (tmp_path / ".git").mkdir()
+    planted = tmp_path / ".git" / "commondir"
+    async with _git_redirect_watch(tmp_path):
+        planted.write_text("x")
+        for _ in range(40):
+            if not planted.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert not planted.exists()
 
 
 @real_sandbox

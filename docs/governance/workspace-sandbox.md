@@ -519,7 +519,7 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 
 只读规则写的是路径，工作区在 `/tmp` 这类可写位置下时，上级目录改个名就脱离了规则。所以 macOS 上工作区和它往上每一级目录都不能改名，Linux 上工作区是挂载点，本来就改不了。
 
-`commondir` 这类文件平时不存在。macOS 上照样写不进去；Linux 上不存在的文件挂不成只读，占位的空文件又会让 git 报错，所以命令结束后由 harness 删掉沙箱里新建的 `commondir`、`config.worktree`。命令运行期间有一段窗口，长期运行的 MCP 服务器要到关闭时才清理。
+`commondir` 这类文件平时不存在。macOS 上照样写不进去；Linux 上不存在的文件挂不成只读，占位的空文件又会让 git 报错，所以由 harness 清理：进沙箱前清一次，运行期间每 0.1 秒清一次。这是缩短窗口，不是消除窗口。`config.worktree` 只在仓库开了 `extensions.worktreeConfig` 时才起作用；harness 被强杀时新建的这个文件会留下来，之后当成用户自己的。
 
 代价是 `git config`、`git remote add`、`git push -u` 这类要改 `.git/config` 的命令在沙箱里会失败，要走 `outside_sandbox`，或者自己在终端里跑。
 
