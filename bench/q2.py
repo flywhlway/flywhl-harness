@@ -43,7 +43,7 @@ def schedule(tasks: list[Task], trials: int, seed: int) -> list[tuple[Task, int,
 @contextmanager
 def trial_env(base: Path, port: int | None) -> Iterator[Path]:
     """每次试验一个干净的家目录。git 身份走环境变量：写进配置文件的话，沙箱开和关的差异会混进别的东西。"""
-    home = base / "home"
+    home = base / "user-home"     # 不叫 home：/work/x/home/ 会撞上脱敏的路径规则，而那条规则宁可错杀
     home.mkdir()
     saved = {k: os.environ.get(k) for k in ("HOME", "FLYWHL_HOME", "BENCH_HOME", "BENCH_PORT", *IDENTITY)}
     os.environ.update({"HOME": str(home), "FLYWHL_HOME": str(base / "flywhl-home"), "BENCH_HOME": str(home),

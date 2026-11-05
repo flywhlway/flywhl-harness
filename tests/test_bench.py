@@ -19,7 +19,7 @@ from bench import redact, report  # noqa: E402
 from bench.common import (  # noqa: E402
     BudgetExceeded, Ledger, append_jsonl, load_plan, read_jsonl, require_disposable, require_sandbox, unexpected_mounts,
 )
-from bench.q2 import run_q2, schedule  # noqa: E402
+from bench.q2 import run_q2, schedule, trial_env  # noqa: E402
 from bench.q3 import run_q3  # noqa: E402
 from bench.rehearsal import problems, script_for  # noqa: E402
 from bench.taskset import CATEGORIES, load_tasks, run_check, validate_task  # noqa: E402
@@ -170,10 +170,17 @@ def test_redaction_removes_keys_and_paths(tmp_path):
     assert redact.leftovers(public, [fake]) == ["b.txt"]
 
 
-def test_redaction_leaves_home_directories_inside_other_paths():
-    text, hits = redact.redact_text("写到 /work/bench-x/home/reports/a.txt，读 /home/bench/x 和 file:///Users/alice/y", [])
-    assert "/work/bench-x/home/reports/a.txt" in text and "/home/bench/x" in text
-    assert "alice" not in text and hits == 1
+@pytest.mark.parametrize("text", [
+    json.dumps({"o": "第一行\n/home/alice/y"}), "-I/home/alice/include", "/mnt/c/Users/alice/y", "file:///Users/alice/y",
+])
+def test_redaction_catches_paths_after_any_prefix(text):
+    """扫的是序列化后的文本：路径前面可能是转义符、编译选项或挂载点。"""
+    assert "alice" not in redact.redact_text(text, [])[0]
+
+
+def test_trial_paths_do_not_trip_the_path_rule(tmp_path):
+    with trial_env(tmp_path, None) as home:
+        assert redact.PATTERNS["path"].search(f"/work/bench-x/{home.name}/reports/a.txt") is None
 
 
 def test_short_env_values_are_not_treated_as_secrets():

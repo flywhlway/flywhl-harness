@@ -14,7 +14,7 @@ from pathlib import Path
 TEXT_SUFFIXES = {".jsonl", ".json", ".log", ".toml", ".txt", ".md"}
 PATTERNS = {
     "key": re.compile(r"\b(?:sk|pk|ghp|gho|github_pat|xox[abpr]|AKIA)[-_][A-Za-z0-9_\-]{12,}|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._\-]{16,}"),
-    "path": re.compile(r"(?<![\w.-])/(?:Users|home)/(?!bench\b)[A-Za-z0-9._-]+"),   # 前面的限制：/work/x/home/reports 不是家目录
+    "path": re.compile(r"/(?:Users|home)/(?!bench\b)[A-Za-z0-9._-]+"),   # 不限制前面的字符：扫的是 JSON 文本，\n/home/x 前面是 n
 }
 SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)
 
