@@ -13,7 +13,7 @@ SSE 设计要点
 这个服务能切换权限模式、批准审批、发起运行——等于能在本机执行命令，所以“只监听 127.0.0.1”并不够：
 
 - **Host 白名单**：挡住 DNS 重绑定。攻击者的域名解析到 127.0.0.1 后，恶意页面与本服务“同源”，
-  但浏览器发来的 ``Host`` 仍是攻击者的域名；
+  但浏览器发来的 ``Host`` 仍是攻击者的域名。这道防线不能关：监听所有网卡时也只认回环地址和 ``--allow-host`` 写的；
 - **跨站写请求**：改变状态的请求（非 GET / HEAD / OPTIONS）若带 ``Origin``，必须与本次请求的 ``Host`` 同源——
   主机名 **和端口** 都相同，挡住 CSRF。只比主机名不够：同一台机器上任何 ``http://127.0.0.1:<别的端口>`` 的网页
   （本地开发服务器、别的工具的控制台）都能对本服务发写请求；SameSite cookie 挡的是跨站，同主机不同端口不算跨站；
@@ -160,11 +160,10 @@ def _same_origin(origin: str, host: str) -> bool:
 
 def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None = None,
                allowed_hosts: Iterable[str] = ()) -> FastAPI:
-    """``allowed_hosts`` 追加到回环地址之外的可信主机名；含 ``"*"`` 时不校验 Host（此时必须配置 token）。"""
+    """``allowed_hosts`` 追加到回环地址之外的可信主机名，不接受 ``"*"``。"""
     hosts = set(LOOPBACK_HOSTS) | {x.lower() for x in allowed_hosts}
-    any_host = "*" in hosts
-    if any_host and not token:
-        raise ValueError("允许任意 Host 时必须配置访问令牌")
+    if "*" in hosts:
+        raise ValueError("allowed_hosts 不接受 \"*\"：Host 白名单不能关闭，请写出具体的主机名或 IP")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -192,7 +191,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
 
     async def _guard(request: Request, call_next):
         # 1) Host 白名单：DNS 重绑定时 Host 是攻击者的域名
-        if not any_host and _hostname(request.headers.get("host", "")) not in hosts:
+        if _hostname(request.headers.get("host", "")) not in hosts:
             return JSONResponse({"detail": "Host 不在白名单中（可用 --allow-host 添加）"}, status_code=403)
         # 2) 跨站写请求：Origin（含 "null"）必须与 Host 同源，端口也要一致（Host 已经过上面的白名单）
         origin = request.headers.get("origin")
@@ -312,7 +311,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                             "strip_secret_env": pc.strip_secret_env, "require_pinned": pc.require_pinned,
                             "auto_approve": list(pc.auto_approve)},
             "sandbox": h.confinement.status(),
-            "access": {"token": bool(token), "hosts": sorted(hosts), "any_host": any_host},
+            "access": {"token": bool(token), "hosts": sorted(hosts)},
             "hooks": [{"event": hc.event, "matcher": hc.matcher, "command": hc.command, "timeout": hc.timeout,
                        "fail_closed": hc.closed, "env": sorted({*hc.env, *hc.pass_env}),   # 只给变量名
                        "sandbox": h.confinement.scoped("hook", hc.event, {"sandbox": hc.sandbox, "sandbox_network": hc.sandbox_network,

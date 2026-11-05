@@ -84,7 +84,7 @@ async def run_trial(task: Task, config_name: str, trial: int, plan: dict[str, An
             cfg.budget.max_turns = q2["max_turns"]
             cfg.budget.max_cost_usd = q2["max_cost_usd"]
             kw = {"provider": provider, "model": model} if provider else {}
-            h = Harness(cfg, store=Store(base / "harness.db"), **kw)
+            h = Harness(cfg, store=Store(base / "harness.db", durability=cfg.durability), **kw)
             started = time.monotonic()
             timed_out = False
             async with h:

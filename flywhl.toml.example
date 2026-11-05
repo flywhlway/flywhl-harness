@@ -28,6 +28,9 @@ tool_timeout = 120
 parallel_tool_limit = 8
 cancel_grace_seconds = 5          # 不可中断工具在取消后的宽限期
 snapshots = true                  # 写操作前用影子 git 打工作区快照
+# 会话库落盘强度：full（默认）每次提交都刷到盘上，断电不丢已提交的事务；normal 提交更快，断电可能丢最后几次提交。
+# 只覆盖会话库，影子 git 和工作区文件不在保证内。这里写的值要先信任才生效
+# durability = "full"
 subagent_max_depth = 2
 enable_demo_tools = true          # send_notification / sleep 演示工具
 

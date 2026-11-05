@@ -20,6 +20,10 @@
 > **0.2.0 门禁（2026-11-05）：**
 > - 离线套件 macOS 726 passed、Linux 723 passed，33 个 live 场景通过；
 > - 结果、例外和没闭环的事见[门禁记录](evidence/release-gate-0.2.0.md)。
+>
+> **发布流程（2026-11-06）：**
+> - 补了[发布检查清单](release-checklist.md)、[SECURITY.md](../../SECURITY.md) 和 Dependabot 配置；
+> - 全历史密钥扫描 0 条命中，交叉校验的 4 处都是测试假值，见[扫描记录](evidence/secret-scan-2026-11-06.md)。
 
 ## 结论
 
@@ -63,6 +67,7 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
 | [security-round2.md](security-round2.md) | 第二轮安全加固：修复前后的行为、回归用例、仍未覆盖的缺口 |
 | [capability-backlog.md](capability-backlog.md) | 能力扩展清单：本轮已实现的能力，以及按优先级排序的后续项 |
 | [incident-2026-10-31.md](incident-2026-10-31.md) | 事故复盘：回归测试在开发机上执行了 `rm -rf ~` |
+| [release-checklist.md](release-checklist.md) | 发布检查清单：发布前门禁、发布动作、发布后验证 |
 
 ## 待验证（不是已复现缺陷）
 
@@ -71,6 +76,7 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
   - 2026-11-03 起，CI 的 coverage-audit 作业每次出报告；
   - 基线 81%（语句加分支，macOS），见 [evidence/baseline-coverage-2026-11-03.txt](evidence/baseline-coverage-2026-11-03.txt)；
   - CI 上 Linux 是 82%。差别主要在 `tools/sandbox.py`：Linux 档在 macOS 上不计入，这个文件在 CI 上是 88%，本机是 50%。
+  - 2026-11-06 起，这个作业和 [coverage-baseline.json](coverage-baseline.json) 比较，整体或关键模块低超过 0.5 个百分点就失败。不设绝对阈值，也不为抬数字补用例。
 - 没有跑依赖漏洞数据库扫描。已记录的运行版本：httpx 0.28.1、fastapi 0.143.0、starlette 1.7.0、uvicorn 0.54.0、pytest 9.1.1。
   - 2026-11-03 首次扫描，发现 certifi 一条（PYSEC-2026-4320），已升级到 2026.10.23，复扫没有已知漏洞；
   - 文档站的 npm 依赖还有 6 条，留待处理；

@@ -347,23 +347,30 @@ async def cmd_chat(args: argparse.Namespace) -> int:
 async def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    from .server.app import LOOPBACK_HOSTS, create_app
+    from .server.app import create_app
+    from .server.exposure import (console_hosts, console_reachers, console_url, is_wildcard, no_token_refusal,
+                                  serve_refusal)
 
-    loopback = args.host in LOOPBACK_HOSTS
-    if args.no_token and not loopback:   # 局域网里的任何人都能访问：不能关
-        print(_c("red", f"--no-token 只能用于回环地址（127.0.0.1 / localhost / ::1），当前监听 {args.host}"), file=sys.stderr)
+    allow = args.allow_host or []
+    refusal = serve_refusal(args.host, expose=args.expose, no_token=args.no_token, token=args.token, allow_hosts=allow)
+    if refusal:   # 先于加载配置：参数不对时不要弹信任确认，也不要建数据库
+        print(_c("red", refusal), file=sys.stderr)
         return 2
     cfg = _config(args)
     confirm_workspace(args, cfg)
     h = Harness(cfg)
+    reachers = console_reachers(h.confinement, args.port, cfg.hooks, cfg.mcp_servers) if args.no_token else []
+    if reachers:
+        print(_c("red", no_token_refusal(args.port, reachers)), file=sys.stderr)
+        return 2
     token = None if args.no_token else (args.token or server_token())
-    allow = list(args.allow_host or []) + ([] if loopback else ["*" if args.host in ("0.0.0.0", "::") else args.host])
-    app = create_app(h, token=token, allowed_hosts=allow)
-    host = f"[{args.host}]" if ":" in args.host else args.host
-    url = f"http://{host}:{args.port}/" + (f"?token={token}" if token else "")
+    app = create_app(h, token=token, allowed_hosts=console_hosts(args.host, allow))
+    url = console_url(args.host, args.port, token)
     print(_c("bold", f"flywhl-harness {__version__}") + f"  {url}  "
           + _c("dim", f"({h.provider.name}/{h.model}，工作区 {h.workspace_root})"))
     _print_sandbox(h)
+    if is_wildcard(args.host) and not allow:
+        print(_c("yellow", "从别的机器访问要加 --allow-host <主机名或IP>"))
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
     await server.serve()
     return 0
@@ -515,9 +522,12 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("serve", parents=[common], help="启动 Web UI")
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8765)
-    sp.add_argument("--token", help="自定义访问令牌（默认使用 ~/.flywhl/server_token，没有就生成）")
-    sp.add_argument("--no-token", action="store_true", help="关闭访问令牌（仅限回环地址，且确认本机没有其他用户）")
-    sp.add_argument("--allow-host", action="append", help="额外信任的 Host 主机名（反向代理、自定义域名），可重复")
+    sp.add_argument("--expose", action="store_true", help="确认要监听非回环地址：网络上的其他机器会连得到这个控制台")
+    sp.add_argument("--token", help="自定义访问令牌（默认使用 ~/.flywhl/server_token，没有就生成）；非回环地址上至少 16 个字符")
+    sp.add_argument("--no-token", action="store_true",
+                    help="关闭访问令牌（仅限回环地址，沙箱里的命令连得到控制台端口时拒绝启动，并确认本机没有其他用户）")
+    sp.add_argument("--allow-host", action="append",
+                    help="额外信任的 Host 主机名或 IP（别的机器访问、反向代理、自定义域名），可重复，不接受 *")
     sp.set_defaults(fn=cmd_serve)
     sub.add_parser("chat", parents=[common], help="终端交互").set_defaults(fn=cmd_chat)
     sp = sub.add_parser("run", parents=[common], help="一次性执行")

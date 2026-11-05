@@ -6,7 +6,7 @@
 |---|---|
 | `flywhl chat` | 终端交互；Ctrl-C 取消当前运行，连按两次退出 |
 | `flywhl run "<任务>" [--json] [--yes]` | 一次性执行；`completed` 时退出码为 0 |
-| `flywhl serve [--host] [--port] [--token \| --no-token] [--allow-host]` | Web UI，默认 `127.0.0.1:8765` |
+| `flywhl serve [--host] [--port] [--expose] [--token \| --no-token] [--allow-host]` | Web UI，默认 `127.0.0.1:8765`；监听非回环地址要加 `--expose` |
 | `flywhl sessions` / `flywhl runs [--session]` | 列出会话 / 运行 |
 | `flywhl resume <run_id>` / `flywhl retry <run_id>` | 恢复暂停或中断的运行 / 重试失败的运行 |
 | `flywhl recover` | 接管心跳过期的运行 |
