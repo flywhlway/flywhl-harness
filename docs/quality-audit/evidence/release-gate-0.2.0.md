@@ -95,3 +95,16 @@ Python 3.11、3.13 的 Linux 矩阵仍以 PR 上的 CI 结果为准。
 PR 上的 CI 在 `890ffea` 全部通过，`src/` 和候选代码相同：Ubuntu 上 Python 3.11～3.13、macOS 上 3.12 的离线套件，两个平台的沙箱验收。
 
 这份记录不代表已经发布。`dd4331a` 之后到打标签只改文档，`src/`、工作流、`uv.lock`、`pyproject.toml`、`scripts/` 都没有变，门禁不再重跑。发布配置在打标签之前配好：GitHub 上有 `testpypi`、`pypi` 两个 environment，`pypi` 要人工批准，PyPI、TestPyPI 的发布者由维护者配置。发布结果以 PyPI 和 `v0.2.0` 的 GitHub Release 为准。
+
+## 发布结果（2026-11-05）
+
+`v0.2.0` 打在 `d55acae`，`src/` 和候选代码相同。[发布运行](https://github.com/flywhlway/flywhl-harness/actions/runs/42038668072)的离线测试、构建、干净安装冒烟一次通过。`testpypi` 作业前 3 次报 `invalid-publisher`，待定发布者注册好后第 4 次通过，这几次只重跑发布作业，产物没有重新构建。维护者批准后发布到 [PyPI](https://pypi.org/project/flywhl-harness/0.2.0/)，并生成 [GitHub Release](https://github.com/flywhlway/flywhl-harness/releases/tag/v0.2.0)。
+
+| 检查 | 结果 |
+|---|---|
+| 文件摘要 | PyPI、TestPyPI 上的 wheel 和 sdist 与流水线产物一致 |
+| 来源证明 | wheel、sdist 都能在 PyPI 查到 |
+| 从 PyPI 安装 | macOS 和一次性 Linux 容器，Python 3.11～3.13：`flywhl --version` 是 0.2.0，`flywhl serve` 能启动，不带令牌的请求返回 401 |
+| PyPI 页面 | 描述是英文 README，文档链接指向英文站点 |
+
+Linux 容器用的是 `python:3.x-slim`，没有 bubblewrap，这里只验证安装和控制台启动，沙箱里的命令执行由上面的沙箱验收覆盖。
