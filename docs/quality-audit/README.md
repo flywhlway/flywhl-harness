@@ -100,3 +100,5 @@ uv run python scripts/soak.py kill9 --json soak-kill9.json  # 默认 50 轮：ki
 ```
 
 RSS 判定把预热之后的斜率外推到 2 小时。macOS 上 RSS 会跳十几 MiB，窗口只有一两分钟时外推值由噪声决定，要看增长至少跑 10 分钟。
+
+每回合都要读会话的全部历史，所以一个会话一直跑下去时，内存和运行耗时会随历史增长。`--rotate-every N` 每 N 个运行换一个新会话，用来区分这种增长和真正的泄漏，两种结果都要看。短跑只想验证流程时写 `--max-rss-growth-mib 100000`，命令里就看得出这次没有判定 RSS。

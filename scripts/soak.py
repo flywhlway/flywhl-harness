@@ -7,7 +7,10 @@
 两段都不联网、不用真实模型。Agent 只跑 echo、touch 这类哨兵命令，只碰本脚本建的临时目录。
 
 sse 启动真实的 flywhl serve，几个会话并发地发起运行并消费 SSE，周期性采样服务进程的 RSS、句柄数、线程数和数据库大小。
-运行时长的分位数只记录，不做判定。
+运行时长的分位数和控制面请求的延迟只记录，不做判定。控制面和提交走同一个事件循环，它变慢说明循环被卡住了。
+
+默认每个会话一直跑下去，历史越来越长，而每回合都要读全部历史，所以内存和耗时会随之增长。``--rotate-every N``
+每 N 个运行换一个新会话，用来区分这种增长和真正的泄漏。两种结果都要看，不能只报轮换的那份。
 
 kill9 循环：worker 跑一个带副作用的运行（工具往账本追加一行），随机时间点 kill -9，新进程接管到结束，
 再核对每个幂等键在账本里恰好一行。kill 落点多数是完全随机的，每 3 轮瞄准一次工具窗口，短跑也能覆盖到 intent 和结果之间。
@@ -274,8 +277,9 @@ def sample(pid: int, db: Path, t: float) -> dict[str, Any]:
 
 class Tally:
     def __init__(self) -> None:
-        self.runs, self.events, self.failed = 0, 0, 0
+        self.runs, self.events, self.failed, self.sessions = 0, 0, 0, 0
         self.durations: list[float] = []
+        self.pings: list[float] = []
         self.failures: list[str] = []
 
     def fail(self, where: str, why: str) -> None:
@@ -329,10 +333,16 @@ async def one_run(client: httpx.AsyncClient, sid: str, command: str) -> tuple[fl
     return took, len(seqs), problems
 
 
-async def session_loop(client: httpx.AsyncClient, index: int, deadline: float, tally: Tally, workspace: Path) -> None:
+async def new_session(client: httpx.AsyncClient, index: int, tally: Tally) -> str:
     resp = await client.post("/api/sessions", json={"title": f"浸泡 {index}"})
     resp.raise_for_status()
-    sid = resp.json()["id"]
+    tally.sessions += 1
+    return resp.json()["id"]
+
+
+async def session_loop(client: httpx.AsyncClient, index: int, deadline: float, tally: Tally, workspace: Path,
+                       rotate_every: int = 0) -> None:
+    sid = await new_session(client, index, tally)
     n = 0
     while time.monotonic() < deadline and not tally.give_up:
         n += 1
@@ -340,6 +350,8 @@ async def session_loop(client: httpx.AsyncClient, index: int, deadline: float, t
         command = f"touch {marker.name}" if n % 2 == 0 else f"echo soak-{index}-{n}"
         try:
             async with asyncio.timeout(RUN_TIMEOUT):
+                if rotate_every and n % rotate_every == 0:
+                    sid = await new_session(client, index, tally)
                 took, events, problems = await one_run(client, sid, command)
         except (httpx.HTTPError, ConnectionError, TimeoutError) as e:
             tally.fail(f"会话 {index} 第 {n} 个运行", f"{type(e).__name__}：{e}")
@@ -354,6 +366,16 @@ async def session_loop(client: httpx.AsyncClient, index: int, deadline: float, t
         tally.durations.append(took)
         for problem in problems:
             tally.fail(f"会话 {index} 第 {n} 个运行", problem)
+
+
+async def ping_loop(client: httpx.AsyncClient, deadline: float, tally: Tally, every: float = 1.0) -> None:
+    """量控制面请求的往返时间，见文件开头。只记录，失败也不算数：真卡死了会由运行超时报出来。"""
+    while time.monotonic() < deadline and not tally.give_up:
+        started = time.perf_counter()
+        with contextlib.suppress(httpx.HTTPError):
+            (await client.get("/api/info")).raise_for_status()
+            tally.pings.append(time.perf_counter() - started)
+        await asyncio.sleep(every)
 
 
 async def sample_loop(proc: subprocess.Popen, db: Path, every: float, started: float, deadline: float,
@@ -399,7 +421,9 @@ async def drive(args: argparse.Namespace, proc: subprocess.Popen, port: int, tok
         await wait_ready(client, proc)
         started = time.monotonic()
         deadline = started + args.seconds
-        loops = [asyncio.create_task(session_loop(client, i, deadline, tally, base / "workspace")) for i in range(args.sessions)]
+        loops = [asyncio.create_task(session_loop(client, i, deadline, tally, base / "workspace", args.rotate_every))
+                 for i in range(args.sessions)]
+        loops.append(asyncio.create_task(ping_loop(client, deadline, tally)))
         await sample_loop(proc, db, args.sample_seconds, started, deadline, tally, samples)
         for result in await asyncio.gather(*loops, return_exceptions=True):
             if isinstance(result, Exception):
@@ -438,9 +462,10 @@ def run_sse(args: argparse.Namespace, base: Path) -> dict[str, Any]:
         print(log_tail(log_path).replace(token, "***"), file=sys.stderr)     # 启动日志里有带令牌的链接
     rss, fds = rss_verdict(samples, args.max_rss_growth_mib), fd_verdict(samples, args.max_fd_growth)
     return {"segment": "sse", "durability": durability, "environment": environment(), "sessions": args.sessions,
+            "rotate_every": args.rotate_every, "sessions_created": tally.sessions,
             "seconds": args.seconds, "sample_seconds": args.sample_seconds,
             "runs": tally.runs, "events": tally.events, "failed": tally.failed, "failures": tally.failures,
-            "run_seconds": latency(tally.durations), "rss": rss, "fds": fds, "samples": samples,
+            "run_seconds": latency(tally.durations), "api_seconds": latency(tally.pings), "rss": rss, "fds": fds, "samples": samples,
             "passed": rss["passed"] and fds["passed"] and tally.failed == 0 and tally.runs > 0}
 
 
@@ -458,9 +483,13 @@ def describe_fds(fds: dict[str, Any]) -> str:
 
 def report_sse(result: dict[str, Any]) -> None:
     took = result["run_seconds"]
-    print(f"\n运行 {result['runs']} 个，事件 {result['events']} 条，失败 {result['failed']} 次，durability = {result['durability']}")
+    print(f"\n运行 {result['runs']} 个，事件 {result['events']} 条，失败 {result['failed']} 次，durability = {result['durability']}，"
+          f"用了 {result['sessions_created']} 个会话（{'每 ' + str(result['rotate_every']) + ' 个运行换一个' if result['rotate_every'] else '不轮换'}）")
     if result["runs"]:
         print(f"运行耗时（只记录）：p50 {took['p50_s']}s，p99 {took['p99_s']}s，最大 {took['max_s']}s")
+    api = result["api_seconds"]
+    if api["p50_s"] is not None:
+        print(f"控制面延迟（只记录）：p50 {api['p50_s']}s，p99 {api['p99_s']}s，最大 {api['max_s']}s")
     print(f"RSS：{describe_rss(result['rss'])}")
     print(f"句柄：{describe_fds(result['fds'])}")
     for failure in result["failures"]:
@@ -662,6 +691,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sse.add_argument("--seconds", type=float, default=TWO_HOURS)
     sse.add_argument("--sessions", type=int, default=4)
     sse.add_argument("--sample-seconds", type=float, default=30.0)
+    sse.add_argument("--rotate-every", type=int, default=0, help="每 N 个运行换一个新会话，默认不换")
     sse.add_argument("--max-rss-growth-mib", type=float, default=64.0, help="折合 2 小时的 RSS 增长上限")
     sse.add_argument("--max-fd-growth", type=int, default=8, help="句柄数末段中位数比首段多出的上限")
     kill = sub.add_parser("kill9", parents=[common], help="接管循环：kill -9 之后副作用恰好一次")

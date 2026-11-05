@@ -112,6 +112,39 @@ def test_prepare_writes_durability_only_when_set(soak, tmp_path):
         assert ('durability = "normal"' in soak.prepare(base, durability).read_text(encoding="utf-8")) is present
 
 
+def fake_api(calls: list) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"id": f"s{len(calls)}"})
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://test")
+
+
+@pytest.mark.parametrize(("rotate_every", "want"), [(0, ["s1"] * 6), (3, ["s1", "s1", "s2", "s2", "s2", "s3"])])
+async def test_session_loop_changes_sessions_only_when_asked(soak, tmp_path, monkeypatch, rotate_every, want):
+    tally, seen = soak.Tally(), []
+
+    async def one_run(client, sid, command):
+        seen.append(sid)
+        if command.startswith("touch "):
+            (tmp_path / command.split()[1]).touch()
+        if len(seen) == 6:
+            tally.failed = soak.MAX_FAILURES     # 只是为了让循环退出
+        return 0.1, 3, []
+
+    monkeypatch.setattr(soak, "one_run", one_run)
+    async with fake_api([]) as client:
+        await soak.session_loop(client, 0, soak.time.monotonic() + 30, tally, tmp_path, rotate_every)
+    assert seen == want and tally.sessions == len(set(want))
+
+
+async def test_ping_loop_records_latency_without_failing_the_run(soak):
+    tally, calls = soak.Tally(), []
+    async with fake_api(calls) as client:
+        await soak.ping_loop(client, soak.time.monotonic() + 0.05, tally, every=0.01)
+    assert calls and len(tally.pings) == len(calls) and tally.failed == 0
+    assert soak.latency(tally.pings)["p50_s"] is not None
+
+
 def test_ledger_exactly_once_passes(soak):
     verdict = soak.ledger_verdict(["a\tcycle-0\t1\n", "b\tcycle-1\t2\n"], ["a", "b"])
     assert verdict["passed"] and verdict["lines"] == 2
