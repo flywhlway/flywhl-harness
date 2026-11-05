@@ -301,3 +301,40 @@ def test_site_pages_list_each_failure_and_the_deviations(tmp_path):
 def test_container_reaps_orphans():
     """没有 init 时 Python 是 PID 1，退出的 bwrap 进程没人回收，正式运行因此崩过一次。"""
     assert "docker run --init " in (Path(__file__).parent.parent / "bench" / "run.sh").read_text(encoding="utf-8")
+
+
+def test_host_authored_files_do_not_leave_the_container(tmp_path):
+    """模型在无沙箱配置下能写结果目录，这两个文件进站点，只能来自宿主。"""
+    raw, public = tmp_path / "raw", tmp_path / "public"
+    raw.mkdir()
+    (raw / "classifications.jsonl").write_text("{}\n", encoding="utf-8")
+    (raw / "deviations.json").write_text("[]", encoding="utf-8")
+    (raw / "manifest.json").write_text("{}", encoding="utf-8")
+    redact.publish(raw, public)
+    assert sorted(p.name for p in public.iterdir()) == ["manifest.json"]
+
+
+def test_site_text_cannot_become_markup(tmp_path):
+    append_jsonl(tmp_path / "q2" / "results.jsonl", [_q2_row("t", "A", 1, False), _q2_row("t", "B", 1, True)])
+    append_jsonl(tmp_path / "classifications.jsonl", [{"id": "q2/t/A/1", "category": "model_random", "note": "{{ 1 }}<script>x</script>|\n# 标题"}])
+    (tmp_path / "deviations.json").write_text(json.dumps([{"zh": "<img src=x>{{ a }}", "en": "<img src=x>{{ a }}"}]), encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps({"rehearsal": False, "commit": "{{ b }}", "started_at": "<b>"}), encoding="utf-8")
+    page = report.write_pages(report.build(tmp_path), tmp_path / "docs")[0].read_text(encoding="utf-8")
+    assert "{{" not in page and "<script" not in page and "<img" not in page and "<b>" not in page and "\n# 标题" not in page
+
+
+@pytest.mark.parametrize("bad", [{"zh": 1, "en": "x"}, {"zh": "x"}, "x"])
+def test_deviations_must_have_both_languages(tmp_path, bad):
+    (tmp_path / "deviations.json").write_text(json.dumps([bad]), encoding="utf-8")
+    with pytest.raises(SystemExit, match="deviations"):
+        report.build(tmp_path)
+
+
+@pytest.mark.parametrize("note", ["密钥 sk-abcdefghijklmnopqrstuvwx", "路径 /home/alice/x"])
+def test_site_pages_refuse_secrets_in_handwritten_text(tmp_path, note):
+    append_jsonl(tmp_path / "q2" / "results.jsonl", [_q2_row("t", "A", 1, False), _q2_row("t", "B", 1, True)])
+    append_jsonl(tmp_path / "classifications.jsonl", [{"id": "q2/t/A/1", "category": "model_random", "note": note}])
+    with pytest.raises(SystemExit, match="疑似密钥"):
+        report.write_pages(report.build(tmp_path), tmp_path / "docs")
+    assert not (tmp_path / "docs").exists()
+

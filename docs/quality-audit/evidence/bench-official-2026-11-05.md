@@ -72,6 +72,8 @@ bench/run.sh --env-file <密钥文件> --out <结果目录> all
 
 发布前用 `.env` 里的 8 个值逐个比对公开包的全部文件。命中的只有两个模型名配置项，不是密钥。形似密钥的字符串 0 个，宿主路径 0 个。
 
+无沙箱配置下，模型和基准是同一个用户，理论上能改结果目录。查了 Q1、Q2 的全部轨迹，没有任何一次碰过 `/results`、`spent.json` 或结果文件。`classifications.jsonl` 和 `deviations.json` 都是取回数据之后在宿主上写的。
+
 ## 复现
 
 运行时的 `bench/run.sh` 没有 `--init`，复现要用后来加了 `--init` 的版本，`src/` 和 `333bbb3` 相同。

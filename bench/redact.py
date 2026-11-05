@@ -17,6 +17,8 @@ PATTERNS = {
     "path": re.compile(r"/(?:Users|home)/(?!bench\b)[A-Za-z0-9._-]+"),   # 不限制前面的字符：扫的是 JSON 文本，\n/home/x 前面是 n
 }
 SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)
+# 这两个文件跑完后在宿主上写。无沙箱配置下模型和基准是同一个用户，容器里出现的同名文件不能带出来
+HOST_AUTHORED = frozenset({"classifications.jsonl", "deviations.json"})
 
 
 def env_secrets(env: dict[str, str] | None = None) -> list[str]:
@@ -43,7 +45,7 @@ def redact_tree(src: Path, dst: Path, secrets: list[str] | None = None) -> dict[
     hits: dict[str, int] = {}
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
-        if path.suffix not in TEXT_SUFFIXES:
+        if path.suffix not in TEXT_SUFFIXES or str(rel) in HOST_AUTHORED:
             continue
         text, n = redact_text(path.read_text(encoding="utf-8", errors="replace"), secrets)
         out = dst / rel

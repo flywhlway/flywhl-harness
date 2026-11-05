@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import statistics
 from collections import defaultdict
@@ -14,6 +15,7 @@ from typing import Any
 from flywhl_harness.observe.evals import mcnemar_exact, wilson_interval
 
 from .common import CATEGORIES, NOT_COUNTED, read_jsonl
+from .redact import PATTERNS, env_secrets
 
 Q2_CATEGORIES = (*CATEGORIES, "sandbox_boundary")   # 只用于 Q2：沙箱按设计拦下了任务要做的事，这正是要测的代价，计入分母
 Report = dict[str, Any]
@@ -28,6 +30,21 @@ def load_classes(out: Path) -> dict[str, dict[str, str]]:
         if r["category"] not in Q2_CATEGORIES:
             raise ValueError(f"{rid} 的分类 {r['category']} 不认识")
     return classes
+
+
+def load_deviations(out: Path) -> list[dict[str, str]]:
+    path = out / "deviations.json"    # 偏离方案的地方。跟数据放在一起，归档后不会和结果分开
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    if not isinstance(rows, list) or not all(isinstance(d, dict) and isinstance(d.get("zh"), str) and isinstance(d.get("en"), str)
+                                             for d in rows):
+        raise SystemExit("deviations.json 要是 [{\"zh\": ..., \"en\": ...}] 的形式")
+    return rows
+
+
+def _md(text: Any) -> str:
+    """进站点的文字。VitePress 把 Markdown 当 Vue 模板编译，{{ }} 和 HTML 都会生效，| 和换行会拆开表格。"""
+    flat = " ".join(str(text).split())
+    return html.escape(flat, quote=False).replace("{", "&#123;").replace("}", "&#125;").replace("|", "\\|")
 
 
 def _rate(k: int, n: int) -> dict[str, Any]:
@@ -137,9 +154,7 @@ def build(out: Path) -> Report:
     q1, f1 = q1_summary(out, classes)
     q2, f2 = q2_summary(out, classes)
     failures = f1 + f2
-    deviations_path = out / "deviations.json"    # 偏离方案的地方。跟数据放在一起，归档后不会和结果分开
-    deviations = json.loads(deviations_path.read_text(encoding="utf-8")) if deviations_path.is_file() else []
-    return {"manifest": manifest, "q1": q1, "q2": q2, "q3": q3_summary(out), "failures": failures, "deviations": deviations,
+    return {"manifest": manifest, "q1": q1, "q2": q2, "q3": q3_summary(out), "failures": failures, "deviations": load_deviations(out),
             "unclassified": [f["id"] for f in failures if not f["category"]],
             "harness_bugs": [f["id"] for f in failures if f["category"] == "harness_bug"]}
 
@@ -157,15 +172,15 @@ def render(report: Report, *, lang: str = "zh") -> str:
     zh = lang == "zh"
     m = report["manifest"]
     out = ["<!-- 由 bench/report.py 生成，不要手改 -->", ""]
-    out += [f"{'版本' if zh else 'Version'}: `{m.get('harness_version', '?')}` · commit `{m.get('commit', '?')}` · "
-            f"plan `{m.get('plan_id', '?')}` · {m.get('started_at', '?')}", ""]
+    out += [f"{'版本' if zh else 'Version'}: `{_md(m.get('harness_version', '?'))}` · commit `{_md(m.get('commit', '?'))}` · "
+            f"plan `{_md(m.get('plan_id', '?'))}` · {_md(m.get('started_at', '?'))}", ""]
     if report["q1"]:
         out += ["## Q1", "", ("| 模型 | 通过率 | Wilson 95% 区间 | 跳过 | 不计入 | 缓存命中率 | token | 费用 | 耗时 |" if zh else
                               "| Model | Pass rate | Wilson 95% CI | Skipped | Excluded | Cache hit | Tokens | Cost | Time |"),
                 "|---|---|---|---|---|---|---|---|---|"]
         for r in report["q1"]:
             tokens = r["input_tokens"] + r["output_tokens"] + r["cache_read_tokens"]
-            out.append(f"| {r['model']} | {r['passed']}/{r['n']} ({_pct(r['rate'])}) | {_ci(r['ci95'])} | {r['skipped']} | {r['excluded']} "
+            out.append(f"| {_md(r['model'])} | {r['passed']}/{r['n']} ({_pct(r['rate'])}) | {_ci(r['ci95'])} | {r['skipped']} | {r['excluded']} "
                        f"| {_pct(r['cache_hit_rate'])} | {tokens:,} | ${r['cost_usd']:.4f} | {r['seconds']:.0f}s |")
         out.append("")
     if report["q2"]:
@@ -186,7 +201,7 @@ def render(report: Report, *, lang: str = "zh") -> str:
                      f"Median extra time per trial for A over B on general tasks: {q2['median_extra_seconds_a_minus_b']}s ({q2['pairs']} pairs)."), ""]
         if q2["sensitive"]:
             out += [("| 沙箱敏感任务 | A | B |" if zh else "| Sandbox-sensitive task | A | B |"), "|---|---|---|"]
-            out += [f"| {t} | {v['A']} | {v['B']} |" for t, v in q2["sensitive"].items()]
+            out += [f"| {_md(t)} | {v['A']} | {v['B']} |" for t, v in q2["sensitive"].items()]
             out.append("")
     if report["q3"]:
         q3 = report["q3"]
@@ -201,11 +216,12 @@ def render(report: Report, *, lang: str = "zh") -> str:
         out += ["", "| " + ("试验" if zh else "Trial") + " | " + ("分类" if zh else "Class") + " | " + ("依据" if zh else "Basis") + " |", "|---|---|---|"]
         for f in report["failures"]:
             note = (f["note"] if zh else f.get("note_en") or f["note"]) or ""
-            out.append(f"| `{f['id']}` | {CLASS_LABELS[f['category'] or 'unclassified'][0 if zh else 1]} | {note} |")
+            trial = _md(f["id"]).replace("`", "")
+            out.append(f"| `{trial}` | {CLASS_LABELS[f['category'] or 'unclassified'][0 if zh else 1]} | {_md(note)} |")
         out.append("")
     if report.get("deviations"):
         out += [("## 偏差记录" if zh else "## Deviations from the plan"), ""]
-        out += [f"- {d['zh' if zh else 'en']}" for d in report["deviations"]]
+        out += [f"- {_md(d['zh' if zh else 'en'])}" for d in report["deviations"]]
         out.append("")
     return "\n".join(out)
 
@@ -216,8 +232,13 @@ def write_pages(report: Report, docs: Path) -> list[Path]:
         raise SystemExit("拒绝写入：这是彩排的结果，不是真实模型的数据")
     if report["unclassified"]:
         raise SystemExit(f"拒绝写入：还有 {len(report['unclassified'])} 个失败没有归类")
-    paths = [(docs / "benchmark" / "results.md", "zh"), (docs / "en" / "benchmark" / "results.md", "en")]
-    for path, lang in paths:
+    pages = {docs / "benchmark" / "results.md": "# 基准结果\n\n" + render(report, lang="zh"),
+             docs / "en" / "benchmark" / "results.md": "# Benchmark results\n\n" + render(report, lang="en")}
+    secrets = env_secrets()
+    for path, text in pages.items():     # 备注和偏差是手写的，没有经过容器里的脱敏，这里过同一道闸门
+        if any(v in text for v in secrets) or any(p.search(text) for p in PATTERNS.values()):
+            raise SystemExit(f"拒绝写入：{path.name} 里有疑似密钥或路径")
+    for path, text in pages.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(("# 基准结果\n\n" if lang == "zh" else "# Benchmark results\n\n") + render(report, lang=lang), encoding="utf-8")
-    return [p for p, _ in paths]
+        path.write_text(text, encoding="utf-8")
+    return list(pages)

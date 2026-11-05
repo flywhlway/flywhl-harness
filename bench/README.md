@@ -62,6 +62,8 @@ bench/run.sh --env-file ~/bench.env --out /tmp/bench-results all
 
 运行偏离方案时，把经过写进结果目录的 `deviations.json`（`[{"zh": "...", "en": "..."}]`），页面会列出来。试验作废要保留原始记录：挪到 `q2/voided.jsonl`，它随数据发布，不进统计。
 
+`classifications.jsonl` 和 `deviations.json` 只在宿主上写：容器里的同名文件不会带出来，模型在无沙箱配置下写得到结果目录。两者的内容会公开，写入页面前过一遍和发布时相同的脱敏检查，查到疑似密钥或路径就拒绝。
+
 ## 改任务
 
 改完经 `scripts/safe_pytest.py` 校验，检查脚本和参考答案都是会执行的代码，不要直接在宿主机上跑：
