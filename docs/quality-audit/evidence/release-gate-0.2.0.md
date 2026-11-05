@@ -47,3 +47,26 @@ VitePress 或插件出修复版本后再升。
 - `test_steer_mid_run_is_followed`、`test_pause_and_resume_at_safe_point` 在 11-04 失败过一次，原因没有定位。之后 4 次完整运行都没有复现，诊断信息已经加上，详见 [tests/live/README.md](../../../tests/live/README.md)。
 - live 只在 deepseek-flash 上跑了完整场景，其他供应商只覆盖各自的多步任务和续聊用例。
 - 这份记录不代表已经发布。PyPI、TestPyPI 的发布者配置、GitHub environment 和标签都还没做。
+
+## 并入基准试跑的修复之后复核（2026-11-05）
+
+候选代码更新为 `d338d16`。`5a5d67c` 之后 `src/` 的改动有回放、压缩退回、错误分类、OpenRouter 上 Claude 的缓存、命令环境变量过滤和数据目录的 `.gitignore`，细节见 [CHANGELOG](../../../CHANGELOG.md)。`uv.lock`、`pyproject.toml`、`scripts/`、工作流、`policy/`、`tools/sandbox.py`、`tools/egress.py`、`tools/confine.py` 没有改动，所以 `pip-audit`、工作流静态检查和沙箱验收没有重跑，沿用上面的结果。
+
+| 检查 | 环境 | 结果 |
+|---|---|---|
+| 离线套件 | macOS，Python 3.11.15、3.12.13、3.13.12 | 各 805 passed |
+| 系统沙箱用例 | macOS，三个 Python 版本 | 各 26 passed，7 skipped |
+| 离线套件 | 一次性 Linux 容器，Python 3.12，bubblewrap 0.12.0 | 801 passed，4 skipped |
+| 系统沙箱用例 | 同上 | 20 passed，13 skipped |
+| 审计不变量 | macOS / Linux | 13 passed / 12 passed，1 skipped |
+| sdist 解包后测试 | 一次性 Linux 容器 | 745 passed，5 skipped；系统沙箱用例 20 passed，14 skipped |
+| wheel 干净安装冒烟 | macOS 上 3.11～3.13 | 全部通过 |
+| `twine check --strict` | twine 7.0.0 | wheel、sdist 通过 |
+| 33 个 live 场景 | 一次性 Linux 容器，真实 bubblewrap，deepseek-flash | 33 passed，275,212 token，0.0298 美元，183 秒 |
+
+多出来的系统沙箱 skip 来自 `tests/test_bench.py`：sdist 不带 `bench/`，这个文件整个跳过。
+
+第一次跑 sdist 解包测试时解压到了 `/tmp`，外层 bubblewrap 用不了，退回只隔离环境变量的模式，`test_command_hook_is_killed_on_timeout` 失败 1 条。解压到家目录、走正常的沙箱之后全部通过。这条用例用 `os.kill(pid, 0)` 判断子进程还在不在，推测是容器里没有 init 回收僵尸进程，没有单独验证。
+
+Python 3.11、3.13 的 Linux 矩阵仍以 PR 上的 CI 结果为准。
+

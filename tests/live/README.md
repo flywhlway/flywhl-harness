@@ -96,6 +96,14 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 
 11-04 第 2 次的两条（插话、暂停恢复）这 4 次都没有复现，原因仍未定位。
 
+## 五家模型的试跑（2026-11-05）
+
+第一次把 24 个通用场景跑在 DeepSeek 以外的模型上，10 个失败里 5 个是 harness 缺陷，3 个是用例过严，2 个是模型能力，逐条分类见
+[试跑记录](../../docs/quality-audit/evidence/bench-pilot-2026-11-05.md)。全部处理后重跑：DeepSeek、百炼、Kimi 24 passed，MiniMax、Claude Haiku 23 passed，1 个跳过。
+跳过的是思考开关：MiniMax 没有这个开关，Haiku 开了也不返回推理。
+
+11-04 那两条这次也没有复现。
+
 ## 场景
 
 | 文件 | 场景 |
