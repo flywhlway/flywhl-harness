@@ -1,6 +1,6 @@
 # 基准方法说明
 
-> **状态：草案，开跑前定稿。** 被测模型、费用上限和消融对象现在是推荐值。定稿后不再修改，要改就换一个方案编号，新旧结果不混算。
+> **状态：草案，开跑前定稿。** 被测模型、费用上限和消融对象已经定了，全文和任务集还待审阅。定稿后不再修改，要改就换一个方案编号，新旧结果不混算。
 > 机器可读的部分在 [`bench/plan.toml`](https://github.com/flywhlway/flywhl-harness/blob/main/bench/plan.toml)，两边的数字由测试核对。
 
 先写方案再跑，是为了避免看到结果之后再挑指标。
@@ -23,7 +23,7 @@
 - 一次性 Linux 容器，不挂任何宿主目录。`bench/run.sh` 用 `git archive` 打包提交过的文件来构建镜像，结果用 `docker cp` 取走。
 - 容器里有真实的 bubblewrap，被测的 bash 跑在真沙箱里。bubblewrap 要建 user namespace、挂新的 `/proc`，所以容器放宽了 seccomp、apparmor 和 `/proc` 遮蔽；同时去掉全部 capability、禁止提权，以非 root 用户运行。
 - 运行器启动时检查自己确实在容器里、没有多余的挂载、系统沙箱能启动，否则拒绝运行。沙箱起不来时 bash 一条命令也跑不了，A 配置的失败会被误读成沙箱拦截。
-- 密钥只为这次基准创建，并在各家控制台设好额度。模型执行的命令读不到密钥：bash 子进程会剥离这类环境变量。沙箱关的配置下，命令仍可能从 `/proc` 读到父进程的环境，这也是密钥必须专用的原因。
+- 容器里只传五家模型的密钥。用的是维护者现有的密钥，不是专门新建的，费用靠账本的总额和单模型上限控制。模型执行的命令读不到密钥：bash 子进程会剥离这类环境变量。沙箱关的配置下，命令仍可能从 `/proc` 读到父进程的环境，这是用现有密钥要承担的风险。
 - 原始数据不出容器。取走的是脱敏副本，发布前再扫一遍，查到疑似密钥或本机路径就不发布。
 
 ## Q1：跨供应商矩阵
@@ -38,7 +38,7 @@
 | 阿里云百炼 | `dashscope:qwen3.8-flash` |
 | Moonshot（Kimi） | `kimi:kimi-k2.6` |
 | MiniMax | `minimax:MiniMax-M2.7` |
-| OpenRouter | `openrouter:deepseek/deepseek-v4.1-flash` |
+| OpenRouter（Claude Haiku） | `openrouter:anthropic/claude-haiku-5.5` |
 
 每家给出：通过率和 Wilson 95% 区间、token、缓存命中率、费用、耗时。
 

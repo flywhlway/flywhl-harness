@@ -259,7 +259,7 @@ def test_data_dir_stays_out_of_git(tmp_path):
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     data = HarnessConfig(workspace=str(tmp_path)).data_path()
-    for name in ("harness.db", "harness.db-wal", "external_notify.db", "shadow.git/HEAD", "shadow-ab12.git/HEAD"):
+    for name in ("harness.db", "harness.db-wal", "shadow.git/HEAD", "shadow-ab12.git/HEAD", "server_token", "future-file"):
         (data / name).parent.mkdir(exist_ok=True)
         (data / name).write_text("sentinel", encoding="utf-8")
     assert _git_status(tmp_path) == []
@@ -276,6 +276,16 @@ def test_user_files_in_the_data_dir_stay_trackable(tmp_path):
     data = HarnessConfig(workspace=str(tmp_path)).data_path()
     (data / "harness.db").write_text("sentinel", encoding="utf-8")
     assert sorted(_git_status(tmp_path)) == [".flywhl/config.toml", ".flywhl/skills/x/SKILL.md"]
+
+
+def test_ignore_file_is_not_written_through_a_dangling_symlink(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    target = tmp_path / "outside"
+    (tmp_path / "ws" / ".flywhl").mkdir(parents=True)
+    (tmp_path / "ws" / ".flywhl" / ".gitignore").symlink_to(target)
+    HarnessConfig(workspace=str(tmp_path / "ws")).data_path()
+    assert not target.exists()
 
 
 def test_existing_ignore_file_in_the_data_dir_is_left_alone(tmp_path):

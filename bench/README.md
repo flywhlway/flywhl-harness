@@ -24,7 +24,7 @@
 bench/run.sh --out /tmp/bench-rehearsal rehearse
 ```
 
-建专用密钥，在各家控制台设好额度，写进一个 `--env-file` 格式的文件。这个文件不进仓库。然后每家跑一遍，量出单价：
+把被测模型的密钥写进一个 `--env-file` 格式的文件，别的变量不要放。这个文件不进仓库。最好是设了额度的专用密钥。然后每家跑一遍，量出单价：
 
 ```bash
 bench/run.sh --env-file ~/bench.env --out /tmp/bench-pilot pilot

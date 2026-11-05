@@ -15,7 +15,7 @@ models = [
   "dashscope:qwen3.8-flash",
   "kimi:kimi-k2.6",
   "minimax:MiniMax-M2.7",
-  "openrouter:deepseek/deepseek-v4.1-flash",
+  "openrouter:anthropic/claude-haiku-5.5",
 ]
 # 只需被测模型密钥的 24 个场景
 scenarios = [
