@@ -251,11 +251,23 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 
   | 防线 | 挡住什么 | 做法 |
   |---|---|---|
-  | Host 白名单 | DNS 重绑定：此时浏览器发来的 `Host` 仍是攻击者的域名 | 只接受 `127.0.0.1`、`localhost`、`::1` 与 `--allow-host` 追加的主机名 |
+  | Host 白名单 | DNS 重绑定：此时浏览器发来的 `Host` 仍是攻击者的域名 | 只接受 `127.0.0.1`、`localhost`、`::1` 与 `--allow-host` 追加的主机名或 IP，监听具体的非回环 IP 时该 IP 自动加入。不能关闭：监听 `0.0.0.0`、`::` 时也一样，`--allow-host` 与 `create_app` 都拒绝 `*` |
   | 跨站写请求检查 | CSRF：从别的网站向本地端口发 POST | 非 GET / HEAD / OPTIONS 请求若带 `Origin`（包括 `null`），必须指向可信主机 |
-  | 访问令牌 | 局域网里的其他人、本机的其他账户 | 默认开启，`--no-token` 只允许监听回环地址。令牌保存在 `~/.flywhl/server_token`（0600），重启后不变；终端打印 `/?token=…` 链接，首次打开换成 30 天的 HttpOnly、SameSite=Strict cookie，之后也接受 `Authorization: Bearer` |
+  | 访问令牌 | 局域网里的其他人、本机的其他账户 | 默认开启，`--no-token` 只允许监听回环地址，非回环地址上 `--token` 至少 16 个字符。令牌保存在 `~/.flywhl/server_token`（0600），重启后不变；终端打印 `/?token=…` 链接，首次打开换成 30 天的 HttpOnly、SameSite=Strict cookie，之后也接受 `Authorization: Bearer` |
 
-  `tests/test_security.py::test_server_rejects_dns_rebinding_and_cross_site_writes`、`test_server_token_flow` 覆盖这三层，令牌的持久化与回环限制见 `tests/test_hardening.py`。
+  监听非回环地址要显式加 `--expose`，否则拒绝启动。
+
+  `--no-token` 还有一条启动检查（`server/exposure.py`）。不带令牌时，`POST /api/approvals/{aid}` 只剩 Host 与 `Origin` 两道检查，
+  命令行客户端发给 `127.0.0.1` 的请求都过得去，所以沙箱里的命令连得到控制台端口，就能批准自己触发的人工门。`serve` 在这些情况下拒绝启动：
+
+  - 全局沙箱档位是 off，或全局 `sandbox_network = "allow"`；
+  - 网络策略是 `allowlist`，规则放行了回环地址上的这个端口，判定与出站代理相同；
+  - 单条 hook 或 MCP 服务器自己的 `sandbox = "off"`、`sandbox_network = "allow"`、`network_allow` 落到上面两种情况。
+
+  配置了沙箱但当前机器用不了时命令不会执行，不算连得到；这时写了 `sandbox = "off"` 的那一条照样在沙箱外运行，仍然算。
+
+  `tests/test_security.py::test_server_rejects_dns_rebinding_and_cross_site_writes`、`test_server_token_flow` 覆盖这三层，令牌的持久化与回环限制见 `tests/test_hardening.py`，
+  监听地址与启动检查见 `tests/test_serve_exposure.py`。
   中间件之外，所有响应（包括 401、403）都带 CSP：禁止内联脚本，`frame-ancestors 'none'` 防止控制台被嵌进别的页面、诱导人点“批准”；
   写请求的请求体上限 8 MB，分块上传直接拒绝。
   决定人仍固定记录为 `web-user`：共享部署时应在前面接入真正的身份认证，并把真实身份写进 `decided_by`。
