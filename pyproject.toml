@@ -83,7 +83,7 @@ markers = [
     "os_sandbox: 测试 bash 工具的系统沙箱档位；系统沙箱不能嵌套，scripts/safe_pytest.py 在外层沙箱之外单独运行它们",
 ]
 
-# 覆盖率只出报告、不设门禁：FLYWHL_COVERAGE=1 pytest 由 scripts/safe_pytest.py 两段收集后合并，再 coverage report
+# 覆盖率不设绝对阈值，棘轮见 scripts/coverage_ratchet.py：FLYWHL_COVERAGE=1 pytest 由 scripts/safe_pytest.py 两段收集后合并，再 coverage report
 [tool.coverage.run]
 source = ["flywhl_harness"]
 branch = true

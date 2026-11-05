@@ -207,7 +207,7 @@ async def replay_trajectory(
     rp = ReplayProvider(assistant, fps, summaries=[c["summary"] for c in traj.get("compactions") or []])
     provider = HybridProvider(rp, live, fork_at)
     model = live_model or traj["session"]["model"] or "replay"
-    h = Harness(cfg, provider=provider, model=model, tools=registry, store=Store(":memory:"))
+    h = Harness(cfg, provider=provider, model=model, tools=registry, store=Store(":memory:", durability=cfg.durability))
     seeded = sum(1 for e in traj.get("history") or [] if e["kind"] == "message")
     try:
         s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass")

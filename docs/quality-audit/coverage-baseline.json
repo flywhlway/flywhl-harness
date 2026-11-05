@@ -1,0 +1,13 @@
+{
+  "整体": 83.28,
+  "src/flywhl_harness/policy/permissions.py": 98.6,
+  "src/flywhl_harness/policy/approvals.py": 82.56,
+  "src/flywhl_harness/policy/hooks.py": 93.91,
+  "src/flywhl_harness/tools/sandbox.py": 89.16,
+  "src/flywhl_harness/tools/egress.py": 94.56,
+  "src/flywhl_harness/tools/confine.py": 92.99,
+  "src/flywhl_harness/tools/shell.py": 86.26,
+  "src/flywhl_harness/tools/fs.py": 77.44,
+  "src/flywhl_harness/agent/executor.py": 85.68,
+  "src/flywhl_harness/runtime/manager.py": 79.12
+}

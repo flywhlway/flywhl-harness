@@ -74,7 +74,7 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 ## 配置信任
 
-启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。关闭沙箱和放开网络不在其中：项目配置里的 `sandbox = "off"`、`sandbox_network = "allow"` 信任了也不算。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
+启动目录的 `flywhl.toml` 或 `.flywhl/config.toml` 可能来自陌生仓库，其中的高危设置要先信任才生效：`hooks`、`mcp_servers`、`verify_command`、`base_url`、`api_key` / `api_key_env`、`extra_body`、`workspace`、`data_dir`、`durability`、allow 规则，以及 `bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、出站白名单条目与沙箱里放行的 Unix 套接字等放宽项。关闭沙箱和放开网络不在其中：项目配置里的 `sandbox = "off"`、`sandbox_network = "allow"` 信任了也不算。信任绑定“路径 + SHA-256”，记录在 `~/.flywhl/trusted.json`，文件内容一变就要重新确认（终端逐项确认或 `--trust`）。`-c` 指定的文件与 `~/.flywhl/config.toml` 视为可信。
 
 hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了工作区之外，但工作区它们能写，仍按供应链对待：命令里写出的脚本（`python3 scripts/guard.py`）一并算进信任哈希，命令 hook 每次执行前再核对，Agent 改过脚本就拒绝执行；`npx`、`uvx`、`docker run` 临时拉取又没锁到确切版本的包会在确认提示和设置页里标出（认不出的选项、本地目录这类拿不准的情况一律算没锁），`permissions.require_pinned = true` 时直接拒绝启动。包管理器还会读运行目录里的 `uv.toml`、`.npmrc` 来换包源，hook 与 MCP 服务器最好在工作区外的目录运行。
 
@@ -82,9 +82,10 @@ hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了�
 
 ## Web 访问控制
 
-- **令牌默认开启。** 首次启动生成令牌并保存到 `~/.flywhl/server_token`（权限 0600），终端打印带 `?token=` 的链接；在 `/` 上兑换成 30 天的 HttpOnly Cookie 后 303 跳转，地址栏不留令牌。API 也接受 `Authorization: Bearer`。`--token` 指定令牌，`--no-token` 只允许监听回环地址。
+- **令牌默认开启。** 首次启动生成令牌并保存到 `~/.flywhl/server_token`（权限 0600），终端打印带 `?token=` 的链接；在 `/` 上兑换成 30 天的 HttpOnly Cookie 后 303 跳转，地址栏不留令牌。API 也接受 `Authorization: Bearer`。`--token` 指定令牌。`--no-token` 只允许监听回环地址，Agent 运行的命令连得到控制台端口时也拒绝启动：没有令牌时，这些命令能调用审批接口，批准自己的人工门。“连得到”指沙箱档位是 off、网络策略是 `allow`，或者白名单放行了回环地址上的这个端口，hook 和 MCP 服务器自己的沙箱设置同样算；沙箱用不了时命令不会执行，不算。
+- **监听非回环地址要显式声明。** 没加 `--expose` 时拒绝启动，退出码 2。这类地址必须带令牌，`--token` 手动指定时至少 16 个字符。
 - **请求体上限** 8 MB，超出返回 413；不接受分块上传，缺少 `Content-Length` 返回 411。
-- **Host 白名单** 抵御 DNS 重绑定（反向代理域名用 `--allow-host` 加入）；所有写请求要求 Origin 与服务同主机同端口。
+- **Host 白名单** 抵御 DNS 重绑定，不能关闭：只接受回环地址和 `--allow-host` 写的主机名或 IP，不接受 `*`。监听具体的 IP 时这个 IP 自动加入，监听 `0.0.0.0`、`::` 时不加。所有写请求要求 Origin 与服务同主机同端口。
 - **安全响应头**：CSP 禁止内联脚本并设 `frame-ancestors 'none'`，另有 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 
 ## 执行环境

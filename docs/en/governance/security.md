@@ -20,7 +20,7 @@ Prompt injection cannot be fixed the way SQL injection was, because the model ha
 
 **Project config is split by risk.** `split_untrusted` in `config.py` lets model, limit and prompt settings take effect, plus anything that only tightens (deny/ask rules, `plan`, `on_ask="deny"`, a sandbox level other than off, `sandbox_network="deny"`). Hooks, MCP servers, `verify_command`, allow rules, `bypass`, `base_url` and the rest are ignored until the user trusts the file. Trust is recorded in `~/.flywhl/trusted.json` as the file's absolute path plus a SHA-256 of its content, and the hash also covers scripts the hook command or MCP launch line names. `sandbox = "off"` and `sandbox_network = "allow"` are dropped even when trusted, including per hook and per MCP server. User config and `-c` files are trusted. A project `.env` is loaded through an allowlist (`IMPLICIT_ENV_KEYS` in `cli.py`): provider keys and model selection only, so a cloned repo cannot redirect your API key with `OPENAI_BASE_URL`.
 
-**The approval UI is an attack target.** Cards show real arguments, a diff preview and the analyzer's reason. The web server defends against DNS rebinding with a Host allowlist, rejects cross-site writes by `Origin`, requires an access token by default, and sends a CSP with `frame-ancestors 'none'` so the console cannot be framed to trick a click.
+**The approval UI is an attack target.** Cards show real arguments, a diff preview and the analyzer's reason. The web server defends against DNS rebinding with a Host allowlist, rejects cross-site writes by `Origin`, requires an access token by default, and sends a CSP with `frame-ancestors 'none'` so the console cannot be framed to trick a click. Listening on a non-loopback address needs an explicit `--expose` and a token, and a manual `--token` there needs at least 16 characters. The Host allowlist cannot be switched off: on `0.0.0.0` and `::` it holds loopback names and `--allow-host` entries, a specific listen IP joins automatically, and `*` is refused. `--no-token` works on loopback only, and `serve` refuses it when commands the agent runs can reach the console port, because without a token they could approve their own human gate through `POST /api/approvals/{aid}`. That covers a sandbox level of off, `sandbox_network = "allow"`, an allowlist rule for that loopback port, and the same settings on a single hook or MCP server. A configured sandbox that is unavailable on the machine does not count, since the command never runs.
 
 **Credentials.** bash, MCP server and command hook child processes have secret-like environment variables stripped. Needed ones are listed in the config `env` or `pass_env`, which trust confirmation shows. The design rule: keep tokens in dedicated harness-side tools (a "create PR" tool), not in the general execution surface. Short-lived scoped tokens and credential proxying are not implemented.
 
@@ -53,6 +53,7 @@ The chapter's summary names the main ones.
 | `policy/supply_chain.py` | Script references and content pins for trust hashes |
 | `cli.py` `IMPLICIT_ENV_KEYS` | `.env` allowlist |
 | `server/app.py` | Host check, cross-site write check, token, CSP |
+| `server/exposure.py` | Startup checks: `--expose`, token length, `--no-token` reachability |
 
 ## Related chapters
 
