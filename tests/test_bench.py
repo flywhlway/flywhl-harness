@@ -118,8 +118,9 @@ def test_schedule_keeps_pairs_adjacent_and_is_repeatable():
 # ---------------------------------------------------------------------- 防线
 def test_only_system_mounts_are_expected():
     info = ("1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /proc rw - proc proc rw\n"
-            "3 1 0:3 / /etc/hosts rw - ext4 /dev/vda rw\n4 1 0:4 /Users/me /work rw - virtiofs mac rw\n")
-    assert unexpected_mounts(info) == ["/work"]
+            "3 1 0:3 / /etc/hosts rw - ext4 /dev/vda rw\n4 1 0:4 /Users/me /work rw - virtiofs mac rw\n"
+            "5 1 0:5 / /usr/sbin/docker-init ro - ext4 /dev/vda ro\n6 1 0:6 / /usr/sbin/docker-init.d rw - ext4 /dev/vda rw\n")
+    assert unexpected_mounts(info) == ["/work", "/usr/sbin/docker-init.d"]   # --init 挂进来的文件，只放行这一个精确路径
 
 
 def test_real_runs_refuse_to_start_on_the_host(monkeypatch):

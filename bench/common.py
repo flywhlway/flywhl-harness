@@ -17,7 +17,7 @@ PLAN = ROOT / "plan.toml"
 # 失败分类沿用 tests/live/README.md：缺密钥、网络与环境、模型随机、harness 缺陷
 CATEGORIES = ("missing_key", "network_env", "model_random", "harness_bug")
 NOT_COUNTED = ("missing_key", "network_env")   # 这两类和被测对象无关，不进通过率的分母，但都要列出来
-_ALLOWED_MOUNTS = re.compile(r"^(/|/proc(/.*)?|/sys(/.*)?|/dev(/.*)?|/etc/(resolv\.conf|hostname|hosts))$")
+_ALLOWED_MOUNTS = re.compile(r"^(/|/proc(/.*)?|/sys(/.*)?|/dev(/.*)?|/etc/(resolv\.conf|hostname|hosts)|/usr/sbin/docker-init)$")
 
 
 class BudgetExceeded(RuntimeError):
