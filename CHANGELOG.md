@@ -2,7 +2,7 @@
 
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前，次版本号的升级可能带破坏性变化，这类变化都写在“行为变化”一节。
 
-## [0.2.0] - 未发布
+## [0.2.0] - 2026-11-05
 
 第一个发布到 PyPI 的版本。v0.1.0 之后的主线是安全边界：系统沙箱从可选原型变成默认开启，命令分析、凭证保护、供应链检查都重做了一轮。
 
@@ -73,7 +73,7 @@ move from `allow` to `allowlist`.
 
 - 新增 `bench/`：公开基准的流水线、30 个任务和方法说明。真实模型只在一次性容器里运行，第一次结果见[基准页](https://flywhlway.github.io/flywhl-harness/benchmark/)。live 夹具可以用 `FLYWHL_LIVE_ARTIFACTS` 导出结果和轨迹。
 - 包：`pip install flywhl-harness`、`pipx install flywhl-harness` 可用；sdist 改成白名单；版本号只在 `__init__.py` 写一处。
-- 测试统一在系统沙箱里运行，子进程启动前有执行绊线，起因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
+- 测试统一在系统沙箱里运行，子进程启动前有执行绊线，起因见[事故复盘](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/incident-2026-10-31.md)。
 - CI：Linux 和 macOS 真跑沙箱用例，沙箱起不来时失败；新增干净安装验收、覆盖率和依赖漏洞报告；推送 `v*` 标签走发布流水线。
 
 ## [0.1.0] - 2026-10-16
