@@ -173,7 +173,7 @@ class Harness:
         self.config = config or HarnessConfig.load()
         self.workspace_root = Path(self.config.workspace).expanduser().resolve()
         self.data_dir = self.config.data_path()
-        self.store = store or Store(self.data_dir / "harness.db")
+        self.store = store or Store(self.data_dir / "harness.db", durability=self.config.durability)
         if provider is None:
             provider, model = create_provider(self.config)
         self.provider = provider

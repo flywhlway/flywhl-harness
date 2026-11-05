@@ -1,0 +1,19 @@
+# 依赖更新：只开版本更新 PR，合并前走正常 CI。改了 uv.lock 或工作流之后，下次发布的门禁要全部重跑，见 docs/quality-audit/release-checklist.md。
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+
+  # .github/actions 里的复合 action 没有 uses，这里只有工作流要管
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: chore
