@@ -4,6 +4,24 @@
 
 ## Unreleased
 
+### 行为变化
+
+**`flywhl serve` 收紧了网络暴露。** 以前监听 `0.0.0.0`、`::` 时 Host 白名单被关掉，DNS 重绑定的防线随之消失，只剩共享令牌。现在白名单始终生效，监听非回环地址也要明确声明。
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| `--host 0.0.0.0` 或别的非回环地址退出码 2 | 控制台能批准命令、切换权限，暴露到网络要明确声明 | 加 `--expose`。回环地址不需要 |
+| 监听 `0.0.0.0`、`::` 时从别的机器打开返回 403 | 白名单只有回环地址和 `--allow-host` 写的 | 加 `--allow-host <主机名或IP>`。没写时启动会提示。监听具体的 IP 时这个 IP 自动进白名单 |
+| 监听 `0.0.0.0`、`::` 时打印的链接变成 `http://127.0.0.1:…`、`http://[::1]:…` | 通配地址不在白名单里，原样打印的链接打开就是 403 | 从别的机器打开时换成 `--allow-host` 写的地址 |
+| `--allow-host '*'` 退出码 2，`create_app(allowed_hosts=["*"])` 抛 `ValueError` | 白名单不能关闭 | 写出具体的主机名或 IP |
+| 非回环地址上 `--token` 不足 16 个字符时退出码 2 | 网络上的其他机器能反复试，短令牌挡不住 | 换长令牌，或者不写 `--token`，用自动生成的 |
+| `--no-token` 退出码 2，提示命令连得到控制台端口 | 不带令牌时，连得到这个端口的命令能调用审批接口，批准自己的人工门 | 去掉 `--no-token`，或者收紧提示里列出的沙箱设置 |
+| `/api/settings` 的 `access` 里没有 `any_host` 了 | 这个状态不再存在 | 读这个字段的脚本去掉它 |
+
+“连得到控制台端口”指全局沙箱档位 off、全局 `sandbox_network = "allow"`、`allowlist` 放行了回环地址上的这个端口，以及单条 hook、MCP 服务器自己的同类设置。配置了沙箱但这台机器用不了时命令不会执行，不算连得到。
+
+**English summary.** `flywhl serve` no longer disables the Host allowlist on `0.0.0.0` and `::`, and `*` is refused by both `--allow-host` and `create_app`. Listening on a non-loopback address now requires `--expose` plus a token, and a manual `--token` there needs at least 16 characters. A wildcard listen trusts only loopback names and `--allow-host` entries, so remote browsers get 403 until you add the address, and the printed link uses a loopback address. `--no-token` is refused when commands the agent runs can reach the console port, because they could otherwise approve their own human gate: sandbox off, `sandbox_network = "allow"`, or an allowlist rule for that loopback port, globally or on a single hook or MCP server. `access.any_host` is gone from `/api/settings`.
+
 ### 修复
 
 **出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和地址字面相同就放行，`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在这类条目启动时报错，要连本机端口写 `localhost:端口`。
