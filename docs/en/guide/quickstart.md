@@ -229,7 +229,7 @@ To start over, delete `.flywhl/`.
 
 **Port in use?** `flywhl serve --port 9000`.
 
-**Need access from the LAN or behind a reverse proxy?** `flywhl serve --host 0.0.0.0` generates an access token automatically and prints a link with `?token=...`; open it once. For a custom domain, add it to the Host allowlist with `--allow-host <domain>`. By default the server accepts only `127.0.0.1` and `localhost` as Host and rejects cross-site writes. It can approve actions and switch permission mode, which amounts to running commands on the machine. See [19 Security](/en/governance/security).
+**Need access from the LAN or behind a reverse proxy?** Listening on a non-loopback address requires an explicit `--expose`, and the host name or IP people will use goes in `--allow-host`: `flywhl serve --host 0.0.0.0 --expose --allow-host 192.168.1.20`. A token is mandatory: one is generated automatically, a manual `--token` needs at least 16 characters, and `--no-token` is refused. The Host allowlist stays on when listening on all interfaces. It accepts loopback names and what `--allow-host` lists, never `*`; a specific listen IP joins it automatically. On `0.0.0.0` and `::` the printed `?token=...` link uses a loopback address, so swap in the `--allow-host` address from another machine and open it once. The server also rejects cross-site writes. It can approve actions and switch permission mode, which amounts to running commands on the machine. See [19 Security](/en/governance/security).
 
 **Does the Web UI need the internet?** No. It uses system fonts and built-in icons and requests no external resources.
 
