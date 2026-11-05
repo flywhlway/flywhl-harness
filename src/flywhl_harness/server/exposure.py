@@ -21,9 +21,8 @@ from .app import LOOPBACK_HOSTS
 
 MIN_TOKEN_LENGTH = 16
 
-# 命令连本机时能写的目标：(写给代理的主机名, 连接用的地址)。localhost 与 127.0.0.1 在代理那里是同一台机器。
-# 0.0.0.0 要单独列：连它落到本机，而 AllowRule.reaches() 放行写全 IP 的规则，network_allow 里写 0.0.0.0:端口 同样连得到
-_LOOPBACK_ROUTES = (("127.0.0.1", "127.0.0.1"), ("localhost", "127.0.0.1"), ("localhost", "::1"), ("0.0.0.0", "0.0.0.0"))
+# 命令连本机时能写的目标：(写给代理的主机名, 连接用的地址)。localhost 与 127.0.0.1 在代理那里是同一台机器
+_LOOPBACK_ROUTES = (("127.0.0.1", "127.0.0.1"), ("localhost", "127.0.0.1"), ("localhost", "::1"))
 
 
 def is_wildcard(host: str) -> bool:
