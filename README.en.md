@@ -137,7 +137,7 @@ should not be exposed beyond loopback.
 - Open security gaps are listed rather than hidden. Workspace files are not yet a taint source, and project instruction files still reach
   the system prompt. See the [security chapter](https://flywhlway.github.io/flywhl-harness/en/governance/security) and the
   [readiness review](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/release-readiness.md).
-- No benchmark has been published yet, so this project makes no claims about task success rates.
+- The [first benchmark](https://flywhlway.github.io/flywhl-harness/en/benchmark/) covers 5 models and 30 small tasks at one commit. It is evidence for the harness mechanisms, not a claim about task success rates in real work.
 
 ## Documentation
 

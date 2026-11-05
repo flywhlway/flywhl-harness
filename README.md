@@ -193,6 +193,8 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live  
 规则命中后不再受 plan 模式约束，自动审批时能在规划阶段执行写操作。两个都已修复，并补了离线回归测试。
 需要哪些密钥、分类明细见 [tests/live/README.md](tests/live/README.md)。
 
+公开基准的第一次结果见[基准概览](docs/benchmark/index.md)：5 家模型、30 个小任务，绑定一个提交。它是 harness 机制的证据，不代表真实工作中的任务成功率。
+
 ## 教程
 
 `docs/` 是一个可独立部署的 VitePress 站点：从“什么是 harness”到每个机制的原理、设计取舍与源码精读。

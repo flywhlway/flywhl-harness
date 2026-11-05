@@ -76,6 +76,7 @@ const sidebar = [
     items: [
       { text: "概览", link: "/benchmark/" },
       { text: "方法说明", link: "/benchmark/methodology" },
+      { text: "结果", link: "/benchmark/results" },
     ],
   },
   {
@@ -175,7 +176,10 @@ const enSidebar = [
   },
   {
     text: "Benchmark",
-    items: [{ text: "Overview", link: "/en/benchmark/" }],
+    items: [
+      { text: "Overview", link: "/en/benchmark/" },
+      { text: "Results", link: "/en/benchmark/results" },
+    ],
   },
   {
     text: "Reference",
