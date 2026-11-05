@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import sys
 import warnings
 from pathlib import Path
 
@@ -15,7 +17,8 @@ from flywhl_harness.observe.replay import replay_run
 
 from .conftest import make_harness
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 
 
 def pragmas(store: Store) -> dict[str, int]:
@@ -139,3 +142,37 @@ def test_project_config_needs_trust_to_relax_durability(tmp_path, monkeypatch):
     assert HarnessConfig.load(trust=lambda req: True).durability == "normal"
     # 信任记录绑定文件内容：之后不用再确认
     assert HarnessConfig.load().durability == "normal"
+
+
+def load_bench():
+    spec = importlib.util.spec_from_file_location("durability_bench", ROOT / "scripts" / "durability_bench.py")
+    bench = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bench
+    spec.loader.exec_module(bench)
+    return bench
+
+
+def test_bench_only_removes_its_own_directory(tmp_path, monkeypatch):
+    bench = load_bench()
+    monkeypatch.chdir(tmp_path)
+    other = tmp_path / "keep"
+    other.mkdir()
+    (other / "f").touch()
+    bench.clean_up(other)
+    assert (other / "f").exists()
+    mine = tmp_path / f"{bench.PREFIX}x"
+    (mine / "sub").mkdir(parents=True)
+    bench.clean_up(mine)
+    assert not mine.exists()
+
+
+@pytest.mark.parametrize("full, passed", [
+    ({"lag_p99_ms": 60, "lag_max_ms": 500, "turns_per_s": 7.1}, True),     # 三项都在线内
+    ({"lag_p99_ms": 60.1, "lag_max_ms": 100, "turns_per_s": 10}, False),   # p99 增加超过 50ms
+    ({"lag_p99_ms": 11, "lag_max_ms": 501, "turns_per_s": 10}, False),     # 最大卡顿超过 500ms
+    ({"lag_p99_ms": 11, "lag_max_ms": 100, "turns_per_s": 6.9}, False),    # 吞吐下降超过 30%
+])
+def test_bench_verdict_applies_each_limit(full, passed):
+    normal = {"lag_p99_ms": 10, "lag_max_ms": 20, "turns_per_s": 10}
+    summary = {("burst", 1, "full"): full, ("burst", 1, "normal"): normal}
+    assert load_bench().verdicts(summary)[0]["passed"] is passed
