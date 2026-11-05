@@ -20,6 +20,10 @@
 > **0.2.0 门禁（2026-11-05）：**
 > - 离线套件 macOS 726 passed、Linux 723 passed，33 个 live 场景通过；
 > - 结果、例外和没闭环的事见[门禁记录](evidence/release-gate-0.2.0.md)。
+>
+> **发布流程（2026-11-06）：**
+> - 补了[发布检查清单](release-checklist.md)、[SECURITY.md](../../SECURITY.md) 和 Dependabot 配置；
+> - 全历史密钥扫描 0 条命中，交叉校验的 4 处都是测试假值，见[扫描记录](evidence/secret-scan-2026-11-06.md)。
 
 ## 结论
 
@@ -63,6 +67,7 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
 | [security-round2.md](security-round2.md) | 第二轮安全加固：修复前后的行为、回归用例、仍未覆盖的缺口 |
 | [capability-backlog.md](capability-backlog.md) | 能力扩展清单：本轮已实现的能力，以及按优先级排序的后续项 |
 | [incident-2026-10-31.md](incident-2026-10-31.md) | 事故复盘：回归测试在开发机上执行了 `rm -rf ~` |
+| [release-checklist.md](release-checklist.md) | 发布检查清单：发布前门禁、发布动作、发布后验证 |
 
 ## 待验证（不是已复现缺陷）
 
