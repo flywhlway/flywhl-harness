@@ -76,6 +76,7 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
   - 2026-11-03 起，CI 的 coverage-audit 作业每次出报告；
   - 基线 81%（语句加分支，macOS），见 [evidence/baseline-coverage-2026-11-03.txt](evidence/baseline-coverage-2026-11-03.txt)；
   - CI 上 Linux 是 82%。差别主要在 `tools/sandbox.py`：Linux 档在 macOS 上不计入，这个文件在 CI 上是 88%，本机是 50%。
+  - 2026-11-06 起，这个作业和 [coverage-baseline.json](coverage-baseline.json) 比较，整体或关键模块低超过 0.5 个百分点就失败。不设绝对阈值，也不为抬数字补用例。
 - 没有跑依赖漏洞数据库扫描。已记录的运行版本：httpx 0.28.1、fastapi 0.143.0、starlette 1.7.0、uvicorn 0.54.0、pytest 9.1.1。
   - 2026-11-03 首次扫描，发现 certifi 一条（PYSEC-2026-4320），已升级到 2026.10.23，复扫没有已知漏洞；
   - 文档站的 npm 依赖还有 6 条，留待处理；

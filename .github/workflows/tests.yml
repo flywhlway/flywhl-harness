@@ -78,7 +78,7 @@ jobs:
           name: sandbox-acceptance-${{ matrix.os }}
           path: sandbox-acceptance.json
 
-  # 覆盖率与依赖漏洞：只出报告、不设门禁，结果写进作业摘要并作为产物上传
+  # 覆盖率棘轮和依赖漏洞：覆盖率比基线低超过容差时失败，依赖漏洞只出报告。结果写进作业摘要并作为产物上传
   coverage-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -98,7 +98,12 @@ jobs:
         run: |
           uv run coverage report --sort=cover > coverage.txt
           uv run coverage xml -o coverage.xml
+          uv run coverage json -q -o coverage.json
           { echo "## 覆盖率"; uv run coverage report --sort=cover --format=markdown; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 覆盖率棘轮（基线见 docs/quality-audit/coverage-baseline.json）
+        run: |
+          set -o pipefail
+          uv run python scripts/coverage_ratchet.py coverage.json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: 依赖漏洞扫描（运行时依赖：核心 + anthropic 扩展）
         if: always()
         continue-on-error: true   # 只报告；发现漏洞时 pip-audit 退出码非 0，作业仍算通过
@@ -116,4 +121,5 @@ jobs:
           path: |
             coverage.txt
             coverage.xml
+            coverage.json
             pip-audit.md

@@ -50,7 +50,7 @@
   "$HOME/fresh/bin/python" scripts/sandbox_acceptance.py --internet --json sandbox-acceptance.json
   ```
 
-- [ ] **覆盖率。** `FLYWHL_COVERAGE=1 uv run pytest -q`，再 `uv run coverage report --sort=cover`，或者看 CI 的 `coverage-audit` 作业摘要。只出报告、不设门禁，数字写进门禁记录。基线是 macOS 81%、Linux 82%，见 [README](README.md)。
+- [ ] **覆盖率。** 看 CI 的 `coverage-audit` 作业：整体或关键模块比[基线](coverage-baseline.json)低超过 0.5 个百分点时作业失败，判定在 [`scripts/coverage_ratchet.py`](../../scripts/coverage_ratchet.py)。覆盖率涨了要提交新基线：从作业产物取 `coverage.json`，运行 `uv run python scripts/coverage_ratchet.py coverage.json --update`。往下调基线只能手改，理由写进 PR。
 
 ### 打包
 
