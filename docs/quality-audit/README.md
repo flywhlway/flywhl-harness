@@ -91,3 +91,12 @@ P0：QA-001、QA-002、QA-003。P1：QA-004、QA-005、QA-006。
 ```
 
 失败用例断言的是产品声明的安全不变量。修代码之前不要改断言去换绿灯。
+
+耐久浸泡用 mock provider，不联网，子进程和数据都在临时目录里，不达标时退出码非 0：
+
+```bash
+uv run python scripts/soak.py sse --json soak-sse.json      # 默认 2 小时 4 个会话：RSS、句柄、SSE 完整性
+uv run python scripts/soak.py kill9 --json soak-kill9.json  # 默认 50 轮：kill -9 接管后副作用恰好一次
+```
+
+RSS 判定把预热之后的斜率外推到 2 小时。macOS 上 RSS 会跳十几 MiB，窗口只有一两分钟时外推值由噪声决定，要看增长至少跑 10 分钟。
