@@ -71,7 +71,7 @@ move from `allow` to `allowlist`.
 
 ### 工程
 
-- 新增 `bench/`：公开基准的流水线、30 个任务和方法说明草案。真实模型只在一次性容器里运行，结果还没发布。live 夹具可以用 `FLYWHL_LIVE_ARTIFACTS` 导出结果和轨迹。
+- 新增 `bench/`：公开基准的流水线、30 个任务和方法说明。真实模型只在一次性容器里运行，第一次结果见[基准页](https://flywhlway.github.io/flywhl-harness/benchmark/)。live 夹具可以用 `FLYWHL_LIVE_ARTIFACTS` 导出结果和轨迹。
 - 包：`pip install flywhl-harness`、`pipx install flywhl-harness` 可用；sdist 改成白名单；版本号只在 `__init__.py` 写一处。
 - 测试统一在系统沙箱里运行，子进程启动前有执行绊线，起因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
 - CI：Linux 和 macOS 真跑沙箱用例，沙箱起不来时失败；新增干净安装验收、覆盖率和依赖漏洞报告；推送 `v*` 标签走发布流水线。

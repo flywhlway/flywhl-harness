@@ -169,8 +169,8 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 
 | 环境 | 离线用例 | 系统沙箱用例 |
 |---|---|---|
-| macOS，Python 3.12.13 | 726 项通过 | 27 项通过，6 项 Linux 专用的跳过 |
-| 一次性 Linux 容器，Python 3.12 | 723 项通过，3 项跳过 | 21 项通过，12 项 macOS 专用的跳过 |
+| macOS，Python 3.12.13 | 851 项通过 | 26 项通过，7 项跳过 |
+| 一次性 Linux 容器，Python 3.12 | 847 项通过，4 项跳过 | 20 项通过，13 项跳过 |
 
 干净安装验收（`scripts/sandbox_acceptance.py`：装 wheel、不写配置）在这两个环境都是 23 项通过。
 
@@ -186,7 +186,7 @@ Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算
 FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
 ```
 
-2026-11-05，候选版本 0.2.0 上 33 个用例全部通过（约 28 万 token、0.04 美元），记录见[发布门禁](docs/quality-audit/evidence/release-gate-0.2.0.md)。
+2026-11-05，候选版本 0.2.0 上 33 个用例全部通过（约 28 万 token、0.03 美元），记录见[发布门禁](docs/quality-audit/evidence/release-gate-0.2.0.md)。
 2026-10-16 复现：33 个用例全部通过（约 34 万 token、0.05 美元）。此前本机记录的 30 个失败逐项排查过：
 缺密钥 0 个（没有密钥只会跳过，不会失败）；当时的运行环境问题 29 个（同样的密钥重跑即通过）；真实缺陷 1 个。
 复跑过程中 plan 模式用例又暴露出第 2 个真实缺陷。两个缺陷都与 plan 模式有关：执行器记录的副作用等级没带工作区；

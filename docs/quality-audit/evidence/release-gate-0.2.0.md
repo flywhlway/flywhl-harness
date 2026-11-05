@@ -70,3 +70,28 @@ VitePress 或插件出修复版本后再升。
 
 Python 3.11、3.13 的 Linux 矩阵仍以 PR 上的 CI 结果为准。
 
+## 权限修复合入之后复核（2026-11-05）
+
+候选代码更新为 `dd4331a`，`src/` 和[回归记录](bench-regress-2026-11-05.md)用的 `c86ae89` 相同。这次修复改了 `policy/`、`tools/sandbox.py`，上一节沿用沙箱验收和 `pip-audit` 结果的前提不再成立，所以这两项一起重跑。`d338d16` 之后工作流、`uv.lock`、`pyproject.toml`、`scripts/` 没有改动，工作流静态检查沿用原结果。
+
+| 检查 | 环境 | 结果 |
+|---|---|---|
+| 离线套件 | macOS，Python 3.11.15、3.12.13、3.13.12 | 各 851 passed |
+| 系统沙箱用例 | macOS，三个 Python 版本 | 各 26 passed，7 skipped |
+| 离线套件 | 一次性 Linux 容器，Python 3.12，bubblewrap 0.12.0 | 847 passed，4 skipped |
+| 系统沙箱用例 | 同上 | 20 passed，13 skipped |
+| 审计不变量 | macOS / Linux | 13 passed / 12 passed，1 skipped |
+| sdist 解包后测试 | 一次性 Linux 容器 | 780 passed，5 skipped；系统沙箱用例 20 passed，14 skipped |
+| wheel 干净安装冒烟 | macOS 上 3.11～3.13、Linux 上 3.12 | 全部通过 |
+| 沙箱验收（`--internet`） | macOS / Linux | 23/23 / 23/23 |
+| `twine check --strict` | twine 7.0.0 | wheel、sdist 通过 |
+| `pip-audit`（运行依赖，含 anthropic 可选依赖） | 2.10.1 | 没有已知漏洞 |
+| 33 个 live 场景 | 一次性 Linux 容器，真实 bubblewrap，deepseek-flash | 33 passed，275,592 token，0.0291 美元，171 秒 |
+
+这次的容器都加了 `--init`，sdist 解包到家目录，前一节 `test_command_hook_is_killed_on_timeout` 的失败没有再出现。macOS 沙箱验收第一次拒绝运行，因为虚拟环境在临时目录里，这是脚本的保护；换到家目录下新建的目录后通过。
+
+33 个 live 场景里没有要求模型写沙箱只读位置的任务，这次修复靠的证据不是这一行，真实模型的结果在回归记录里。11-04 第 2 次失败的插话、暂停恢复两条这次也没有复现，原因仍未定位。
+
+PR 上的 CI 在 `890ffea` 全部通过，`src/` 和候选代码相同：Ubuntu 上 Python 3.11～3.13、macOS 上 3.12 的离线套件，两个平台的沙箱验收。
+
+这份记录仍然不代表已经发布：PyPI、TestPyPI 的发布者配置、GitHub environment 和 `v0.2.0` 标签都还没做。
