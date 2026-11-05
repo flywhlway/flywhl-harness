@@ -676,8 +676,8 @@ CI、批处理、定时任务里没有人能点“批准”。`PermissionConfig.
 | `deny` | 直接拒绝，不创建审批对象（`by="policy:auto_deny"`）；`auto_approve` 规则命中的自动批准 | `flywhl run --json` 在未指定时自动设为 deny；`--approve` 同时给出规则 |
 | `allow` | 直接放行（`by="policy:auto_allow"`） | `flywhl run --yes` |
 
-`on_ask="allow"` 放行的是 **所有** 判定为 ask 的调用，包括被命令分析升级的 dangerous 命令和被污点升级的副作用操作，
-剩下的防线只有 deny 规则。CI 里更稳妥的是 `on_ask="deny"` 加一组 **自动批准规则**，或者 bypass 模式加一次性沙箱——
+`on_ask="allow"` 放行的是判定为 ask 的调用，包括被命令分析升级的 dangerous 命令和被污点升级的副作用操作，
+剩下的防线是 deny 规则和人工门：`outside_sandbox`，以及 `write`、`edit` 写沙箱里只读的位置，这两类它放行不了。CI 里更稳妥的是 `on_ask="deny"` 加一组 **自动批准规则**，或者 bypass 模式加一次性沙箱——
 让“全放行”发生在用完即弃的环境里。
 
 ### 按规则自动批准

@@ -138,7 +138,7 @@ class Tool:
         """
         return self.effect
 
-    # 执行器、权限层、回放只通过这两个入口取等级：早期的扩展示例按 effect_for(self, args) 覆盖，
+    # 执行器、权限层、回放只通过这几个入口取结果：早期的扩展示例按 effect_for(self, args) 覆盖，
     # 直接把 workspace 传进去会抛 TypeError。旧写法照常工作，只是拿不到工作区
     def effect_in(self, args: dict[str, Any], workspace: str | None) -> Effect:
         if _takes_workspace(type(self).effect_for):
@@ -149,6 +149,11 @@ class Tool:
         if _takes_workspace(type(self).interruptible_for):
             return self.interruptible_for(args, workspace)
         return self.interruptible_for(args)
+
+    def human_gate_in(self, args: dict[str, Any], workspace: str | None) -> str | None:
+        if _takes_workspace(type(self).human_gate):
+            return self.human_gate(args, workspace)
+        return self.human_gate(args)
 
     def untrusted_for(self, args: dict[str, Any]) -> bool:
         """这次调用的输出是否来自不可信来源（污点）。默认取静态 untrusted_output；bash 下载网页时返回 True。"""

@@ -16,11 +16,11 @@ from .shell import BashTool
 def default_tools(cfg: HarnessConfig, data_dir: Path | None = None) -> ToolRegistry:
     from ..agent.subagent import TaskTool
 
+    bash = BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout, cfg.permissions.sandbox,
+                    cfg.permissions.sandbox_network, cfg.permissions.network_allow,
+                    cfg.permissions.unix_sockets, [str(data_dir or cfg.data_path())])
     reg = ToolRegistry([
-        ReadTool(), WriteTool(), EditTool(),
-        BashTool(cfg.permissions.strip_secret_env, cfg.tool_timeout, cfg.permissions.sandbox,
-                 cfg.permissions.sandbox_network, cfg.permissions.network_allow,
-                 cfg.permissions.unix_sockets, [str(data_dir or cfg.data_path())]),
+        ReadTool(), WriteTool(bash.confinement), EditTool(bash.confinement), bash,
         LsTool(), GrepTool(), TodoWriteTool(), ReadRefTool(), SearchRefTool(), TaskTool(),
     ])
     if cfg.enable_demo_tools:

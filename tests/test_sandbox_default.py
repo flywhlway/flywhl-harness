@@ -23,15 +23,17 @@ import pytest
 
 from flywhl_harness.cancel import CancelToken
 from flywhl_harness.config import HarnessConfig, HookConfig, UntrustedConfigWarning, check_mcp_server, split_untrusted
-from flywhl_harness.observe.replay import RecordedTool
+from flywhl_harness.observe.replay import RecordedTool, replay_trajectory
+from flywhl_harness.observe.trace import export_trajectory
 from flywhl_harness.policy.approvals import ApprovalDecision
 from flywhl_harness.policy.hooks import CommandHook, Hook, HookEvent, HookInput, HookOutput
 from flywhl_harness.policy.permissions import Decision, PermissionPolicy
-from flywhl_harness.runtime.workspace import ShadowGit
-from flywhl_harness.tools import confine, sandbox
+from flywhl_harness.runtime.workspace import ShadowGit, Workspace
+from flywhl_harness.tools import confine, default_tools, sandbox
 from flywhl_harness.tools.base import ToolContext
 from flywhl_harness.tools.confine import OFF_HINT, Confinement, SandboxUnavailable
 from flywhl_harness.tools.egress import _DENIED_LIMIT, EgressProxy, parse_rules
+from flywhl_harness.tools.fs import EditTool, WriteTool
 from flywhl_harness.tools.mcp import MCPClient, MCPError, load_mcp_tools
 from flywhl_harness.tools.sandbox import _RELAY, EGRESS_PORT, Detected
 from flywhl_harness.tools.shell import BashTool, _sandbox_hint
@@ -884,3 +886,162 @@ async def test_working_directory_outside_the_workspace_is_there(ws, tmp_path):
     (cwd / "data.txt").write_text("found", encoding="utf-8")
     code, out = await in_box(Confinement(LEVEL, "deny"), ws, "cat data.txt", chdir=str(cwd))
     assert code == 0 and "found" in out, out
+
+
+# ---------------------------------------------------------------------- 文件工具写沙箱里只读的位置
+# 公开基准里观察到的路径：chmod、outside_sandbox 都被拒绝之后，模型用 write 把 core.hooksPath 指到自己建的目录。
+# 文件工具跑在沙箱外，hook 之后在用户的 git commit 里执行
+def boxed_writer(cls=WriteTool, protected=None):
+    return cls(Confinement("macos", "allowlist", protected=[str(p) for p in protected or []]))
+
+
+@pytest.fixture
+def repo(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (root / ".git" / "description").write_text("x\n", encoding="utf-8")
+    (root / "src").mkdir()
+    (root / "flywhl.toml").write_text("", encoding="utf-8")
+    return root
+
+
+def _gate(tool, path, root):
+    return PermissionPolicy("bypass", workspace=Workspace(root)).evaluate(tool, {"path": str(path), "content": "x"})
+
+
+@pytest.mark.parametrize("path", [".git/config", "./.git/config", "src/../.git/config", "no/such/../../.git/config",
+                                  ".git/hooks/pre-commit", ".git/hooks/new/deep", "flywhl.toml"])
+@pytest.mark.parametrize("cls", [WriteTool, EditTool])
+def test_frozen_locations_need_a_human_in_every_spelling(repo, path, cls):
+    r = _gate(boxed_writer(cls), path, repo)
+    assert r.decision == Decision.ASK and r.human_only and r.risk == "critical" and "只读" in r.reason
+
+
+def test_absolute_paths_and_symlinks_land_on_the_same_gate(repo):
+    assert _gate(boxed_writer(), repo / ".git" / "config", repo).human_only
+    (repo / "alias").symlink_to(repo / ".git")
+    (repo / "conf").symlink_to(repo / ".git" / "config")
+    assert _gate(boxed_writer(), "alias/config", repo).human_only and _gate(boxed_writer(), "conf", repo).human_only
+
+
+def test_hard_links_are_the_same_file(repo):
+    os.link(repo / ".git" / "config", repo / "copy")
+    assert _gate(boxed_writer(), "copy", repo).human_only
+
+
+def test_case_variants_are_gated_where_the_filesystem_folds_case(repo):
+    fold = (repo / ".GIT").exists()
+    assert _gate(boxed_writer(), ".GIT/CONFIG", repo).human_only is fold
+    assert _gate(boxed_writer(), "FLYWHL.TOML", repo).human_only   # 还不存在的文件按路径比，这里宁可多问
+
+
+def test_a_data_dir_inside_the_workspace_is_frozen_too(repo):
+    (repo / "state").mkdir()
+    assert _gate(boxed_writer(protected=[repo / "state"]), "state/harness.db", repo).human_only
+
+
+def test_creating_flywhl_toml_is_gated_even_when_it_does_not_exist(repo):
+    (repo / "flywhl.toml").unlink()
+    assert _gate(boxed_writer(), "flywhl.toml", repo).human_only
+
+
+@pytest.mark.parametrize("path", ["src/a.py", ".gitignore", ".github/ci.yml", ".git/description", ".git/info/exclude"])
+def test_other_writes_keep_their_usual_decision(repo, path):
+    assert not _gate(boxed_writer(), path, repo).human_only
+
+
+def test_no_gate_without_a_sandbox_to_get_around(repo):
+    assert not _gate(WriteTool(Confinement(requested="off")), ".git/config", repo).human_only
+    assert not _gate(WriteTool(), ".git/config", repo).human_only
+
+
+def test_a_repo_that_does_not_exist_yet_is_not_frozen(tmp_path):
+    """和沙箱一致：只保护已有的，空工作区里 git init 还要能用。"""
+    assert not _gate(boxed_writer(), ".git/config", tmp_path).human_only
+
+
+def test_plan_mode_still_denies_frozen_writes(repo):
+    r = PermissionPolicy("plan", workspace=Workspace(repo)).evaluate(boxed_writer(), {"path": ".git/config", "content": "x"})
+    assert r.decision == Decision.DENY and not r.human_only
+
+
+def _ctx(root, *, approved=False):
+    return ToolContext(run_id="r", session_id="s", call_id="c", workspace=Workspace(root), cancel=CancelToken(), blobs=None,
+                       idempotency_key="k", human_approved=approved)
+
+
+async def test_execution_checks_again_after_the_decision(repo):
+    """判定之后软链接可能被换掉。回放和直接调用也走不到审批，这里默认拒绝。"""
+    (repo / "plain").mkdir()
+    (repo / "swap").symlink_to(repo / "plain")
+    tool = boxed_writer()
+    assert not _gate(tool, "swap/config", repo).human_only
+    (repo / "swap").unlink()
+    (repo / "swap").symlink_to(repo / ".git")
+    before = (repo / ".git" / "config").read_text(encoding="utf-8")
+    res = await tool.execute({"path": "swap/config", "content": "[core]\n\thooksPath = x\n"}, _ctx(repo))
+    assert res.is_error and "未改动" in res.content
+    assert (repo / ".git" / "config").read_text(encoding="utf-8") == before
+
+
+async def test_edit_is_checked_at_execution_too(repo):
+    res = await boxed_writer(EditTool).execute({"path": ".git/config", "old_string": "[core]", "new_string": "[x]"}, _ctx(repo))
+    assert res.is_error and (repo / ".git" / "config").read_text(encoding="utf-8") == "[core]\n"
+
+
+async def test_a_human_approved_write_goes_through(repo):
+    res = await boxed_writer().execute({"path": ".git/config", "content": "[user]\n"}, _ctx(repo, approved=True))
+    assert not res.is_error and (repo / ".git" / "config").read_text(encoding="utf-8") == "[user]\n"
+
+
+def test_default_tools_share_the_sandbox_settings(tmp_path):
+    reg = default_tools(HarnessConfig.load(workspace=str(tmp_path)), tmp_path)
+    assert reg.get("write").confinement is reg.get("bash").confinement is reg.get("edit").confinement
+
+
+def write_call(path: str, content: str = "[core]\n\thooksPath = evil\n") -> dict:
+    return {"tool_calls": [{"name": "write", "args": {"path": path, "content": content}}]}
+
+
+@pytest.fixture
+def git_ws(ws):
+    (ws / ".git" / "hooks").mkdir(parents=True)
+    (ws / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    return ws
+
+
+@pytest.mark.parametrize("on_ask", ["allow", "deny"])
+async def test_unattended_runs_cannot_write_frozen_locations(git_ws, on_ask):
+    h = make_harness(git_ws, [write_call(".git/config"), "好"], on_ask=on_ask, permissions__mode="bypass",
+                     permissions__sandbox="macos", permissions__auto_approve=["write(.git/**)"])
+    end = tool_ends((await h.run("改")).events)[0]
+    assert "无人值守时一律拒绝" in end["content"] and (git_ws / ".git" / "config").read_text(encoding="utf-8") == "[core]\n"
+
+
+async def test_a_human_can_approve_it_once_and_remember_is_ignored(git_ws):
+    h = make_harness(git_ws, [write_call(".git/config"), write_call(".git/config", "[user]\n"), "好"], on_ask="wait",
+                     permissions__mode="bypass", permissions__sandbox="macos")
+    seen = []
+
+    async def yes(rec):
+        seen.append(rec)
+        return ApprovalDecision(True, by="u", remember=True)
+
+    h.approvals.resolver = yes
+    await h.run("改")
+    assert len(seen) == 2 and seen[0].risk == "critical" and "只读" in seen[0].reason
+    assert (git_ws / ".git" / "config").read_text(encoding="utf-8") == "[user]\n"
+
+
+async def test_recorded_frozen_writes_still_replay(git_ws):
+    """回放走 RecordedTool，没有这道门。已发布的轨迹里有这类写入，不能因此分叉。"""
+    h = make_harness(git_ws, [write_call(".git/config"), "好"], on_ask="wait", permissions__mode="bypass", permissions__sandbox="macos")
+
+    async def yes(rec):
+        return ApprovalDecision(True, by="u")
+
+    h.approvals.resolver = yes
+    res = await h.run("改")
+    report = await replay_trajectory(export_trajectory(h.store, res.run_id))
+    assert report.deterministic, report

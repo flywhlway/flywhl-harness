@@ -282,6 +282,28 @@ def _read_only(ws: str, protected: Iterable[str]) -> list[str]:
     return [p for p in paths if not _under(ws, p)]   # 工作区放在数据目录里时，不能把整个工作区变成只读
 
 
+def frozen_paths(workspace: str | Path, protected: Iterable[str] = ()) -> list[str]:
+    """沙箱里写不得的全部位置。bash 靠沙箱本身挡住；文件工具跑在沙箱外，靠人工门查这份清单，两边要一致。"""
+    ws = os.path.realpath(workspace)
+    return [os.path.join(ws, ".flywhl"), os.path.join(ws, "flywhl.toml"), *_read_only(ws, protected)]
+
+
+def frozen_landing(path: str | Path, frozen: Iterable[str]) -> str | None:
+    """``path`` 落进 ``frozen`` 的哪一处。按文件身份比，软链接、硬链接、不分大小写的卷上的变体都绕不过；还不存在的按路径比。"""
+    real = os.path.realpath(path)
+    chain = [real, *map(str, Path(real).parents)]
+    for place in frozen:
+        for p in chain:
+            if p.casefold() == place.casefold():
+                return place
+            try:
+                if os.path.samefile(p, place):
+                    return place
+            except OSError:
+                pass
+    return None
+
+
 def _program(command: str | list[str]) -> list[str]:
     return ["/bin/bash", "-c", command] if isinstance(command, str) else list(command)
 
