@@ -35,6 +35,12 @@ from typing import NamedTuple
 _SYSTEM_DIRS = ("/usr/", "/bin/", "/sbin/", "/System/", "/Library/", "/opt/", "/nix/")
 _SEMVER = re.compile(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
 _COMMIT = re.compile(r"[#@][0-9a-f]{40}$")
+# 提交号只有写在 git 地址上才锁得住内容：普通 URL 的 #片段不约束下载到什么（别的主机上以 .git 结尾的 https 地址，npm 也按
+# 压缩包下载），npm 的 dist-tag 也能取 40 位十六进制的名字。
+# 依赖清单里还有 ``包名 @ git+https://…`` 的写法（去掉空白之后比较）
+_GIT_SPEC = re.compile(r"(?:[A-Za-z0-9._-]+(?:\[[^\]]*\])?@)?"
+                       r"(?:git\+[a-z]+://|git://|ssh://git@|git@|(?:github|gitlab|bitbucket|gist):"
+                       r"|[\w.-]+/[\w.-]+#|https?://(?:github\.com|gitlab\.com|bitbucket\.org)/[^#@\s]+\.git[#@])")
 _DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _SCRIPT_LIMIT = 1 << 20
@@ -445,7 +451,7 @@ def _check(runner: str, spec: str, where: _Where, *, npm: bool) -> str:
 
 
 def _version_pinned(spec: str, *, npm: bool) -> bool:
-    if _COMMIT.search(spec):
+    if _COMMIT.search(spec) and _GIT_SPEC.match(spec):
         return True         # git 地址锁到了提交
     if npm:
         m = re.fullmatch(r"(@[^/@]+/)?[^/@]+@(.+)", spec)

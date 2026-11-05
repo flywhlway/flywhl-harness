@@ -62,10 +62,11 @@ WRITE_CMDS = {
 EXTERNAL_CMDS = {"curl", "wget", "ssh", "scp", "rsync", "nc", "telnet", "ftp", "docker", "kubectl", "helm", "terraform", "aws", "gcloud", "az", "gh"}
 DANGEROUS_CMDS = {"sudo", "su", "mkfs", "dd", "shutdown", "reboot", "halt", "fdisk", "mount", "umount", "chown", "killall", "crontab", "systemctl", "launchctl"}
 INTERPRETERS = {"python", "python3", "node", "bash", "sh", "zsh", "perl", "ruby", "php", "deno", "bun"}
-SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcsh"}
+_FOREIGN_SHELLS = {"fish", "csh", "tcsh"}   # 语法和 sh 不同：按 sh 切分看不准，判出来的只读不算数
 # 包装命令：真正执行的是后面那条命令。值为“带一个参数值的选项”
 WRAPPERS: dict[str, set[str]] = {
-    "env": {"-u", "--unset", "-C", "--chdir"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"},
     "nohup": set(), "time": set(), "command": set(), "exec": {"-a"}, "stdbuf": {"-i", "-o", "-e"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"}, "xargs": {"-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"},
     "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U"}, "doas": {"-u", "-C"}, "caffeinate": {"-t", "-w"},
@@ -123,7 +124,7 @@ _HOME_MARK = "/\0home"   # 路径运算时，家目录记成根下的一个占�
 # 变量代入时跳过它；交给 sh -c / eval 递归分析时、写进原因与分段时换回 $
 _LIT = ""
 _DRIFT = "\ue025"   # IFS 的取值里有它：source 执行的脚本可能改了 IFS，见 _drift_seps
-_BRACE_RANGE = re.compile(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])")
+_BRACE_RANGE = re.compile(r"(?:(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z]))(?:\.\.(-?\d+))?")
 _BRACE_LIMIT = 64                                      # 展开结果的上限：{a,b}{a,b}…… 会指数膨胀
 
 GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog", "ls-tree",
@@ -244,8 +245,9 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
     if re.search(r"\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z)?sh\b", command):
         a.bump("dangerous", "下载后直接执行（curl | sh）")
 
+    bodies: dict[str, list[str]] = {}   # here-document 的正文，按结束符记
     try:
-        lex = shlex.shlex(_bash_lines(command), posix=True, punctuation_chars=";&|<>()")
+        lex = shlex.shlex(_bash_lines(command, bodies), posix=True, punctuation_chars=";&|<>()")
         lex.whitespace_split = True
         lex.commenters = ""  # shlex 把词中间的 # 也当注释（echo a#b; rm -rf ~ 的后半句会被吞掉）；注释已由 _bash_lines 按 bash 规则去掉
         tokens = list(lex)
@@ -256,15 +258,20 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
     toks = _split_operators(tokens) + [";"]
     for name, body in _function_defs(toks):   # 一开始全部登记：循环里可能先调用、下一轮才用上后面的定义
         _define(name, ("func", body), a)
+        if body and _forks_itself(name, body):
+            a.flag_catastrophic(f"疑似 fork 炸弹：函数 {name} 在管道或后台里调用自己")
     flow = _Flow(a)
     segment: list[str] = []
+    piped: list[str] = []     # 这条管道里前面的段写到标准输入的文本（认得出的部分）
     for tok in toks:
         if tok in SEPARATORS:
             if segment:
                 a.segments.append(" ".join(segment).replace(_LIT, "$"))
                 flow.start(segment)
-                _classify(segment, a)
+                stdin = _stdin_text(segment, bodies)
+                _classify(segment, a, stdin + piped)
                 flow.assigned(a.assigned)
+                piped = stdin + piped + _echoed(segment) if tok in ("|", "|&") else []
                 segment = []
             flow.separator(tok)
             if tok == "&":
@@ -393,6 +400,49 @@ class _Flow:
         self.cur = (entry, inner - entry if kind == "{" else set())
 
 
+def _stdin_text(seg: list[str], bodies: dict[str, list[str]]) -> list[str]:
+    """这段命令自带的标准输入：here-string 的内容、here-document 的正文。shlex 把 ``<<-EOF`` 切成 ``<<`` 和 ``-EOF``，
+    ``<<- EOF`` 切成三个词，所以往后看两个词。"""
+    out: list[str] = []
+    for i, w in enumerate(seg):
+        if w == "<<<":
+            out += seg[i + 1:i + 2]
+        elif w in ("<<", "<<-"):
+            for d in seg[i + 1:i + 3]:
+                out += bodies.get(d) or bodies.get(d.removeprefix("-"), [])
+    return out
+
+
+def _echoed(seg: list[str]) -> list[str]:
+    """``echo`` / ``printf`` 写到标准输出的文本：``echo 'rm -rf ~' | sh``。别的命令的输出看不到，按原来的“内容无法静态分析”处理。"""
+    return [" ".join(_no_redirects(seg[1:]))] if seg[0] in ("echo", "printf") else []
+
+
+def _no_redirects(words: list[str]) -> list[str]:
+    """去掉重定向：运算符、它的目标，以及紧贴在前面的文件描述符（``2>/dev/null`` 切出来是三个词）。"""
+    out: list[str] = []
+    skip = False
+    for w in words:
+        if skip:
+            skip = False
+        elif _OPERATOR.fullmatch(w):
+            skip = True
+            if out and out[-1].isdigit():
+                out.pop()
+        else:
+            out.append(w)
+    return out
+
+
+def _forks_itself(name: str, body: list[str]) -> bool:
+    """函数在命令位置不带参数地调用自己至少两次，又放进了管道或后台：调用次数指数增长（``:(){ :|:& };:`` 及其改名）。
+    只调用一次的是普通递归（``poll() { sleep 1; poll & }``），带参数的可能收敛（目录遍历）。"""
+    forks = {"|", "|&", "&"}
+    calls = [i for i, t in enumerate(body) if t == name and (i == 0 or body[i - 1] in SEPARATORS or body[i - 1] in RESERVED)
+             and (i + 1 == len(body) or body[i + 1] in SEPARATORS)]
+    return len(calls) >= 2 and any(i and body[i - 1] in forks or body[i + 1:i + 2] and body[i + 1] in forks for i in calls)
+
+
 def _split_operators(tokens: list[str]) -> list[str]:
     """shlex 把连续的标点并成一个 token：``;(``、``&&(``、``)>``。按 bash 的运算符重新拆开，分隔符才认得出来。"""
     out: list[str] = []
@@ -404,7 +454,7 @@ def _split_operators(tokens: list[str]) -> list[str]:
     return out
 
 
-def _bash_lines(cmd: str) -> str:
+def _bash_lines(cmd: str, bodies: dict[str, list[str]] | None = None) -> str:
     """把 bash 认作命令边界、shlex 却看不出来的结构改写成 shlex 认得的样子。
 
     shlex 把换行当普通空白，bash 却把引号外的换行当命令分隔符：``echo safe⏎touch x`` 在分析器眼里是一条只读 echo，
@@ -414,6 +464,7 @@ def _bash_lines(cmd: str) -> str:
     - 词首的 ``#`` 到行尾是注释，去掉（``a#b`` 里的 # 不是注释）；
     - here-document 的正文是喂给命令的数据，不是命令，去掉。找不到结束符时不去掉，正文按命令分析——
       宁可多问，也不能把真正会执行的行当成数据。正文里的凭证路径、``$( )`` 仍由 analyze() 对原始命令串的检查覆盖。
+      传入 bodies 时按结束符记下正文：命令是从标准输入读脚本的 shell 时，正文就是要执行的代码，见 _stdin_text。
 
     - ``$'...'``（ANSI-C 引号）按 C 转义解码后换成普通单引号：shlex 不认识它，``$'\\x72m' -rf ~`` 执行的就是 ``rm -rf ~``。
     - shell 不展开的 ``$``（单引号里、``\\$``）换成 _LIT：``sh -c 'rm -rf $D/*'`` 里的 $D 由子 shell 展开，不是当前 shell。
@@ -424,7 +475,7 @@ def _bash_lines(cmd: str) -> str:
         return cmd
     out: list[str] = []
     stack: list[str] = []                      # 上下文：引号 "'"、'"'、"$'"；命令 "`"、"$("、"("；算术 "(("、"a("
-    heredocs: list[tuple[str, bool]] = []      # 本行登记的 here-document：(结束符, 是否 <<-)
+    heredocs: list[tuple[str, bool, bool]] = []   # 本行登记的 here-document：(结束符, 是否 <<-, 结束符是否带引号)
     i, n = 0, len(cmd)
     while i < n:
         c, top = cmd[i], (stack[-1] if stack else "")
@@ -517,20 +568,23 @@ def _bash_lines(cmd: str) -> str:
             j += strip_tabs
             while j < n and cmd[j] in " \t":
                 j += 1
+            start = j
             delim, j = _heredoc_word(cmd, j)
             if delim:
-                heredocs.append((delim, strip_tabs))
+                heredocs.append((delim, strip_tabs, any(q in cmd[start:j] for q in "'\"\\")))
             out.append(cmd[i:j])
             i = j
             continue
         elif c == "\n":
             out.append(" ; ")
             i += 1
-            for delim, strip_tabs in heredocs:
-                end = _heredoc_end(cmd, i, delim, strip_tabs)
+            for delim, strip_tabs, quoted in heredocs:
+                end = _heredoc_end(cmd, i, delim, strip_tabs, quoted)
                 if end is None:                   # 没有结束符：正文按命令分析
                     break
-                i = end
+                if bodies is not None:
+                    bodies.setdefault(delim, []).append(cmd[i:end[0]])
+                i = end[1]
             heredocs.clear()
             continue
         out.append(c)
@@ -545,7 +599,8 @@ _ANSI_ESC = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9a-fA-F]{1,2
 
 def _ansi_c(body: str) -> str:
     """按 bash 的规则解码 ``$'...'`` 的正文（\\n、\\xHH、\\uHHHH、八进制、\\e、\\cX……）。
-    不认识的转义（\\<、\\.）和 bash 一样保留反斜杠——不借用 Python 的 unicode_escape，它对未知转义的处理会随版本变成报错"""
+    不认识的转义（\\<、\\.）和 bash 一样保留反斜杠——不借用 Python 的 unicode_escape，它对未知转义的处理会随版本变成报错。
+    bash 的字符串到 NUL 为止：``$'rm\\x00junk'`` 就是 ``rm``"""
     def one(m: re.Match) -> str:
         simple, octal, hx, u4, u8, ctl = m.groups()
         if simple:
@@ -558,7 +613,7 @@ def _ansi_c(body: str) -> str:
             cp = int(u4 or u8, 16)
             return m.group(0) if cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF else chr(cp)
         return chr(ord(ctl) & 0x1F)
-    return _ANSI_ESC.sub(one, body)
+    return _ANSI_ESC.sub(one, body).split("\0", 1)[0]
 
 
 def _heredoc_word(cmd: str, j: int) -> tuple[str, int]:
@@ -584,17 +639,22 @@ def _heredoc_word(cmd: str, j: int) -> tuple[str, int]:
     return "".join(word), j
 
 
-def _heredoc_end(cmd: str, start: int, delim: str, strip_tabs: bool) -> int | None:
-    """从 start 起逐行找结束符所在的行，返回它之后的位置；找不到返回 None。"""
+def _heredoc_end(cmd: str, start: int, delim: str, strip_tabs: bool, quoted: bool = True) -> tuple[int, int] | None:
+    """从 start 起逐行找结束符所在的行，返回 (这一行的开头, 它之后的位置)；找不到返回 None。
+    结束符不带引号时 bash 读每一行都先去掉 ``\\``+换行，再比较：``EO\\⏎F`` 就是 ``EOF``，后面的行是真命令。"""
     pos = start
     while pos <= len(cmd):
-        nl = cmd.find("\n", pos)
-        line = cmd[pos:] if nl == -1 else cmd[pos:nl]
+        head, line = pos, ""
+        while True:
+            nl = cmd.find("\n", pos)
+            part = cmd[pos:] if nl == -1 else cmd[pos:nl]
+            pos = len(cmd) + 1 if nl == -1 else nl + 1
+            if quoted or nl == -1 or (len(part) - len(part.rstrip("\\"))) % 2 == 0:
+                line += part
+                break
+            line += part[:-1]
         if (line.lstrip("\t") if strip_tabs else line) == delim:
-            return len(cmd) if nl == -1 else nl + 1
-        if nl == -1:
-            return None
-        pos = nl + 1
+            return head, min(pos, len(cmd))
     return None
 
 
@@ -630,13 +690,23 @@ def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
                 _check_assign(opt, a)
                 _prefix(opt, a)
                 continue
-            if name == "env" and opt in ("-S", "--split-string") or opt.startswith("--split-string="):
+            opt, *more = _split_cluster(opt, takes)   # env -vS 'x'、env -C/、sudo -iu root
+            rest[:0] = more
+            key = opt.split("=", 1)[0]
+            if len(key) > 2 and key.startswith("--"):   # 长选项可以缩写
+                key = next((o for o in sorted(takes) if o.startswith(key)), key)
+            if opt.startswith("--") and "=" in opt:
+                val = opt.split("=", 1)[1]
+            else:
+                val = rest.pop(0) if key in takes and rest else ""
+            if name == "env" and key in ("-S", "--split-string"):   # 切开之后接着解包：env -S 'rm -rf ~' 执行的就是 rm -rf ~
                 a.bump("external", "env -S 会把字符串再切分执行，无法静态分析")
                 a.inline = True
-            val = rest.pop(0) if opt in takes and rest else opt.split("=", 1)[1] if opt.startswith("--") and "=" in opt else ""
+                rest[:0] = _split_string(val)
+                continue
             if val and _is_outside(val, a):   # env -C /etc cat passwd、xargs -a /etc/passwd echo：选项值同样是路径
-                a.bump("external", f"{name} {opt.split('=')[0]} 访问工作区外路径 {val}")
-            if val and name == "env" and opt.split("=")[0] in ("-C", "--chdir"):   # 之后的命令在那里执行（git 读那里的仓库配置）
+                a.bump("external", f"{name} {key} 访问工作区外路径 {val}")
+            if val and name == "env" and key in ("-C", "--chdir"):   # 之后的命令在那里执行（git 读那里的仓库配置）
                 _chdir_to(val, a)
         if name == "command" and rest[:1] in (["-v"], ["-V"]) or words[1:2] in (["-v"], ["-V"]) and name == "command":
             return ["type"]  # command -v：只是查找命令位置
@@ -646,6 +716,26 @@ def _unwrap(words: list[str], a: CommandAnalysis) -> list[str]:
             return [name] if name == "env" else []  # 单独的 env：打印环境变量
         words = rest
     return words
+
+
+def _split_cluster(x: str, takes: set[str]) -> list[str]:
+    """短选项簇按 getopt 的规则拆开：带值的字母之后都是它的值（``-vS`` → ``-v -S``，``-Cdir`` → ``-C dir``）。"""
+    if x.startswith("--") or len(x) < 3:
+        return [x]
+    out: list[str] = []
+    for j, c in enumerate(x[1:], start=1):
+        out.append(f"-{c}")
+        if f"-{c}" in takes:
+            out += [x[j + 1:]] if x[j + 1:] else []
+            break
+    return out
+
+
+def _split_string(s: str) -> list[str]:
+    try:
+        return shlex.split(s)
+    except ValueError:      # 引号不配对：按空白切，宁可多看几个词
+        return s.split()
 
 
 # 值本身就是一条命令的环境变量：GIT_SSH_COMMAND='rm -rf ~' git fetch 执行的就是 rm -rf ~
@@ -667,14 +757,20 @@ def _check_assign(word: str, a: CommandAnalysis) -> None:
 # ---------------------------------------------------------------------- 变量与当前目录
 def _assign(word: str, a: CommandAnalysis, *, nameref: bool = False) -> None:
     """当前 shell 里的赋值 ``NAME=值``（值已经按之前的赋值展开过）。值含命令替换时要到运行时才知道，记成 None；
-    ``X+=y`` 接在原来的取值后面；``declare -n`` 的名字引用指向别的变量，同样记成 None。"""
+    ``X+=y`` 接在原来的取值后面，变量可能没赋过时 ``+=`` 就是 ``=``（``A+=/usr; rm -rf $A``），也可能是继承来的未知值；
+    ``declare -n`` 的名字引用指向别的变量，同样记成 None。"""
     name, _, value = word.partition("=")
+    dynamic = nameref or "$(" in value or "`" in value or value.endswith("$")   # X=$(cmd) 被切成 X=$ 与 (cmd)
     if name.endswith("+"):
         name = name[:-1]
         old = a.vars.get(name)
-        values = [o + value for o in old] if old and None not in old and name in a.sure else [None]
+        if dynamic:
+            values = [None]
+        elif old and None not in old and name in a.sure:
+            values = [o + value for o in old]
+        else:
+            values = [*(o + value for o in old or () if o is not None), value, None]
     else:
-        dynamic = nameref or "$(" in value or "`" in value or value.endswith("$")   # X=$(cmd) 被切成 X=$ 与 (cmd)
         values = [None if dynamic else value]
     _add_values(name, values, a)
     a.assigned.add(name)
@@ -1048,9 +1144,12 @@ def _var_setters(cmd: str, args: list[str], a: CommandAnalysis) -> None:
         return
     takes, named = _SETTER_OPTS[cmd]
     opts, pos = _short_split(args, takes)
-    if cmd in ("mapfile", "readarray") and any(c == "C" for c, _ in opts):
-        a.bump("external", f"{cmd} -C 会执行回调命令，无法静态分析")
-        a.inline = True
+    for c, v in opts:
+        if cmd in ("mapfile", "readarray") and c == "C":
+            a.bump("external", f"{cmd} -C 会执行回调命令，无法静态分析")
+            a.inline = True
+            if v:
+                _recurse(v, a, f"{cmd} -C")
     names = [v for c, v in opts if c in named and v]
     if cmd in ("read", "mapfile", "readarray"):
         names += pos[:None if cmd == "read" else 1] or ([] if names else ["REPLY" if cmd == "read" else "MAPFILE"])
@@ -1362,17 +1461,19 @@ def _brace_span(w: str) -> tuple[int, int, list[str]] | None:
             return i, j, [w[x + 1:y] for x, y in zip(cuts, cuts[1:])]
         m = _BRACE_RANGE.fullmatch(w[i + 1:j])
         if m and m.group(1) is not None:
-            lo, hi = int(m.group(1)), int(m.group(2))
-            step = 1 if hi >= lo else -1
-            return i, j, [str(x) for x in range(lo, hi + step, step)[:_BRACE_LIMIT + 1]]
+            return i, j, [str(x) for x in _brace_range(int(m.group(1)), int(m.group(2)), m.group(5))[:_BRACE_LIMIT + 1]]
         if m:
-            lo, hi = ord(m.group(3)), ord(m.group(4))
-            step = 1 if hi >= lo else -1
-            return i, j, [chr(x) for x in range(lo, hi + step, step)]
+            return i, j, [chr(x) for x in _brace_range(ord(m.group(3)), ord(m.group(4)), m.group(5))]
     return None
 
 
-def _classify(seg: list[str], a: CommandAnalysis) -> None:
+def _brace_range(lo: int, hi: int, incr: str | None) -> range:
+    """``{lo..hi..incr}``：方向由两端决定，步长的正负不管用，0 按 1 算。"""
+    sign = 1 if hi >= lo else -1
+    return range(lo, hi + sign, sign * (abs(int(incr or 1)) or 1))
+
+
+def _classify(seg: list[str], a: CommandAnalysis, stdin: list[str] | None = None) -> None:
     # 花括号展开发生在命令执行之前、作用于每个词：rm -rf {~,build} 实际执行的是 rm -rf ~ build
     expanded: list[str] = []
     for w in seg:
@@ -1395,13 +1496,13 @@ def _classify(seg: list[str], a: CommandAnalysis) -> None:
             a.flag_catastrophic(_OVER_BUDGET)
             return
         was = a.catastrophic
-        _classify_words(words, a)
+        _classify_words(words, a, stdin)
         if a.catastrophic and not was and sep is not None:
             a.catastrophic_reason = (f"source 执行的脚本可能把 IFS 改成了 {sep!r}，变量展开后可能拆成 {' '.join(words)}："
                                      f"{a.catastrophic_reason}")
 
 
-def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
+def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | None = None) -> None:
     a.prefix = {}
     for w in expanded:
         _check_secrets(w, a)  # 这时看到的是 shell 去掉引号、展开花括号之后的样子：~/.k''ube/config、~/.ku{be,}/config
@@ -1433,6 +1534,9 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
                 a.bump("external", f"重定向写入工作区外路径 {target}")
             else:
                 a.bump("write", f"重定向写入文件 {target}")
+    for target in _written_args(cmd, args):
+        if _BLOCK_DEV.match(target):
+            a.flag_catastrophic(f"{cmd} 写入块设备 {target}")
     # 工作区边界：参数（含 --opt=/path 的值）里出现工作区外路径；sed / awk 的程序文本不是路径
     programs = _program_args(cmd, args)
     for j, w in enumerate(args, start=1):
@@ -1451,8 +1555,15 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
             a.bump("external", why)
             break
 
-    if cmd in SHELLS and (script := _shell_script(args)) is not None:
+    plain = _no_redirects(args)
+    if cmd in SHELLS and _reads_stdin(plain):    # sh <<< '...'、sh <<EOF、echo ... | sh：标准输入就是脚本
+        for text in stdin or ():
+            if text.strip():
+                _recurse(text, a, f"{cmd} 的标准输入")
+    if cmd in SHELLS and (script := _shell_script(plain)) is not None:
         _recurse(script, a, f"{cmd} -c")
+        if cmd in _FOREIGN_SHELLS:
+            a.bump("write", f"{cmd} 的语法和 sh 不同，按可写处理")
     elif cmd == "eval":
         _recurse(" ".join(args), a, "eval", mode="same")
     elif cmd == "trap":
@@ -1519,16 +1630,20 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
             a.bump("read", "find 只读搜索")
     elif cmd in ("export", "declare", "typeset", "local", "readonly"):
         opts = "".join(x[1:] for x in args if x.startswith("-"))
+        # export -n、declare +x：子进程里又看不到了
+        unexport = (cmd == "export" and "n" in opts) or any(x.startswith("+") and "x" in x for x in args)
         for x in args:
-            if x.startswith("-"):
+            if x.startswith(("-", "+")):
                 continue
             name = x.split("=", 1)[0].rstrip("+")
             if _ASSIGN.fullmatch(x):
                 _check_assign(x, a)
-                _assign(x, a, nameref="n" in opts)
+                _assign(x, a, nameref="n" in opts and cmd != "export")
             elif cmd == "local" and re.fullmatch(r"[A-Za-z_]\w*", x):   # local X：函数里的 X 变成空的
                 _assign(x + "=", a)
-            if cmd == "export" or "x" in opts:
+            if unexport:
+                a.exported.discard(name)
+            elif cmd == "export" or "x" in opts:
                 a.exported.add(name)
         a.bump("write", f"{cmd} 修改 shell 变量")
     elif cmd in ("sed", "perl") and any(re.fullmatch(r"-[A-Za-z]*i.*|--in-place.*", x) for x in args):
@@ -1540,7 +1655,7 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
     elif cmd in INTERPRETERS and any(x in ("-c", "-e", "--eval") or re.fullmatch(r"-[A-Za-z]*[ce]", x) for x in args):
         a.bump("external", f"{cmd} 内联代码无法静态分析")   # 含合写的短选项：python3 -Ic、perl -ne、node -pe
         a.inline = True
-    elif cmd in SHELLS and not [x for x in args if not x.startswith("-")]:
+    elif cmd in SHELLS and _reads_stdin(plain):
         a.bump("external", f"{cmd} 从标准输入执行脚本，内容无法静态分析")
     elif cmd in ("python", "python3") and args[:1] in (["--version"], ["-V"]):
         a.bump("read", "查询版本")
@@ -1557,6 +1672,10 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
         if cmd == "printf":
             _var_setters(cmd, args, a)
         risk = _read_options(cmd, args)
+        if cmd in ("less", "more"):     # +!命令、+|标记 命令
+            for x in args:
+                if x.startswith("+") and (m := re.search(r"!(.+)|\|.(.+)", x, re.DOTALL)):
+                    _recurse(m[1] or m[2], a, f"{cmd} 的启动命令")
         if risk:
             a.bump(*risk)
             a.inline = a.inline or risk[0] == "external"
@@ -1565,6 +1684,12 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
     else:
         a.bump("write", f"未知命令 {cmd}，按可写处理")
         _embedded_catastrophe(cmd, args, a)
+
+
+def _written_args(cmd: str, args: list[str]) -> list[str]:
+    """命令把数据写到哪些参数指定的文件：tee 写每一个，cp、mv 写最后一个（第一个只是读，``cp /dev/sda backup.img`` 不算）。"""
+    operands = [x for x in _no_redirects(args) if not x.startswith("-")]
+    return operands if cmd == "tee" else operands[-1:] if cmd in ("cp", "mv") else []
 
 
 def _program_args(cmd: str, args: list[str]) -> set[int]:
@@ -1641,8 +1766,8 @@ def _read_options(cmd: str, args: list[str]) -> tuple[str, str] | None:
             return "write", f"{cmd} -o 把内容写入日志文件"
     if cmd == "file" and ("C" in _short_opts(args, "efFmMP") or "--compile" in longs):
         return "write", "file -C 在当前目录写入编译后的 magic 文件"
-    if cmd == "printf" and args[:1] == ["-v"]:
-        name = args[1] if len(args) > 1 else ""
+    if cmd == "printf" and args[:1] and args[0].startswith("-v"):
+        name = args[0][2:] or (args[1] if len(args) > 1 else "")
         if BENIGN_ENV.fullmatch(name):
             return "write", "printf -v 给 shell 变量赋值"
         return "external", f"printf -v 给变量 {name} 赋值，可能改变后续命令实际执行的程序"
@@ -1681,6 +1806,7 @@ def _sed(args: list[str], a: CommandAnalysis) -> None:
 
 _AWK_CODE = ("-f", "--file", "-E", "--exec", "-i", "--include", "-l", "--load", "-D", "--debug")
 _AWK_WRITE = ("-d", "--dump-variables", "-o", "--pretty-print", "-p", "--profile")
+_AWK_READ = re.compile(r'getline\b[^;})|&>\n]*<\s*(?:"([^"]*)")?')   # getline x < "文件"：文件名不是字面量时位置不定
 
 
 def _awk(cmd: str, args: list[str], a: CommandAnalysis) -> None:
@@ -1689,8 +1815,10 @@ def _awk(cmd: str, args: list[str], a: CommandAnalysis) -> None:
     if any(x.startswith(_AWK_CODE) for x in opts):
         a.bump("external", f"{cmd} 从文件加载程序或扩展（-f / -E / -i / -l），内容无法静态分析")
         a.inline = True
-    elif re.search(r"system\s*\(|\|\s*getline|print[^;}]*(>|\|)|@(ns)?include|@load", prog):
+    elif re.search(r"system\s*\(|\|&?\s*getline|print[^;}]*(>|\|)|@(ns)?include|@load", prog):
         a.bump("external", f"{cmd} 程序里执行命令、写文件或加载扩展")
+    elif any(m[1] is None or _is_outside(m[1], a) for m in _AWK_READ.finditer(prog)):
+        a.bump("external", f"{cmd} 程序用 getline 读工作区外或位置不定的文件")
     elif any(x.startswith(_AWK_WRITE) for x in opts):
         a.bump("write", f"{cmd} 把调试信息写入文件")
     else:
@@ -1724,12 +1852,16 @@ def _embedded_catastrophe(cmd: str, args: list[str], a: CommandAnalysis) -> None
     if a.depth >= 3:
         return
     for i, w in enumerate(args[:16]):
-        head = w.rsplit("/", 1)[-1]
+        # 整条命令写在一个参数里：script -c 'rm -rf ~'、flock f -c 'rm -rf ~'。开头得是命令，说明文字不算
+        words = w.split()
+        whole = len(words) > 1
+        head = (words[0] if whole else w).rsplit("/", 1)[-1]
         if head in _CATASTROPHE_HEADS or head.startswith("mkfs"):
-            inner = analyze(_requote(args[i:]), a.workspace, _depth=a.depth + 1, _scope=_scope_for(a, "same"))
+            inner = analyze(w if whole else _requote(args[i:]), a.workspace, _depth=a.depth + 1, _scope=_scope_for(a, "same"))
             if inner.catastrophic:
                 a.flag_catastrophic(f"{cmd} 包装执行：{inner.catastrophic_reason}")
-            return
+            if inner.catastrophic or not whole:
+                return
 
 
 def _requote(words: list[str]) -> str:
@@ -1745,10 +1877,11 @@ def _requote(words: list[str]) -> str:
     return " ".join(out)
 
 
-def _shell_script(args: list[str]) -> str | None:
-    """``bash -c`` 的脚本。``-c`` 可以和别的短选项合写（``-lc``、``-ec``、``-xc``），脚本是选项之后的第一个非选项参数；
-    ``-o``/``-O`` 与 ``--rcfile`` 这类选项带一个值。没有 ``-c`` 时返回 None。"""
-    has_c, i = False, 0
+def _shell_opts(args: list[str]) -> tuple[set[str], list[str]]:
+    """拆开 shell 的选项，返回 (短选项字母, 选项之后的参数)。短选项可以合写（``-lc``、``-ec``、``-xc``）；
+    ``-o``/``-O`` 与 ``--rcfile`` 这类选项带一个值。"""
+    letters: set[str] = set()
+    i = 0
     while i < len(args):
         x = args[i]
         if x == "--":
@@ -1759,23 +1892,38 @@ def _shell_script(args: list[str]) -> str | None:
         elif x.startswith("--"):
             i += 1
         elif len(x) > 1 and x[0] in "-+":
-            has_c = has_c or (x[0] == "-" and "c" in x[1:])
+            if x[0] == "-":
+                letters |= set(x[1:])
             i += 2 if x[-1] in "oO" else 1
         else:
             break
-    if not has_c:
+    return letters, args[i:]
+
+
+def _shell_script(args: list[str]) -> str | None:
+    """``bash -c`` 的脚本：选项之后的第一个参数。没有 ``-c`` 时返回 None。"""
+    letters, rest = _shell_opts(args)
+    if "c" not in letters:
         return None
-    return args[i] if i < len(args) else ""
+    return rest[0] if rest else ""
+
+
+def _reads_stdin(args: list[str]) -> bool:
+    """shell 从标准输入读脚本：没有 ``-c``，也没有脚本文件，或者写明了 ``-s``。"""
+    letters, rest = _shell_opts(args)
+    return "c" not in letters and (not rest or "s" in letters)
 
 
 def _find_actions(args: list[str], a: CommandAnalysis) -> None:
     """``find`` 的删除与执行动作。起点路径会被自己的动作处理到（``find ~ -delete`` 删的就是整个家目录），
     所以 ``-exec`` 的命令把 ``{}`` 换成起点路径再递归分析：``find ~ -exec rm -rf {} +`` 等同 ``rm -rf ~``。"""
     i = 0
+    roots: list[str] = []
     while i < len(args) and (args[i] in ("-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x") or args[i].startswith("-O")
                              or args[i] in ("-D", "-f")):
+        if args[i] == "-f":   # BSD find：-f 的值就是起点
+            roots += args[i + 1:i + 2]
         i += 2 if args[i] in ("-D", "-f") else 1
-    roots: list[str] = []
     while i < len(args) and not args[i].startswith(("-", "(", "!", ")")):
         roots.append(args[i])
         i += 1
@@ -1793,7 +1941,7 @@ def _find_actions(args: list[str], a: CommandAnalysis) -> None:
         action = args[j + 1:end]
         if not action:
             continue
-        for root in roots[:4]:
+        for root in roots:   # 起点再多也都看：分析预算管着总量，超了按灾难性拒绝
             _recurse(_requote([root if w == "{}" else w for w in action]), a, f"find {x}")
 
 
@@ -1809,12 +1957,13 @@ def _ps_shows_env(args: list[str]) -> bool:
         if x.startswith("--"):
             continue
         dash = x.startswith("-")
-        letters = x[1:] if dash else x
-        if not re.fullmatch(r"[A-Za-z]+", letters):
-            continue
+        word = x[1:] if dash else x
+        letters = re.match(r"[A-Za-z]*", word)[0]     # ps -Ep1、ps ewwp$PPID：值紧贴在字母后面
+        stops = takes_value if dash else {"o", "O"}   # ps -oETIME、ps axoetime：带值的字母之后都是值。BSD 写法里 u、s 不带值（ps auxe）
+        letters = letters[:next((k + 1 for k, c in enumerate(letters) if c in stops), len(letters))]
         if ("E" in letters) if dash else ("e" in letters.lower()):
             return True
-        skip = letters[-1] in takes_value
+        skip = letters == word and word[-1:] in takes_value
     return False
 
 
@@ -2012,12 +2161,19 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
         else:
             a.bump("external", f"git {sub} 访问远端")
         a.network = True
-    elif sub in ("reset", "clean") and any(x in ("--hard", "-f", "-fd", "-fdx", "-xdf", "-df") for x in rest):
+    elif (sub == "reset" and _git_long(flags, "--hard")) or (
+            sub == "clean" and ("-f" in flags or _git_long(flags, "--force"))
+            and not ("-n" in flags or _git_long(flags, "--dry-run"))):
         a.bump("dangerous", f"git {sub} 会丢弃未提交的修改")
     elif sub in ("config", "submodule", "filter-branch"):
         a.bump("external", f"git {sub} 可能配置命令执行或访问远端")
     else:
         a.bump("write", f"git {sub} 修改仓库")
+
+
+def _git_long(flags: set[str], name: str) -> bool:
+    """长选项 name 写了没有：git 接受无歧义的前缀，``--forc`` 就是 ``--force``。"""
+    return any(len(f) > 2 and name.startswith(f) for f in flags)
 
 
 def _git_flags(args: list[str]):

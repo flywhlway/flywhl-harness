@@ -36,6 +36,17 @@
 
 - `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
 
+### 安全
+
+命令分析不是安全边界，系统沙箱才是。下面这些判定偏松的问题已修：
+
+- 判成只读的：here-document 结束符里的续行（`EO\⏎F` 就是 `EOF`，后面的行是真命令）、`ps` 的值紧贴在字母后面、`printf -vPATH`、`awk` 的 `|&` 和 `getline <` 读工作区外文件。
+- 脚本经标准输入进 shell：here-string、here-document 正文、管道前 `echo` 的文本现在递归分析。
+- 包装命令：`env -S`、`env -vS`、`env -C/` 接着解包；`mapfile -C`、`less +!` 的命令递归分析；shell 名单补上 ash、mksh、fish、csh、tcsh。
+- 灾难性命令的写法：`$'rm\x00junk'`、`find -f ~ -delete`、`-exec` 的全部起点、`{r..r..1}m`、未赋值的 `A+=/usr`、`export -n`、`tee`/`cp`/`mv` 写块设备、改了名字的 fork 炸弹。
+- `git clean` 的选项簇和缩写（`-dfx`、`--force`）判高危，`-n` 空跑不算。
+- `require_pinned`：40 位提交号只有写在 git 地址上才算锁住版本，普通 URL 的 `#片段`、npm dist-tag 不算。
+
 ## [0.2.0] - 2026-11-05
 
 第一个发布到 PyPI 的版本。v0.1.0 之后的主线是安全边界：系统沙箱从可选原型变成默认开启，命令分析、凭证保护、供应链检查都重做了一轮。
