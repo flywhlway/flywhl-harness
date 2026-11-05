@@ -11,6 +11,11 @@
 ### 修复
 
 **`git push --receive-pack`、`--upload-pack`、`--exec`、`ext::` 这类地址不再被 allow 规则覆盖。** 它们指定了要运行的程序，`allow:bash(git push*)` 按文本匹配时看不见，现在按“实际程序不在命令文本里”处理，要人确认。
+长选项的缩写（`--rece=x`）、`--repo=ext::x`、`git clone -c`、`--config` 同样处理。
+
+**解析不了的 bash 命令不再被 allow 规则和 `auto_approve` 覆盖，要人确认。** 比如结尾一个反斜杠：解析器放弃，bash 照样执行分号后面的命令。
+
+**`git push` 的合写和缩写不再绕过高危判定。** `-qf`、`--mirror`、`--delete`、`-d`、`--prune`、`:分支` 都算高危，要人确认。
 
 ### 行为变化
 

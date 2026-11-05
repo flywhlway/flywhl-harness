@@ -574,7 +574,7 @@ flywhl run "发布 0.3.0" --json --trust --approve-outside 'git push origin main
 | 不放行 | 原因 |
 |---|---|
 | 复合命令里有一段不匹配 | `git push && curl …` 不能搭便车 |
-| 实际执行的程序不在命令文本里，或者嵌着另一段代码 | 命令替换、`git push --receive-pack=…`、`ext::` 地址都能匹配 `git push*` |
+| 实际执行的程序不在命令文本里，嵌着另一段代码，或者解析不了 | 命令替换、`git push --receive-pack=…` 和它的缩写、`ext::` 地址都能匹配 `git push*`。解析不了的命令 bash 不一定拒绝，分号后面的部分照样执行 |
 | 命令分析为高危 | `git push --force` 同样匹配。人工门把 `risk` 一律记成 critical，这里看的是命令分析 |
 | 输出重定向到文件 | `git push > ~/.zshrc` 也匹配 `git push*`，`2>&1` 不算 |
 | 托管基线要求确认的 | 同 `auto_approve` |

@@ -251,8 +251,9 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
         lex.whitespace_split = True
         lex.commenters = ""  # shlex 把词中间的 # 也当注释（echo a#b; rm -rf ~ 的后半句会被吞掉）；注释已由 _bash_lines 按 bash 规则去掉
         tokens = list(lex)
-    except ValueError as e:  # 引号不配对等
+    except ValueError as e:  # 引号不配对、结尾一个反斜杠等。bash 不一定这么严，分号后面的命令照样执行，所以这里看不清它在做什么
         a.bump("external", f"命令无法解析：{e}")
+        a.inline = a.opaque = True
         return a
 
     toks = _split_operators(tokens) + [";"]
@@ -2015,8 +2016,8 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
             # 按远端地址或选项运行程序：allow:bash(git push*) 这类前缀规则看不见它
             a.bump("external", f"git {sub} 的选项或远端地址指定了要运行的程序")
             a.inline = a.opaque = True
-        if "--force" in rest or "-f" in rest or any(x.startswith(("+", "--force")) for x in rest):
-            a.bump("dangerous", "强制推送会改写远端历史")
+        if _git_rewrites_remote(sub, rest):
+            a.bump("dangerous", "强制、镜像或删除式推送会改写远端")
         else:
             a.bump("external", f"git {sub} 访问远端")
         a.network = True
@@ -2029,9 +2030,32 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
 
 
 def _git_remote_program(sub: str, args: list[str]) -> bool:
-    """``--receive-pack`` 这类选项在远端（本地路径就是本机）运行指定的程序，``ext::cmd`` 这类地址调用 ``git-remote-<协议>``。"""
-    options = {"--receive-pack", "--upload-pack", "--exec", *(["-u"] if sub == "clone" else [])}
-    return any(x.split("=", 1)[0] in options or _GIT_HELPER_URL.match(x) for x in args)
+    """``--receive-pack`` 这类选项在远端（本地路径就是本机）运行指定的程序，``ext::cmd`` 这类地址调用 ``git-remote-ext``。
+    clone 的 ``-u`` 同理，``-c``、``--config`` 写进新仓库的配置，抓取时就生效。
+
+    长选项 git 接受无歧义的前缀，``--rece=x`` 就是 ``--receive-pack=x``，所以按前缀比。有歧义的前缀 git 自己会报错，
+    这里多判一次没有损失。短选项可以合写，值也可以紧贴，``-qu x``、``-ux`` 都算。"""
+    options = ("--receive-pack", "--upload-pack", "--exec", *(("--config",) if sub == "clone" else ()))
+    for x in args:
+        name, _, value = x.partition("=")
+        long = x.startswith("--")
+        if long and len(name) > 2 and any(o.startswith(name) for o in options):
+            return True
+        if _GIT_HELPER_URL.match(value if long else x):
+            return True
+        if sub == "clone" and not long and x.startswith("-") and {"u", "c"} & set(x[1:]):
+            return True
+    return False
+
+
+def _git_rewrites_remote(sub: str, args: list[str]) -> bool:
+    """强制推送、镜像推送、删除远端引用。选项写法的规则见 ``_git_remote_program``。"""
+    push = sub == "push"
+    flags = set(_git_flags(args))
+    names = ("--force", *(("--mirror", "--delete", "--prune") if push else ()))
+    return ("-f" in flags or (push and "-d" in flags)
+            or any(len(f) > 2 and any(n.startswith(f) for n in names) for f in flags if f.startswith("--"))
+            or any(x.startswith(("+", "--force")) or (push and x.startswith(":")) for x in args))
 
 
 def _git_flags(args: list[str]):

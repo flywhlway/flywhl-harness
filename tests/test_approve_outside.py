@@ -133,6 +133,12 @@ async def test_every_segment_has_to_match(ws, command):
     ("git push --receive-pack=sentinel origin main", "不在命令文本里"),
     ("git push --exec=sentinel origin main", "不在命令文本里"),
     ("git push 'ext::sentinel' main", "不在命令文本里"),
+    ("git push --rece=sentinel origin main", "不在命令文本里"),
+    ("git push --repo=ext::sentinel main", "不在命令文本里"),
+    ("git push origin main; touch sentinel; echo \\", "不在命令文本里"),   # shlex 解析失败，bash 照样执行分号后面的命令
+    ("git push -qf origin main", "高危"),
+    ("git push --mirror origin", "高危"),
+    ("git push origin :main", "高危"),
     ("git push --force origin main", "高危"),
     ("git push origin +main", "高危"),
     ("git push > notes.txt", "重定向"),
@@ -211,7 +217,10 @@ async def test_direct_tool_calls_are_still_refused(ws):
 # ---------------------------------------------------------------- 分析器
 @pytest.mark.parametrize("command", ["git push --receive-pack=x origin", "git fetch --upload-pack=x origin", "git pull --upload-pack x origin",
                                      "git clone -u x origin dir", "git clone --upload-pack=x origin dir", "git ls-remote --upload-pack=x origin",
-                                     "git push ext::x main", "git fetch fd::3 main", "git clone hg::x"])
+                                     "git push ext::x main", "git fetch fd::3 main", "git clone hg::x",
+                                     "git push --rece=x origin", "git push --exe=x origin", "git fetch --up=x origin",
+                                     "git push --repo=ext::x main", "git clone -ux origin dir", "git clone -qu x origin dir",
+                                     "git clone -c core.sshCommand=x origin dir", "git clone --conf core.sshCommand=x origin dir"])
 def test_git_options_that_name_a_program_are_opaque(command):
     a = analyze(command)
     assert a.opaque and a.inline and a.level != "read"
@@ -220,6 +229,36 @@ def test_git_options_that_name_a_program_are_opaque(command):
 @pytest.mark.parametrize("command", ["git push -u origin main", "git push origin main", "git fetch origin", "git clone https://example.test/x.git"])
 def test_plain_git_network_commands_are_not_opaque(command):
     assert not analyze(command).opaque
+
+
+@pytest.mark.parametrize("command", ["git push --force origin main", "git push --force-with-lease origin main", "git push --force-w origin main",
+                                     "git push -f origin main", "git push -qf origin main", "git push origin +main",
+                                     "git push --mirror origin", "git push --mir origin", "git push --delete origin main",
+                                     "git push --del origin main", "git push -d origin main", "git push origin :main", "git push --prune origin"])
+def test_pushes_that_rewrite_the_remote_are_dangerous(command):
+    assert analyze(command).level == "dangerous"
+
+
+@pytest.mark.parametrize("command", ["git push --dry-run origin main", "git push --porcelain origin main", "git push --progress origin main",
+                                     "git fetch --prune origin", "git push --tags origin"])
+def test_other_push_options_stay_ordinary(command):
+    a = analyze(command)
+    assert a.level == "external" and not a.opaque
+
+
+@pytest.mark.parametrize("command", ["echo 'a", 'echo "a', "git status; echo \\"])
+def test_commands_that_do_not_parse_are_opaque(command):
+    a = analyze(command)
+    assert a.opaque and a.inline and not a.segments
+
+
+def test_allow_rules_and_auto_approval_do_not_cover_unparsed_commands():
+    tool = boxed()
+    tool.confinement = Confinement()
+    command = {"command": "git status; touch sentinel; echo \\"}
+    policy = PermissionPolicy("default", ["allow:bash(git status*)"], auto_approve=["bash(git status*)"])
+    assert policy.evaluate(tool, command).decision == "ask"
+    assert policy.auto_approval(tool, command, policy.evaluate(tool, command))[0] is None
 
 
 def test_allow_rules_no_longer_cover_those_options():

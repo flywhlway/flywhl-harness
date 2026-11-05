@@ -267,7 +267,7 @@ class PermissionPolicy:
         if analysis and analysis.opaque and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             # allow 规则（含“本会话总是允许”的授权）按命令前缀匹配：git status "$(rm -rf ~)" 会命中 git status*，
             # 但替换里的命令不受规则约束；仓库配置给 git diff 挂的 textconv 同理——这类命令一律交给人确认
-            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换或仓库配置），不受 allow 规则约束，需要人工确认"
+            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换、仓库配置或解析不了的命令），不受 allow 规则约束，需要人工确认"
         if tainted and effect != Effect.READ and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:
