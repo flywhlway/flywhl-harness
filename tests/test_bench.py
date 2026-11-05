@@ -85,6 +85,12 @@ def test_q1_scenarios_are_the_24_generic_ones():
     assert not [s for s in scenarios if any(k in s for k in needs_other_keys)]
 
 
+def test_pilot_tasks_exist_and_cover_a_sandbox_sensitive_one():
+    by_id = {t.id: t for t in TASKS}
+    pilot = [by_id[name] for name in load_plan()["q2"]["pilot_tasks"]]
+    assert any(t.sandbox_sensitive for t in pilot) and not all(t.sandbox_sensitive for t in pilot)
+
+
 def test_power_statement_in_the_methodology():
     assert mcnemar_exact([False] * 6, [True] * 6)["p_value"] < 0.05
     assert mcnemar_exact([False] * 5, [True] * 5)["p_value"] > 0.05

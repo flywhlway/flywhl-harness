@@ -54,7 +54,7 @@ def rehearse(plan: dict, out: Path, public: Path) -> list[str]:
 
 def main() -> int:
     p = argparse.ArgumentParser(prog="python -m bench")
-    p.add_argument("command", choices=["validate", "pilot", "q1", "q2", "q3", "publish", "rehearse", "all", "report"])
+    p.add_argument("command", choices=["validate", "pilot", "pilot-q2", "q1", "q2", "q3", "publish", "rehearse", "all", "report"])
     p.add_argument("--out", type=Path, default=Path("/results/raw"))
     p.add_argument("--public", type=Path, default=Path("/results/public"))
     p.add_argument("--plan", type=Path, default=PLAN)
@@ -92,13 +92,17 @@ def main() -> int:
         write_manifest(args.out, plan)
         if args.command == "pilot":       # 每家跑一遍，量出单价再定次数
             q1.run_q1(plan, args.out, trials=1, models=args.model)
+        if args.command == "pilot-q2":    # Q2 用真实模型走通一遍，任务太少，看不出任何差异
+            names = plan["q2"]["pilot_tasks"]
+            small = {**plan, "q2": {**plan["q2"], "trials": 1}}
+            asyncio.run(q2.run_q2(small, args.out, tasks=[t for t in load_tasks() if t.id in names]))
         if args.command in ("q1", "all"):
             q1.run_q1(plan, args.out, trials=args.trials, models=args.model)
         if args.command in ("q2", "all"):
             asyncio.run(q2.run_q2(plan, args.out))
-        if args.command in ("q3", "all"):
+        if args.command in ("q3", "pilot-q2", "all"):
             print(json.dumps(asyncio.run(q3.run_q3(args.out)), ensure_ascii=False))
-        if args.command in ("pilot", "all"):    # 原始数据不出容器，不脱敏就什么也取不走
+        if args.command in ("pilot", "pilot-q2", "all"):    # 原始数据不出容器，不脱敏就什么也取不走
             print(json.dumps({"redaction_hits": redact.publish(args.out, args.public)}, ensure_ascii=False))
     except BudgetExceeded as e:
         print(f"预算用完，已经跑完的数据都在：{e}", file=sys.stderr)

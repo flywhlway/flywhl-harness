@@ -28,7 +28,10 @@ bench/run.sh --out /tmp/bench-rehearsal rehearse
 
 ```bash
 bench/run.sh --env-file ~/bench.env --out /tmp/bench-pilot pilot
+bench/run.sh --env-file ~/bench.env --out /tmp/bench-pilot-q2 pilot-q2
 ```
+
+`pilot-q2` 用方案里的 4 个任务走通 Q2，数据不计入。
 
 确认次数放得下预算，再正式运行：
 

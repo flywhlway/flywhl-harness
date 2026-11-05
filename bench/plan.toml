@@ -47,6 +47,8 @@ scenarios = [
 
 # Q2：同一任务、同一模型下的配对消融
 [q2]
+# 开跑前用这几个任务验证流水线，每种配置各一次，数据不计入
+pilot_tasks = ["fix-pagination", "data-sql-report", "repo-split-commits", "env-git-hook"]
 model = "deepseek:deepseek-flash"
 trials = 3
 seed = 20261105          # 决定每对试验里 A、B 谁先跑，写死是为了复现
