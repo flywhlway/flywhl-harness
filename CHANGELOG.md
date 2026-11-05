@@ -8,6 +8,36 @@
 
 **人批准过的沙箱外命令保留 `SSH_AUTH_SOCK`。** 这个变量名含 AUTH，以前和密钥一起剥离，靠它找 ssh-agent 的 `git push` 用 `outside_sandbox` 也 push 不了。只改这一条路径：沙箱里的 bash、关掉沙箱时的 bash、hook、MCP 服务器都不变，`GH_TOKEN`、`*_API_KEY` 在沙箱外也继续剥离。
 
+**`flywhl serve` 收紧了网络暴露。** 以前监听 `0.0.0.0`、`::` 时 Host 白名单被关掉，DNS 重绑定的防线随之消失，只剩共享令牌。现在白名单始终生效，监听非回环地址也要明确声明。
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| `--host 0.0.0.0` 或别的非回环地址退出码 2 | 控制台能批准命令、切换权限，暴露到网络要明确声明 | 加 `--expose`。回环地址不需要 |
+| 监听 `0.0.0.0`、`::` 时从别的机器打开返回 403 | 白名单只有回环地址和 `--allow-host` 写的 | 加 `--allow-host <主机名或IP>`。没写时启动会提示。监听具体的 IP 时这个 IP 自动进白名单 |
+| 监听 `0.0.0.0`、`::` 时打印的链接变成 `http://127.0.0.1:…`、`http://[::1]:…` | 通配地址不在白名单里，原样打印的链接打开就是 403 | 从别的机器打开时换成 `--allow-host` 写的地址 |
+| `--allow-host '*'` 退出码 2，`create_app(allowed_hosts=["*"])` 抛 `ValueError` | 白名单不能关闭 | 写出具体的主机名或 IP |
+| 非回环地址上 `--token` 不足 16 个字符时退出码 2 | 网络上的其他机器能反复试，短令牌挡不住 | 换长令牌，或者不写 `--token`，用自动生成的 |
+| `--no-token` 退出码 2，提示命令连得到控制台端口 | 不带令牌时，连得到这个端口的命令能调用审批接口，批准自己的人工门 | 去掉 `--no-token`，或者收紧提示里列出的沙箱设置 |
+| `/api/settings` 的 `access` 里没有 `any_host` 了 | 这个状态不再存在 | 读这个字段的脚本去掉它 |
+
+“连得到控制台端口”指全局沙箱档位 off、全局 `sandbox_network = "allow"`、`allowlist` 放行了回环地址上的这个端口，以及单条 hook、MCP 服务器自己的同类设置。配置了沙箱但这台机器用不了时命令不会执行，不算连得到。
+
+**English summary.** `flywhl serve` no longer disables the Host allowlist on `0.0.0.0` and `::`, and `*` is refused by both `--allow-host` and `create_app`. Listening on a non-loopback address now requires `--expose` plus a token, and a manual `--token` there needs at least 16 characters. A wildcard listen trusts only loopback names and `--allow-host` entries, so remote browsers get 403 until you add the address, and the printed link uses a loopback address. `--no-token` is refused when commands the agent runs can reach the console port, because they could otherwise approve their own human gate: sandbox off, `sandbox_network = "allow"`, or an allowlist rule for that loopback port, globally or on a single hook or MCP server. `access.any_host` is gone from `/api/settings`.
+
+**会话库默认按断电耐久落盘。** 新配置项 `durability` 默认 `full`：`synchronous=FULL`，加上 `fullfsync` 和 `checkpoint_fullfsync`。
+之前是 `NORMAL`，断电可能丢掉最后几次提交，其中可能有执行前写的工具 intent，恢复时看不到记录，非幂等调用会再执行一次。
+保证只覆盖会话库，影子 git 和工作区文件不在内。
+
+代价是提交变慢，而提交在事件循环线程上执行。在一台 Apple M5 Pro 的内置 SSD 上，提交 p50 从约 0.05ms 变成约 4ms。
+单个会话按快模型的速度输出时每轮慢 0～15%，4 个会话并发时每轮慢 0.7～1.1 倍，机器负载越高越慢，事件循环最长卡过将近 1 秒。
+数字只代表那台机器的那种磁盘，见[压测记录](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md)。
+
+要回到之前的行为，写 `durability = "normal"`。它放宽了保证，写在项目配置里要先信任才生效。取值写错时加载就报错。
+
+### 新增
+
+- `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
+
 ## [0.2.0] - 2026-11-05
 
 第一个发布到 PyPI 的版本。v0.1.0 之后的主线是安全边界：系统沙箱从可选原型变成默认开启，命令分析、凭证保护、供应链检查都重做了一轮。

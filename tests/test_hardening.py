@@ -638,7 +638,8 @@ async def test_no_token_is_refused_off_loopback(capsys):
 
     from flywhl_harness.cli import cmd_serve
 
-    assert await cmd_serve(argparse.Namespace(host="0.0.0.0", no_token=True)) == 2   # 先于加载配置、启动服务
+    args = argparse.Namespace(host="0.0.0.0", no_token=True, expose=True, token=None, allow_host=None)
+    assert await cmd_serve(args) == 2   # 先于加载配置、启动服务
     assert "回环地址" in capsys.readouterr().err
 
 
@@ -698,7 +699,7 @@ async def test_settings_overview_reports_effective_security_posture(ws):
     h = make_harness(ws, ["好"], permissions__sandbox_network="deny", hooks=[HookConfig(event="pre_tool_use", command="exit 0")])
     async with _client(create_app(h, auto_recover=False, token="s3cret"), "127.0.0.1:8765") as c:
         d = (await c.get("/api/settings", headers={"Authorization": "Bearer s3cret"})).json()
-    assert d["access"] == {"token": True, "hosts": ["127.0.0.1", "::1", "localhost"], "any_host": False}
+    assert d["access"] == {"token": True, "hosts": ["127.0.0.1", "::1", "localhost"]}
     assert d["sandbox"] == {"level": "off", "requested": "auto", "network": "deny", "allow": [], "unix_sockets": [], "problem": ""}
     assert d["permissions"]["baseline"] > 50
     assert d["hooks"][0]["fail_closed"] is True

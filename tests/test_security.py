@@ -405,7 +405,7 @@ async def test_server_rejects_dns_rebinding_and_cross_site_writes(ws):
 async def test_server_token_flow(ws):
     from flywhl_harness.server.app import TOKEN_COOKIE, create_app
 
-    app = create_app(make_harness(ws, ["好"]), auto_recover=False, token="s3cret", allowed_hosts=["*"])
+    app = create_app(make_harness(ws, ["好"]), auto_recover=False, token="s3cret", allowed_hosts=["192.168.1.20"])
     async with _client(app, "192.168.1.20:8765") as c:
         assert (await c.get("/api/sessions")).status_code == 401
         assert (await c.get("/api/sessions", headers={"Authorization": "Bearer wrong"})).status_code == 401
