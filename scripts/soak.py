@@ -9,7 +9,7 @@
 sse 启动真实的 flywhl serve，几个会话并发地发起运行并消费 SSE，周期性采样服务进程的 RSS、句柄数、线程数和数据库大小。
 运行时长的分位数只记录，不做判定。
 
-kill9 循环这件事：worker 跑一个带副作用的运行（工具往账本追加一行），随机时间点 kill -9，新进程接管到结束，
+kill9 循环：worker 跑一个带副作用的运行（工具往账本追加一行），随机时间点 kill -9，新进程接管到结束，
 再核对每个幂等键在账本里恰好一行。kill 落点多数是完全随机的，每 3 轮瞄准一次工具窗口，短跑也能覆盖到 intent 和结果之间。
 
 子进程的 HOME、TMPDIR、FLYWHL_HOME、工作目录、数据目录都在一个临时基目录里，结束时只删这一个目录。
@@ -319,7 +319,9 @@ async def one_run(client: httpx.AsyncClient, sid: str, command: str) -> tuple[fl
     resp = await client.get(f"/api/runs/{rid}")
     resp.raise_for_status()
     run = resp.json()
-    problems = [f"{rid} {p}" for p in (seq_problem(seqs),) if p]
+    problems = []
+    if gap := seq_problem(seqs):
+        problems.append(f"{rid} {gap}")
     if run["status"] != "completed":
         problems.append(f"{rid} 状态 {run['status']}")
     if len(tools) != 1 or tools[0].get("is_error"):     # 工具没真的跑成，运行完成也不算数
@@ -674,13 +676,13 @@ def main(argv: list[str] | None = None) -> int:
     base = make_base()
     try:
         result = (run_sse if args.segment == "sse" else run_kill9)(args, base)
+        (report_sse if args.segment == "sse" else report_kill9)(result)
+        if out:     # 先写结果再清理：清理出问题也不能丢掉跑了几个小时的数据
+            out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     finally:
         for proc in _spawned.values():
             stop(proc)
         clean_up(base)
-    (report_sse if args.segment == "sse" else report_kill9)(result)
-    if out:
-        out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0 if result["passed"] else 1
 
 

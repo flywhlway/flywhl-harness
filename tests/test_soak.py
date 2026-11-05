@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +76,34 @@ def test_seq_problem(soak):
     assert "跳" in soak.seq_problem([1, 2, 2])
     assert "开始" in soak.seq_problem([2, 3])
     assert soak.seq_problem([]) == "没有收到事件"
+
+
+def sse_client(body: str) -> httpx.AsyncClient:
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text=body))
+    return httpx.AsyncClient(transport=transport, base_url="http://soak.test")
+
+
+def test_read_events_collects_seqs_and_tool_results(soak):
+    body = ("retry: 1500\n\n"
+            "id: 1\nevent: status\ndata: {}\n\n"
+            ": ping\n\n"
+            'id: 2\nevent: tool_end\ndata: {"data": {"name": "bash", "is_error": false}}\n\n'
+            "event: stream_end\ndata: {}\n\n")
+    seqs, tools = asyncio.run(soak.read_events(sse_client(body), "r_1"))
+    assert seqs == [1, 2]
+    assert tools == [{"name": "bash", "is_error": False}]
+
+
+def test_read_events_without_stream_end_is_an_interruption(soak):
+    with pytest.raises(ConnectionError):
+        asyncio.run(soak.read_events(sse_client("id: 1\nevent: status\ndata: {}\n\n"), "r_1"))
+
+
+def test_prepare_writes_durability_only_when_set(soak, tmp_path):
+    for name, durability, present in (("a", "normal", True), ("b", "default", False)):
+        base = tmp_path / name
+        base.mkdir()
+        assert ('durability = "normal"' in soak.prepare(base, durability).read_text(encoding="utf-8")) is present
 
 
 def test_ledger_exactly_once_passes(soak):
