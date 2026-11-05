@@ -60,6 +60,8 @@ bench/run.sh --env-file ~/bench.env --out /tmp/bench-results all
 
 `--draft` 列出未归类的失败。`--write` 把数字写进站点页面，有未归类的失败或者数据来自彩排时拒绝写入。结论的措辞由人写，生成的页面只有数字。
 
+运行偏离方案时，把经过写进结果目录的 `deviations.json`（`[{"zh": "...", "en": "..."}]`），页面会列出来。试验作废要保留原始记录：挪到 `q2/voided.jsonl`，它随数据发布，不进统计。
+
 ## 改任务
 
 改完经 `scripts/safe_pytest.py` 校验，检查脚本和参考答案都是会执行的代码，不要直接在宿主机上跑：

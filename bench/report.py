@@ -17,6 +17,9 @@ from .common import CATEGORIES, NOT_COUNTED, read_jsonl
 
 Q2_CATEGORIES = (*CATEGORIES, "sandbox_boundary")   # 只用于 Q2：沙箱按设计拦下了任务要做的事，这正是要测的代价，计入分母
 Report = dict[str, Any]
+CLASS_LABELS = {"missing_key": ("缺密钥", "missing key"), "network_env": ("网络与环境", "network or environment"),
+                "model_random": ("模型随机", "model randomness"), "harness_bug": ("harness 缺陷", "harness defect"),
+                "sandbox_boundary": ("沙箱边界", "sandbox boundary"), "unclassified": ("未归类", "unclassified")}
 
 
 def load_classes(out: Path) -> dict[str, dict[str, str]]:
@@ -55,6 +58,7 @@ def q1_summary(out: Path, classes: dict[str, dict[str, str]]) -> tuple[list[dict
                 else:
                     cls = classes.get(rid)
                     failures.append({"id": rid, "category": cls and cls["category"], "note": cls and cls.get("note", ""),
+                                     "note_en": cls and cls.get("note_en", ""),
                                      "detail": row.get("detail", "")[-1500:]})
                     if cls and cls["category"] in NOT_COUNTED:
                         excluded += 1
@@ -88,6 +92,7 @@ def q2_summary(out: Path, classes: dict[str, dict[str, str]]) -> tuple[dict[str,
         cls = classes.get(rid)
         if not r["passed"]:
             failures.append({"id": rid, "category": cls and cls["category"], "note": cls and cls.get("note", ""),
+                                     "note_en": cls and cls.get("note_en", ""),
                              "detail": f"{r['status']}：{r['note'] or r['reason']}"})
         if r["passed"] or not (cls and cls["category"] in NOT_COUNTED):
             counted.append(r)
@@ -132,7 +137,9 @@ def build(out: Path) -> Report:
     q1, f1 = q1_summary(out, classes)
     q2, f2 = q2_summary(out, classes)
     failures = f1 + f2
-    return {"manifest": manifest, "q1": q1, "q2": q2, "q3": q3_summary(out), "failures": failures,
+    deviations_path = out / "deviations.json"    # 偏离方案的地方。跟数据放在一起，归档后不会和结果分开
+    deviations = json.loads(deviations_path.read_text(encoding="utf-8")) if deviations_path.is_file() else []
+    return {"manifest": manifest, "q1": q1, "q2": q2, "q3": q3_summary(out), "failures": failures, "deviations": deviations,
             "unclassified": [f["id"] for f in failures if not f["category"]],
             "harness_bugs": [f["id"] for f in failures if f["category"] == "harness_bug"]}
 
@@ -190,7 +197,15 @@ def render(report: Report, *, lang: str = "zh") -> str:
         counts[f["category"] or "unclassified"] += 1
     if counts:
         out += [("## 失败分类" if zh else "## Failure classes"), "", "| " + ("分类" if zh else "Class") + " | " + ("个数" if zh else "Count") + " |", "|---|---|"]
-        out += [f"| {k} | {v} |" for k, v in sorted(counts.items())]
+        out += [f"| {CLASS_LABELS[k][0 if zh else 1]} | {v} |" for k, v in sorted(counts.items())]
+        out += ["", "| " + ("试验" if zh else "Trial") + " | " + ("分类" if zh else "Class") + " | " + ("依据" if zh else "Basis") + " |", "|---|---|---|"]
+        for f in report["failures"]:
+            note = (f["note"] if zh else f.get("note_en") or f["note"]) or ""
+            out.append(f"| `{f['id']}` | {CLASS_LABELS[f['category'] or 'unclassified'][0 if zh else 1]} | {note} |")
+        out.append("")
+    if report.get("deviations"):
+        out += [("## 偏差记录" if zh else "## Deviations from the plan"), ""]
+        out += [f"- {d['zh' if zh else 'en']}" for d in report["deviations"]]
         out.append("")
     return "\n".join(out)
 

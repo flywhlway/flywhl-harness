@@ -285,3 +285,18 @@ def test_live_fixture_exports_every_run(tmp_path, monkeypatch):
     usage = live._save_trajectories("t::x", tmp_path / "t")
     rows = list(read_jsonl(out / "trajectories.jsonl"))
     assert len(usage) == 1 and rows[0]["nodeid"] == "t::x" and rows[0]["trajectory"]["format"] == "flywhl-trajectory/1"
+
+
+def test_site_pages_list_each_failure_and_the_deviations(tmp_path):
+    append_jsonl(tmp_path / "q2" / "results.jsonl", [_q2_row("t", "A", 1, False), _q2_row("t", "B", 1, True)])
+    (tmp_path / "classifications.jsonl").write_text(json.dumps(
+        {"id": "q2/t/A/1", "category": "sandbox_boundary", "note": "被拦了", "note_en": "blocked"}) + "\n", encoding="utf-8")
+    (tmp_path / "deviations.json").write_text(json.dumps([{"zh": "作废一次", "en": "voided one"}]), encoding="utf-8")
+    zh, en = report.write_pages(report.build(tmp_path), tmp_path / "docs")
+    assert "`q2/t/A/1` | 沙箱边界 | 被拦了" in zh.read_text(encoding="utf-8") and "作废一次" in zh.read_text(encoding="utf-8")
+    assert "`q2/t/A/1` | sandbox boundary | blocked" in en.read_text(encoding="utf-8") and "voided one" in en.read_text(encoding="utf-8")
+
+
+def test_container_reaps_orphans():
+    """没有 init 时 Python 是 PID 1，退出的 bwrap 进程没人回收，正式运行因此崩过一次。"""
+    assert "docker run --init " in (Path(__file__).parent.parent / "bench" / "run.sh").read_text(encoding="utf-8")

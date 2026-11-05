@@ -40,7 +40,8 @@ if docker container inspect "$name" >/dev/null 2>&1; then
   docker start -a "$name" || code=$?
 else
   # bubblewrap 要建 user namespace、挂新的 /proc，默认的 seccomp、apparmor 和 /proc 遮蔽会拦。这几项是放宽，所以同时去掉全部 capability
-  docker run --name "$name" --network flywhl-bench --memory 4g --pids-limit 1024 \
+  # --init：Python 当 PID 1 不回收退出的 bwrap、git 进程，僵尸会占满 --pids-limit，后面的试验 fork 失败
+  docker run --init --name "$name" --network flywhl-bench --memory 4g --pids-limit 1024 \
     --cap-drop ALL --security-opt no-new-privileges \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
     ${envs[@]+"${envs[@]}"} "$tag" "$command" || code=$?
