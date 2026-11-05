@@ -36,8 +36,10 @@ bench/run.sh --env-file ~/bench.env --out /tmp/bench-pilot-q2 pilot-q2
 确认次数放得下预算，再正式运行：
 
 ```bash
-bench/run.sh --env-file ~/bench.env --out /tmp/bench-results --spec 'flywhl-harness==0.2.0' all
+bench/run.sh --env-file ~/bench.env --out /tmp/bench-results all
 ```
+
+结果绑定当前提交。版本已经发到 PyPI 时，加上 `--spec 'flywhl-harness==<版本>'`，别人能装到同一份代码。
 
 中途停了（预算到了、断网）时容器会留着，同样的命令接着跑，跑完的试验不会重复花钱。
 

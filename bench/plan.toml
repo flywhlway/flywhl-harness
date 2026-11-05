@@ -1,7 +1,7 @@
 # 基准的机器可读方案。这里的数字和 docs/benchmark/methodology.md 必须一致，tests/test_bench.py 会核对。
 # 开跑之后不改；要改就换一个 plan_id，旧结果不和新结果混算。
 
-plan_id = "2026-11-draft"
+plan_id = "2026-11"
 
 [budget]
 total_usd = 50.0        # 整次基准的硬上限，超过就停
