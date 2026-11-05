@@ -288,6 +288,17 @@ def test_ignore_file_is_not_written_through_a_dangling_symlink(tmp_path):
     assert not target.exists()
 
 
+def test_ignore_file_is_not_written_into_a_symlinked_data_dir(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".flywhl").symlink_to(outside)
+    HarnessConfig(workspace=str(tmp_path / "ws")).data_path()
+    assert list(outside.iterdir()) == []
+
+
 def test_existing_ignore_file_in_the_data_dir_is_left_alone(tmp_path):
     from flywhl_harness import HarnessConfig
 

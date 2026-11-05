@@ -251,7 +251,9 @@ def ensure_data_dir(path: Path) -> Path:
     """建数据目录。新建时只给属主：里面有会话库、审批记录和快照，它们也不能被 ``git add -A`` 带进仓库。
     目录可能早就有了（比如先写了 config.toml），所以不看是谁建的，还没有 .gitignore 就写一份，已有的不动。"""
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:   # O_EXCL 不跟随符号链接：克隆来的仓库里 .flywhl/.gitignore 可能是指向工作区外的悬空链接
+    if path.is_symlink():    # 目录在别处，不归工作区的 git 管；克隆来的仓库也可能拿它指向工作区外
+        return path
+    try:   # O_EXCL 不跟随符号链接：.flywhl/.gitignore 本身也可能是悬空链接
         fd = os.open(path / ".gitignore", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except OSError:     # 已经有了，或者写不了，都不影响运行
         return path
