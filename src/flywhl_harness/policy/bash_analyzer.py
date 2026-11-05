@@ -253,7 +253,8 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
         tokens = list(lex)
     except ValueError as e:  # 引号不配对、结尾一个反斜杠等。bash 不一定这么严，分号后面的命令照样执行，所以这里看不清它在做什么
         a.bump("external", f"命令无法解析：{e}")
-        a.inline = a.opaque = True
+        a.inline = a.opaque = a.network = True
+        _salvage(command, a)
         return a
 
     toks = _split_operators(tokens) + [";"]
@@ -1822,6 +1823,14 @@ def _ps_shows_env(args: list[str]) -> bool:
     return False
 
 
+def _salvage(command: str, a: CommandAnalysis) -> None:
+    """解析不了也要看一眼每一段：灾难性命令的判定不能因为结尾一个反斜杠就跳过。这里只为多拦不为放行，
+    所以去掉引号和反斜杠后按分隔符硬切，错判的代价是拒绝一条本来就写坏了的命令。切完没有引号，不会再解析失败。"""
+    for part in re.split(r"[;&|\n]+", re.sub(r"[\"'\\]", "", command)):
+        if part.strip():
+            _recurse(part, a, "解析不了的命令片段", mode="sub", nest=False)
+
+
 def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child", nest: bool = True) -> None:
     """``sh -c`` / ``eval`` 的字符串本身就是一条命令：递归分析（限制深度，防止构造的深层嵌套拖慢判定）。
     内层看得到外层的变量与当前目录。mode 为 child（``sh -c`` 这类新进程）时，没导出的变量在里面可能是空的；
@@ -2031,11 +2040,13 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
 
 def _git_remote_program(sub: str, args: list[str]) -> bool:
     """``--receive-pack`` 这类选项在远端（本地路径就是本机）运行指定的程序，``ext::cmd`` 这类地址调用 ``git-remote-ext``。
-    clone 的 ``-u`` 同理，``-c``、``--config`` 写进新仓库的配置，抓取时就生效。
+    clone 的 ``-u`` 同理，``-c``、``--config`` 写进新仓库的配置，抓取时就生效，``--template`` 带进来的钩子检出时就执行。
+    pull 的 ``-s``、``--strategy`` 运行 ``git-merge-<名字>``。
 
     长选项 git 接受无歧义的前缀，``--rece=x`` 就是 ``--receive-pack=x``，所以按前缀比。有歧义的前缀 git 自己会报错，
     这里多判一次没有损失。短选项可以合写，值也可以紧贴，``-qu x``、``-ux`` 都算。"""
-    options = ("--receive-pack", "--upload-pack", "--exec", *(("--config",) if sub == "clone" else ()))
+    options = ("--receive-pack", "--upload-pack", "--exec", *{"clone": ("--config", "--template"), "pull": ("--strategy",)}.get(sub, ()))
+    short = {"clone": {"u", "c"}, "pull": {"s"}}.get(sub, set())
     for x in args:
         name, _, value = x.partition("=")
         long = x.startswith("--")
@@ -2043,7 +2054,7 @@ def _git_remote_program(sub: str, args: list[str]) -> bool:
             return True
         if _GIT_HELPER_URL.match(value if long else x):
             return True
-        if sub == "clone" and not long and x.startswith("-") and {"u", "c"} & set(x[1:]):
+        if not long and x.startswith("-") and short & set(x[1:]):
             return True
     return False
 

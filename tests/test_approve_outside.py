@@ -220,7 +220,9 @@ async def test_direct_tool_calls_are_still_refused(ws):
                                      "git push ext::x main", "git fetch fd::3 main", "git clone hg::x",
                                      "git push --rece=x origin", "git push --exe=x origin", "git fetch --up=x origin",
                                      "git push --repo=ext::x main", "git clone -ux origin dir", "git clone -qu x origin dir",
-                                     "git clone -c core.sshCommand=x origin dir", "git clone --conf core.sshCommand=x origin dir"])
+                                     "git clone -c core.sshCommand=x origin dir", "git clone --conf core.sshCommand=x origin dir",
+                                     "git clone --template=x origin dir", "git clone --templ x origin dir",
+                                     "git pull -s x origin", "git pull -qs x origin", "git pull --strategy=x origin", "git pull --str=x origin"])
 def test_git_options_that_name_a_program_are_opaque(command):
     a = analyze(command)
     assert a.opaque and a.inline and a.level != "read"
@@ -240,7 +242,7 @@ def test_pushes_that_rewrite_the_remote_are_dangerous(command):
 
 
 @pytest.mark.parametrize("command", ["git push --dry-run origin main", "git push --porcelain origin main", "git push --progress origin main",
-                                     "git fetch --prune origin", "git push --tags origin"])
+                                     "git fetch --prune origin", "git push --tags origin", "git pull --stat origin", "git clone --quiet origin dir"])
 def test_other_push_options_stay_ordinary(command):
     a = analyze(command)
     assert a.level == "external" and not a.opaque
@@ -250,6 +252,17 @@ def test_other_push_options_stay_ordinary(command):
 def test_commands_that_do_not_parse_are_opaque(command):
     a = analyze(command)
     assert a.opaque and a.inline and not a.segments
+
+
+@pytest.mark.parametrize("command", ["rm -rf ~; echo \\", "echo a; rm -rf ~ \\", "echo a\nrm -rf ~\necho 'b", "true && mkfs.ext4 /dev/sda; echo 'b"])
+def test_catastrophic_checks_still_run_when_a_command_does_not_parse(command):
+    assert analyze(command).catastrophic
+    assert PermissionPolicy("bypass").evaluate(boxed(), {"command": command}).decision == "deny"
+
+
+def test_unparsed_commands_count_as_reading_outside_content():
+    assert analyze("echo 'a").network
+    assert not analyze("git status; echo \\").catastrophic
 
 
 def test_allow_rules_and_auto_approval_do_not_cover_unparsed_commands():
