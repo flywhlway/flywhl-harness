@@ -18,6 +18,7 @@ Event     细粒度事件流（带 seq）                        流式展示、
 - **CAS 状态迁移**：``UPDATE runs SET status=?, version=version+1 WHERE id=? AND status=? AND version=?``，
   影响行数为 0 即并发冲突（取消与完成同时到达时只有一个生效）。
 - **WAL 模式**：进程被 ``kill -9`` 不会损坏数据库，已提交的事务全部保留。
+- **落盘强度**：默认 ``durability = "full"``，已提交的事务也能扛住断电（见 ``_DURABILITY_PRAGMAS``）。
 - **事务**：工具结果写入 Entry 与 Step 完成标记在同一事务内，避免“结果写了但 journal 没写”。
 
 生产环境可替换为 PostgreSQL（行锁 + 分区）+ 对象存储（大载荷）+ outbox（对外发布事件）。
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .._utils import new_id, now, sha256_hex
+from ..config import check_durability
 from ..events import Event
 
 SCHEMA = """
@@ -263,12 +265,22 @@ def _owner_only(db: Path) -> None:
         pass   # 只读介质、不支持权限位的文件系统：不影响使用
 
 
+# 这些 PRAGMA 是连接级设置，不存进库文件，每条连接都要重设
+_DURABILITY_PRAGMAS = {
+    # WAL 下每次提交都同步 WAL 文件。macOS 上普通 fsync 不清磁盘写缓存，要 F_FULLFSYNC 才算落盘；其余平台这两项不起作用
+    "full": ("synchronous=FULL", "fullfsync=ON", "checkpoint_fullfsync=ON"),
+    # 只在检查点同步：扛得住进程崩溃，断电时库不会坏，但可能丢最后几次提交
+    "normal": ("synchronous=NORMAL",),
+}
+
+
 # ====================================================================== Store
 class Store:
     """线程安全的 SQLite 存储。单连接 + 可重入锁；``tx()`` 提供可嵌套事务。"""
 
-    def __init__(self, path: str | Path = ":memory:"):
+    def __init__(self, path: str | Path = ":memory:", *, durability: str = "full"):
         self.db_path = str(path)
+        self.durability = check_durability(durability)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _owner_only(Path(self.db_path))
@@ -278,7 +290,8 @@ class Store:
         self._depth = 0
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下可抵御进程崩溃；抵御断电需 FULL
+            for pragma in _DURABILITY_PRAGMAS[durability]:
+                self._conn.execute(f"PRAGMA {pragma}")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
         self.blobs = BlobStore(self)
