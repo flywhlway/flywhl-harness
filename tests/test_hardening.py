@@ -248,6 +248,19 @@ def test_existing_git_config_env_is_preserved(monkeypatch):
     assert env["GIT_CONFIG_KEY_1"] == "core.fsmonitor"
 
 
+def test_git_author_identity_survives_the_secret_filter(monkeypatch):
+    """名字里的 AUTH 撞上了密钥规则。删掉它们之后，靠环境变量配身份的提交会报身份未知。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "someone")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "someone@example.invalid")
+    monkeypatch.setenv("GIT_AUTH_TOKEN", "sentinel")
+    monkeypatch.setenv("GITHUB_AUTH", "sentinel")
+    env = _clean_env(True)
+    assert env["GIT_AUTHOR_NAME"] == "someone" and env["GIT_AUTHOR_EMAIL"] == "someone@example.invalid"
+    assert "GIT_AUTH_TOKEN" not in env and "GITHUB_AUTH" not in env
+
+
 @pytest.mark.parametrize("config,flagged", [
     ('[filter "x"]\n\tclean = touch pwned\n', True),
     ('[diff "y"]\n\ttextconv = sh -c id\n', True),

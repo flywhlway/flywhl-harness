@@ -7,9 +7,27 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any, Iterable
+
 from flywhl_harness.llm.mock import ScriptedProvider
 
 from .taskset import Task
+
+
+SANDBOX_DOWN = "沙箱不可用"
+
+
+def problems(rows: Iterable[dict[str, Any]], trajectories: Iterable[dict[str, Any]]) -> list[str]:
+    """彩排该有的结果：普通任务两个配置都过，沙箱敏感任务只有关了沙箱才过，沙箱确实启动过。"""
+    bad = []
+    for r in rows:
+        if r["passed"] != (r["config"] == "B" or not r["sandbox_sensitive"]):
+            bad.append(f"{r['task']}/{r['config']}：passed={r['passed']}，{r['note']}")
+    for t in trajectories:
+        if SANDBOX_DOWN in json.dumps(t["trajectory"], ensure_ascii=False):
+            bad.append(f"{t['task']}/{t['config']}：沙箱没有启动")
+    return bad
 
 
 def script_for(task: Task) -> ScriptedProvider:

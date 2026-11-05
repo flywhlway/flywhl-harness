@@ -17,14 +17,15 @@ pytest.importorskip("bench.taskset", reason="bench/ 不在 sdist 里")
 
 from bench import redact, report  # noqa: E402
 from bench.common import (  # noqa: E402
-    BudgetExceeded, Ledger, append_jsonl, load_plan, read_jsonl, require_disposable, unexpected_mounts,
+    BudgetExceeded, Ledger, append_jsonl, load_plan, read_jsonl, require_disposable, require_sandbox, unexpected_mounts,
 )
 from bench.q2 import run_q2, schedule  # noqa: E402
 from bench.q3 import run_q3  # noqa: E402
-from bench.rehearsal import script_for  # noqa: E402
+from bench.rehearsal import problems, script_for  # noqa: E402
 from bench.taskset import CATEGORIES, load_tasks, run_check, validate_task  # noqa: E402
 from flywhl_harness import Store  # noqa: E402
 from flywhl_harness.observe.evals import mcnemar_exact  # noqa: E402
+from flywhl_harness.tools.sandbox import Detected  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = load_tasks()
@@ -121,6 +122,23 @@ def test_real_runs_refuse_to_start_on_the_host(monkeypatch):
         require_disposable()
 
 
+def test_real_runs_refuse_to_start_without_a_working_sandbox(monkeypatch):
+    monkeypatch.setattr("bench.common.probe", lambda: Detected("", "user namespace 被禁用"))
+    with pytest.raises(SystemExit, match="user namespace"):
+        require_sandbox()
+
+
+def test_rehearsal_flags_results_that_prove_nothing():
+    def row(task, config, passed, sensitive):
+        return {"task": task, "config": config, "passed": passed, "sandbox_sensitive": sensitive, "note": ""}
+    good = [row("t", "A", True, False), row("t", "B", True, False), row("s", "A", False, True), row("s", "B", True, True)]
+    assert problems(good, []) == []
+    assert problems([row("t", "A", False, False)], []) != []         # 普通任务不该败
+    assert problems([row("s", "A", True, True)], []) != []           # 敏感任务开着沙箱不该过
+    assert problems([row("s", "B", False, True)], []) != []          # 关了沙箱应当能过
+    assert problems([], [{"task": "s", "config": "A", "trajectory": {"text": "沙箱不可用，命令未执行"}}]) != []
+
+
 def test_ledger_stops_at_both_caps_and_survives_a_restart(tmp_path):
     path = tmp_path / "spent.json"
     led = Ledger(path, total_usd=1.0, per_model_usd=0.6)
@@ -150,6 +168,12 @@ def test_redaction_removes_keys_and_paths(tmp_path):
     assert redact.leftovers(public, [fake]) == []
     (public / "b.txt").write_text(fake)
     assert redact.leftovers(public, [fake]) == ["b.txt"]
+
+
+def test_redaction_leaves_home_directories_inside_other_paths():
+    text, hits = redact.redact_text("写到 /work/bench-x/home/reports/a.txt，读 /home/bench/x 和 file:///Users/alice/y", [])
+    assert "/work/bench-x/home/reports/a.txt" in text and "/home/bench/x" in text
+    assert "alice" not in text and hits == 1
 
 
 def test_short_env_values_are_not_treated_as_secrets():

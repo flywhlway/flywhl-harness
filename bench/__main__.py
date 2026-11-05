@@ -16,7 +16,7 @@ from pathlib import Path
 import flywhl_harness
 
 from . import q1, q2, q3, redact, rehearsal, report
-from .common import PLAN, BudgetExceeded, load_plan, require_disposable
+from .common import PLAN, BudgetExceeded, load_plan, read_jsonl, require_disposable, require_sandbox
 from .taskset import load_tasks, validate_all
 
 
@@ -36,15 +36,20 @@ def write_manifest(out: Path, plan: dict, *, rehearsing: bool = False) -> None:
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def rehearse(plan: dict, out: Path, public: Path) -> None:
-    """脚本化模型走完整流程。Q1 没有密钥，用例全部跳过，走的是产物目录这条路。"""
+def rehearse(plan: dict, out: Path, public: Path) -> list[str]:
+    """脚本化模型走完整流程，返回不符合预期的地方。Q1 没有密钥，用例全部跳过，走的是产物目录这条路。"""
     write_manifest(out, plan, rehearsing=True)
     q1.run_q1(plan, out, trials=1, models=plan["q1"]["models"][:1])
     plan = {**plan, "q2": {**plan["q2"], "trials": 1}}
     asyncio.run(q2.run_q2(plan, out, provider_for=rehearsal.script_for, model="scripted"))
-    print(json.dumps(asyncio.run(q3.run_q3(out)), ensure_ascii=False), flush=True)
-    print(json.dumps({"redaction_hits": redact.publish(out, public)}, ensure_ascii=False), flush=True)
+    replayed = asyncio.run(q3.run_q3(out))
+    hits = redact.publish(out, public)
+    print(json.dumps(replayed, ensure_ascii=False), json.dumps({"redaction_hits": hits}, ensure_ascii=False), sep="\n", flush=True)
     print(report.render(report.build(public)), flush=True)
+    bad = rehearsal.problems(read_jsonl(out / "q2" / "results.jsonl"), read_jsonl(out / "q2" / "trajectories.jsonl"))
+    if replayed["divergent"]:
+        bad.append(f"回放分叉 {replayed['divergent']} 条")
+    return bad + [f"脱敏命中 {name}：{n} 处" for name, n in hits.items()]
 
 
 def main() -> int:
@@ -73,14 +78,17 @@ def main() -> int:
         print(json.dumps(redact.publish(args.out, args.public), ensure_ascii=False))
         return 0
     require_disposable()
+    if args.command not in ("validate", "q3"):
+        require_sandbox()
     try:
         if args.command == "validate":
             bad = validate_all()
             print(f"{len(load_tasks())} 个任务，{len(bad)} 个有问题", json.dumps(bad, ensure_ascii=False, indent=1), sep="\n")
             return 1 if bad else 0
         if args.command == "rehearse":
-            rehearse(plan, args.out, args.public)
-            return 0
+            bad = rehearse(plan, args.out, args.public)
+            print(f"\n彩排不符合预期，{len(bad)} 处：", *bad, sep="\n", file=sys.stderr) if bad else print("\n彩排符合预期")
+            return 1 if bad else 0
         write_manifest(args.out, plan)
         if args.command == "pilot":       # 每家跑一遍，量出单价再定次数
             q1.run_q1(plan, args.out, trials=1, models=args.model)

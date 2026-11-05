@@ -9,6 +9,8 @@ import tomllib
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from flywhl_harness.tools.sandbox import probe
+
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent
 PLAN = ROOT / "plan.toml"
@@ -49,6 +51,13 @@ def unexpected_mounts(mountinfo: str) -> list[str]:
     """容器里除了系统挂载点，不应当有任何挂载：结果用 docker cp 取走，不挂宿主目录。"""
     points = [line.split()[4] for line in mountinfo.splitlines() if len(line.split()) > 4]
     return [p for p in points if not _ALLOWED_MOUNTS.match(p)]
+
+
+def require_sandbox() -> None:
+    """沙箱用不了时 bash 一条命令也跑不了，A 配置的失败看着像被沙箱拦住，其实什么都没测到。"""
+    found = probe()
+    if not found.level:
+        raise SystemExit(f"系统沙箱用不了：{found.reason}")
 
 
 def require_disposable() -> None:
