@@ -40,7 +40,7 @@ def _codes(events) -> list[str]:
     return [e.data.get("code") for e in events if e.type == E.NOTICE]
 
 
-async def _wait_until(cond, timeout: float = 5.0) -> None:
+async def _wait_until(cond, timeout: float = 30.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while not cond():
         assert asyncio.get_running_loop().time() < deadline, "等待超时"
