@@ -269,7 +269,8 @@ def _owner_only(db: Path) -> None:
 _DURABILITY_PRAGMAS = {
     # WAL 下每次提交都同步 WAL 文件。macOS 上普通 fsync 不清磁盘写缓存，要 F_FULLFSYNC 才算落盘；其余平台这两项不起作用
     "full": ("synchronous=FULL", "fullfsync=ON", "checkpoint_fullfsync=ON"),
-    # 只在检查点同步：扛得住进程崩溃，断电时库不会坏，但可能丢最后几次提交
+    # 只在检查点同步：扛得住进程崩溃，断电可能丢最后几次提交。macOS 上检查点也只是普通 fsync，
+    # 那里断电后库是否完好还要看磁盘有没有打乱写入顺序
     "normal": ("synchronous=NORMAL",),
 }
 

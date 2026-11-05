@@ -560,6 +560,9 @@ async def driver() -> None:
 | 抢占式终止 | `task.cancel()`、`aclose()` 宽限期到期、自我 fencing（租约丢失）、`asyncio.run` 退出时取消任务、第二次 Ctrl-C | step 保持 `started`，**不写结果** | 不写结果 | 对账 |
 | 进程被杀 | `kill -9`、OOM、断电 | step 保持 `started` | 没有 step 行 | 对账 / 正常执行 |
 
+断电这一格依赖默认的 `durability = "full"`。写成 `normal` 时，断电可能连 `started` 这一行一起丢掉，恢复时看不到记录，
+调用会再执行一次，见 [SQLite 的崩溃安全级别](/reliability/state-persistence#sqlite-的崩溃安全级别)。
+
 `tests/test_recovery.py::test_in_process_crash_then_recover` 用 `h1._active[run.id].task.cancel()` 模拟抢占式终止，
 然后断言 `step.status == "started"`，说的就是第二行。
 

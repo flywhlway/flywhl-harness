@@ -583,22 +583,38 @@ print("事务包裹", time.perf_counter() - t)
 ## SQLite 的崩溃安全级别
 
 ```python
-# src/flywhl_harness/runtime/store.py · Store.__init__
-self._conn.execute("PRAGMA journal_mode=WAL")
-self._conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下可抵御进程崩溃；抵御断电需 FULL
+# src/flywhl_harness/runtime/store.py
+_DURABILITY_PRAGMAS = {
+    "full": ("synchronous=FULL", "fullfsync=ON", "checkpoint_fullfsync=ON"),
+    "normal": ("synchronous=NORMAL",),
+}
 ```
 
-| 故障 | WAL + `NORMAL`（当前） | WAL + `FULL` |
+落盘强度由配置项 `durability` 决定，默认 `full`：
+
+| 故障 | `full`（默认） | `normal` |
 |---|---|---|
 | 进程崩溃 / `kill -9` | 已提交事务全部保留 | 已提交事务全部保留 |
-| 操作系统崩溃 / 断电 | 数据库保持一致，但最近提交的若干事务可能回滚 | 已提交事务持久 |
-| 每次提交的开销 | 不 fsync，只在 checkpoint 时 fsync | 每次提交 fsync WAL |
+| 操作系统崩溃 / 断电 | 已提交事务持久 | 最近提交的若干事务可能回滚。Linux 上数据库保持一致；macOS 上 checkpoint 也只是普通 `fsync`，是否一致要看磁盘有没有打乱写入顺序 |
+| 每次提交的开销 | 每次提交都同步 WAL，macOS 上走 `F_FULLFSYNC` | 不同步，只在 checkpoint 时同步 |
 
-对一个本地运行的 harness 来说，主要威胁是进程崩溃，`NORMAL` 已经足够。断电后丢掉最后几个事务，
-相当于“崩溃点往前挪了几步”，前面那张崩溃推演表依然成立，因为事务边界没有变。
-有一种情况必须警惕：**外部系统已经确认了副作用，而本地 intent 却因断电丢失**。这时恢复流程会把那个调用当成“从未执行”，
-真正去执行一次。防住这种情况的最后一道防线是外部系统按幂等键去重，所以幂等键必须是确定性的（`run_id:call_id`），
-不能是每次执行时随机生成的值。
+默认选 `full`，是因为断电丢掉的最后几个事务里可能有执行前写的 intent。**外部系统已经确认了副作用，本地 intent 却丢了**，
+恢复流程就会把那个调用当成“从未执行”，真正再执行一次。`fullfsync` 是给 macOS 的：那里普通 `fsync` 只把数据交给磁盘，
+不清磁盘的写缓存，要 `F_FULLFSYNC` 才算落盘。其余平台 `fsync` 本身就会下发刷盘命令，这两项不起作用。
+
+这个保证有边界：
+
+- **只覆盖会话库**（`harness.db`）。影子 git 的快照和工作区里的文件都不在保证内：`write`、`edit` 的原子替换保证不出现半截内容，
+  但目录没有 `fsync`，断电后文件可能回到旧内容，这时会话库里记着改过，磁盘上却是旧的；
+- 依赖磁盘如实执行刷盘命令。说谎的盘、掉电不保护的缓存，软件这一层管不了；
+- 不解决“副作用已经发出、结果还没写下”。这一段的 step 停在 `started`，要靠对账和外部系统按幂等键去重，
+  所以幂等键必须是确定性的（`run_id:call_id`），不能是每次执行时随机生成的值。
+
+代价落在提交耗时上。`Store` 的写操作在事件循环线程里同步执行，慢提交会直接卡住 SSE 和审批。
+在一台 Apple M5 Pro 的内置 SSD（APFS）上，`F_FULLFSYNC` 一次约 4ms，`full` 的提交 p50 约 4ms，`normal` 约 0.05ms。
+单个会话按快模型的速度输出时，每轮只慢 15%；4 个会话并发时每轮慢一倍，事件循环最长卡过将近 1 秒。
+这些数字只代表那台机器的那种磁盘，慢磁盘没有测，方法和完整结果见[压测记录](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md)。
+能接受断电丢最后几次提交时，可以写 `durability = "normal"`：它放宽了保证，写在项目配置里要先信任才生效。
 
 另外两处细节：
 
@@ -703,7 +719,7 @@ interrupted → queued 三条由 `_offline_transition()` 写入。`runs.checkpoi
 - 原子边界只有几条：entry 和 head、工具结果和 step 终态各自同事务；intent 必须在副作用之前单独提交；状态迁移用单语句 CAS；
   离线事件的序号在事务内分配；工作区文件用临时文件 + `os.replace` 原子替换；
 - 事件不领先持久化：先写 entries，再发事件。事件丢了可以补，反过来就会出现两份对不上的“事实”；
-- SQLite WAL + `NORMAL` 防得住进程崩溃，防不住断电，最后一道防线是外部系统按确定性幂等键去重。
+- 会话库默认按断电耐久落盘（`durability = "full"`），`normal` 是退路。影子 git 和工作区文件不在这个保证内，副作用的最后一道防线仍是外部系统按确定性幂等键去重。
 
 **延伸思考**
 

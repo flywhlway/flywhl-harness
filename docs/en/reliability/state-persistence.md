@@ -10,7 +10,7 @@ Putting everything in one table fails because the pieces have different write ra
 
 ## How it works
 
-State is split by the question it answers, in one SQLite file (WAL mode, `synchronous=NORMAL`) with seven tables:
+State is split by the question it answers, in one SQLite file (WAL mode, `durability = "full"` by default) with seven tables:
 
 | Table | Answers | Mutability |
 |---|---|---|
@@ -34,7 +34,11 @@ The granularity runs Session, Run, Step, Event. Unlike a generic workflow engine
 
 **Events never lead persistence.** `AgentLoop._append` stores the entry, then emits `message_end`. The reverse order could show the user a statement that recovery cannot find. Streaming deltas (`message_update`, `tool_update`) are buffered and flushed in batches of 64 or after 50 ms, inside one transaction per batch, because autocommit would otherwise cost one WAL commit per row.
 
-**Durability limit.** WAL with `NORMAL` survives a process crash. After power loss the last few transactions may roll back. If an external system already confirmed a side effect whose intent row was lost, only a deterministic idempotency key lets that system deduplicate the retry.
+**Durability limit.** Both settings survive a process crash. The default `durability = "full"` sets `synchronous=FULL`, `fullfsync` and `checkpoint_fullfsync`, so a committed transaction also survives power loss, provided the disk honours the flush. `fullfsync` matters on macOS, where a plain `fsync` leaves data in the drive's write cache; it has no effect elsewhere. `durability = "normal"` (`synchronous=NORMAL`) may roll back the last few transactions after power loss, possibly including an intent row. Recovery then sees no record and a non-idempotent call runs again. On Linux the database stays consistent; on macOS checkpoints use a plain `fsync` too, so consistency depends on the disk not reordering writes. It relaxes the guarantee, so a project config needs trust before it takes effect.
+
+The guarantee covers the session database (`harness.db`) only. Shadow git snapshots and workspace files are outside it: atomic replace prevents half-written files, but the directory is not fsynced, so a file can revert to its old content after power loss. Nor does it close the gap between sending a side effect and recording the result. A deterministic idempotency key is still the last line of defence.
+
+The cost lands on commit latency. `Store` writes synchronously on the event loop thread, so a slow commit stalls SSE and approvals. On one Apple M5 Pro internal SSD (APFS), `F_FULLFSYNC` takes about 4 ms, so a `full` commit has a p50 near 4 ms against about 0.05 ms for `normal`. One session streaming at a fast model's pace is 15% slower per turn. Four concurrent sessions take about twice as long per turn, and the event loop stalled for close to a second at worst. These numbers describe that machine and disk only, and slow disks were not measured. See the [measurements](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md).
 
 ## Key code
 
