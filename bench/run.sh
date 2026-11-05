@@ -31,7 +31,9 @@ envs=()
 git archive --format=tar.gz HEAD | docker build -q -t "$tag" -f bench/Dockerfile \
   --build-arg "BENCH_COMMIT=$commit" --build-arg "BENCH_SPEC=$spec" - >/dev/null
 
-docker network inspect flywhl-bench >/dev/null 2>&1 || docker network create flywhl-bench >/dev/null   # 和本机别的容器隔开
+# 和本机别的容器隔开。本机网络多时默认地址池会用完，这时用固定网段
+docker network inspect flywhl-bench >/dev/null 2>&1 || docker network create flywhl-bench >/dev/null 2>&1 \
+  || docker network create --subnet "${BENCH_SUBNET:-10.250.87.0/24}" flywhl-bench >/dev/null
 
 code=0
 if docker container inspect "$name" >/dev/null 2>&1; then
