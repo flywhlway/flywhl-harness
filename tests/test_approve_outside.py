@@ -144,6 +144,7 @@ async def test_every_segment_has_to_match(ws, command):
     ("git push > notes.txt", "重定向"),
     ("git push >> ../outside.txt", "重定向"),
     ("git push &> notes.txt", "重定向"),
+    ("git push origin .flywhl/refs", "托管基线"),   # 模式匹配得上，也不能盖过托管基线的确认要求
 ])
 def test_commands_the_pattern_cannot_vouch_for_are_refused(ws, command, why):
     from flywhl_harness.runtime.workspace import Workspace
