@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
+import logging
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -53,6 +53,8 @@ from .session import SessionLog
 from .state import ACTIVE, IllegalTransition, RunStateMachine, RunStatus, TERMINAL, TransitionConflict
 from .store import RunRecord, SessionRecord, Store
 from .workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 _CLOSED = object()   # 枢纽关闭：Run 结束
 _LAGGED = object()   # 订阅者太慢被踢下线：需要从数据库补齐后重新订阅
@@ -198,6 +200,7 @@ class Harness:
         self.state = RunStateMachine(self.store)
         self.worker_id = worker_id or f"w{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self._active: dict[str, ActiveRun] = {}
+        self._winding_down: dict[str, asyncio.Task] = {}   # 事件流已关闭、run_end hook 还在跑的 Run
         self._workspaces: dict[str, Workspace] = {}
         self._mcp: list[Any] = []
 
@@ -224,7 +227,7 @@ class Harness:
             if a.rc.role == "main":
                 a.rc.state["paused_by"] = "shutdown"
                 a.rc.pause_requested = True
-        tasks = [a.task for a in self._active.values() if a.task is not None]
+        tasks = [a.task for a in self._active.values() if a.task is not None] + list(self._winding_down.values())
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=grace)
             for t in pending:
@@ -402,18 +405,30 @@ class Harness:
         finally:
             hb.cancel()
             a.hub.close()
+            run_end = self.hooks.has(HookEvent.RUN_END) and not a.fenced
+            if run_end and a.task is not None:    # wait() 和 aclose() 要等它：CLI 跑完就退出，hook 不能被半路取消
+                self._winding_down[a.run_id] = a.task
             self._active.pop(a.run_id, None)
-            if self.hooks.has(HookEvent.RUN_END) and not a.fenced:
+            if run_end:
                 with contextlib.suppress(Exception):
                     out = await self.hooks.run(HookEvent.RUN_END, HookInput(event=HookEvent.RUN_END, run_id=a.run_id,
                                                                             session_id=a.session_id, context=rc))
                     self._hook_warnings(a.run_id, out.warnings)  # 事件枢纽已关闭：直接追加
+                self._winding_down.pop(a.run_id, None)
 
     async def _finish(self, a: ActiveRun) -> None:
+        run = self.store.get_run(a.run_id)
+        # 心跳每隔几秒才查一次，这之间跑完的 Loop 也不能改写新主人的 Run。子 Run 没有自己的任务，也不会被别的 Worker 接管
+        if a.task is not None and self._lease_lost(run):
+            return self._fence(a, "租约丢失：Run 已被其它 Worker 接管")
         a.finishing = True
         out = a.loop.outcome
-        assert out is not None
+        assert out is not None and run is not None
         rc = a.rc
+        cur, target = RunStatus(run.status), RunStatus(out.status)
+        if cur == RunStatus.CANCELLING and target != RunStatus.CANCELLED:
+            # 取消请求已先一步通过 CAS 占位：即使 Loop 恰好完成，最终状态也以取消为准（先到者胜出）
+            target, out.reason, out.by = RunStatus.CANCELLED, f"取消请求先于完成到达（Loop 结果：{out.status}）", rc.cancel.by
         pending = rc.inbox.pending()
         if pending["steer"] or pending["follow_up"]:
             if out.status == "paused":
@@ -424,11 +439,6 @@ class Harness:
         result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns, "by": out.by}
         self._checkpoint(a, paused=out.status == "paused")
         self.store.update_run(a.run_id, usage=rc.run_usage.to_dict(), result=result, error=out.error)
-        cur = RunStatus(self.store.get_run(a.run_id).status)  # type: ignore[union-attr]
-        target = RunStatus(out.status)
-        if cur == RunStatus.CANCELLING and target != RunStatus.CANCELLED:
-            # 取消请求已先一步通过 CAS 占位：即使 Loop 恰好完成，最终状态也以取消为准（先到者胜出）
-            target, out.reason = RunStatus.CANCELLED, f"取消请求先于完成到达（Loop 结果：{out.status}）"
         if target == RunStatus.CANCELLED:
             if cur in (RunStatus.RUNNING, RunStatus.WAITING_HUMAN):
                 self._transition(a, RunStatus.CANCELLING, out.reason)
@@ -459,14 +469,16 @@ class Harness:
         with contextlib.suppress(Exception):  # 取消可能已经抢先迁移到 cancelling：以先到者为准
             self._transition(a, RunStatus(to), reason)
 
+    def _lease_lost(self, run: RunRecord | None) -> bool:
+        return run is None or (run.status not in ACTIVE and run.status != RunStatus.QUEUED) \
+            or bool(run.worker_id and run.worker_id != self.worker_id)
+
     async def _heartbeat(self, a: ActiveRun) -> None:
         while True:
             if a.finishing:
                 return
-            cur = self.store.get_run(a.run_id)
-            if cur is not None and (cur.status not in ACTIVE and cur.status != RunStatus.QUEUED
-                                    or (cur.worker_id and cur.worker_id != self.worker_id)):
-                # 租约已丢失（例如本进程假死期间被别的 Worker 接管）：自我 fencing
+            if self._lease_lost(self.store.get_run(a.run_id)):
+                # 例如本进程假死期间被别的 Worker 接管：自我 fencing
                 return self._fence(a, "租约丢失：Run 已被其它 Worker 接管")
             if not self.store.heartbeat(a.run_id, self.worker_id):
                 return self._fence(a, "租约丢失：续租失败")
@@ -592,8 +604,9 @@ class Harness:
 
     async def wait(self, run_id: str) -> RunRecord:
         a = self._active.get(run_id)
-        if a is not None and a.task is not None:
-            await asyncio.wait({a.task})  # 不会因为任务被取消（例如 fencing）而抛出
+        task = a.task if a is not None else self._winding_down.get(run_id)
+        if task is not None:
+            await asyncio.wait({task})  # 不会因为任务被取消（例如 fencing）而抛出
         return self.store.get_run(run_id)  # type: ignore[return-value]
 
     # ================================================================== 崩溃恢复
@@ -612,21 +625,25 @@ class Harness:
                                                  expect_version=run.version)
                     self._offline_transition(run.id, RunStatus.CANCELLED, "子代理由父 Run 重新派生")
                     self._pair_dangling_offline(run, "已取消：父 Run 中断，子代理将重新派生")
+                    self._expire_approvals(run.id)
                     continue
                 if run.status == RunStatus.CANCELLING:
                     self._offline_transition(run.id, RunStatus.CANCELLED, "恢复时完成取消", expect_version=run.version)
                     self._pair_dangling_offline(run, "已取消（进程在取消过程中中断）")
+                    self._expire_approvals(run.id)
                     continue
                 # 钉住扫描时看到的版本：扫描之后若已被别的 Worker 接管（版本变了），这里的 CAS 必然失败
                 self._offline_transition(run.id, RunStatus.INTERRUPTED, f"Worker {run.worker_id} 心跳超时",
                                          expect_version=run.version)
-                for ap in self.store.list_approvals("pending", run.id):
-                    self.store.resolve_approval(ap.id, "expired", decided_by="system:recover", reason="进程中断")
-            except Exception:
-                continue  # 被别的 Worker 抢先接管（CAS 失败）
+                self._expire_approvals(run.id)
+                if auto_resume:
+                    await self.resume(run.id)
+            except Exception as e:
+                # 被别的 Worker 抢先接管（CAS 失败），或者这个会话还有任务在跑：不能让一个 Run 挡住后面的接管。
+                # 没恢复起来的 Run 停在 interrupted，可以手动恢复
+                log.warning("Run %s 没有接管成功：%s", run.id, e)
+                continue
             recovered.append(run.id)
-            if auto_resume:
-                await self.resume(run.id)
         # queued 孤儿：创建后、开始执行前进程就退出了；关闭服务时被暂停的 Run：重启后自动继续
         for run in self.store.runs_with_status(RunStatus.QUEUED, RunStatus.PAUSED):
             if run.id in self._active or run.parent_run_id or run.id in recovered:
@@ -635,18 +652,24 @@ class Harness:
             try:
                 if run.status == RunStatus.QUEUED and idle > self.config.stale_after_seconds:
                     s = self._session(run.session_id)
+                    if self.active_run_of(s.id) is not None:    # 两个 Loop 不能写同一个会话日志：等下一轮
+                        continue
                     started = any(e.run_id == run.id for e in self.store.path(s.id))
-                    recovered.append(run.id)
                     if auto_resume:
                         self._launch(run, s, prompt=None if started else run.prompt, resume=started,
                                      resume_note=self._resume_note(run, s) if started else None)
-                elif run.status == RunStatus.PAUSED and (run.checkpoint or {}).get("paused_by") == "shutdown":
                     recovered.append(run.id)
+                elif run.status == RunStatus.PAUSED and (run.checkpoint or {}).get("paused_by") == "shutdown":
                     if auto_resume:
                         await self.resume(run.id)
-            except Exception:
-                continue
+                    recovered.append(run.id)
+            except Exception as e:
+                log.warning("Run %s 没有接管成功：%s", run.id, e)
         return recovered
+
+    def _expire_approvals(self, run_id: str) -> None:
+        for ap in self.store.list_approvals("pending", run_id):
+            self.store.resolve_approval(ap.id, "expired", decided_by="system:recover", reason="进程中断")
 
     async def recovery_loop(self, interval: float | None = None) -> None:
         """周期性接管：不只在启动时恢复一次——崩溃的 Worker 心跳要等一会儿才会过期。"""
@@ -841,5 +864,3 @@ def _no_verify(cfg: HarnessConfig) -> HarnessConfig:
     return replace(cfg, verify_command=None)
 
 
-def dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, default=str)

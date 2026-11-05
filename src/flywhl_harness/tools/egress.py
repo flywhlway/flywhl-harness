@@ -220,7 +220,7 @@ class EgressProxy:
                 self._refuse(host, port)
                 return await _reply(writer, 403, str(e))
             except (OSError, asyncio.TimeoutError) as e:
-                return await _reply(writer, 502, f"解析 {host} 失败：{e or type(e).__name__}")
+                return await _reply(writer, 502, f"解析 {host} 失败：{str(e) or type(e).__name__}")
             error: BaseException | None = None
             for ip in ips:   # 连接用的是核过的 IP，不再按名字解析一次
                 try:

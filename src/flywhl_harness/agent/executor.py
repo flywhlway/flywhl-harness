@@ -115,9 +115,9 @@ class ToolExecutor:
                 reason = rc.cancel.reason or "运行已终止"
                 for p in ([] if abrupt else prepared):
                     if p.call.id not in persisted:
-                        if p.call.id not in results:
-                            results[p.call.id] = self._result_msg(p.call, ToolResult.error(f"未执行：{reason}"), "skipped", 0, None)
                         try:
+                            if p.call.id not in results:
+                                results[p.call.id] = self._no_result(p.call, reason)
                             persist(p)
                         except Exception:  # pragma: no cover - 存储故障时只能放弃
                             pass
@@ -136,6 +136,14 @@ class ToolExecutor:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+    def _no_result(self, call: ToolCall, reason: str) -> Message:
+        """调用没拿到结果就结束时的补位。intent 已经写下的调用可能生效过，不能告诉模型“未执行”，它会照着重试。"""
+        step = self.rc.store.get_step(self.rc.run_id, call.id)
+        if step is not None and step.status == "started" and step.effect != str(Effect.READ):
+            return self._result_msg(call, ToolResult.error(f"结果未知：{reason}。这次调用可能已经生效，请先核实外部状态，不要直接重试。"),
+                                    "unknown", 0, None)
+        return self._result_msg(call, ToolResult.error(f"未执行：{reason}"), "skipped", 0, None)
 
     # ================================================================== 预处理
     def _prepare(self, call: ToolCall) -> Prepared:
@@ -174,7 +182,11 @@ class ToolExecutor:
         if recovering:
             step = rc.store.get_step(rc.run_id, call.id)
             if step is not None and step.status == "started":
-                rec = await tool.reconcile(args, ctx)
+                try:
+                    rec = await tool.reconcile(args, ctx)
+                except Exception as e:   # 查询外部状态本身失败：结果仍然未知，不能往下走重新执行
+                    return done(ToolResult.error(f"上次执行在进程中断时结果未知，对账也失败了（{type(e).__name__}: {e}）。"
+                                                 f"请先核实外部状态，不要盲目重试。幂等键：{ctx.idempotency_key}"), "unknown")
                 if rec is not None:
                     return done(rec, "reconciled")
                 if not (effect == Effect.READ or tool.idempotent):
