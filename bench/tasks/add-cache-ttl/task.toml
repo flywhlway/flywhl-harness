@@ -1,0 +1,11 @@
+id = "add-cache-ttl"
+title = "给缓存加过期时间"
+category = "feature"
+prompt = """
+给 cache.py 的 Cache 加过期功能：
+- 新增构造参数 ttl（秒，None 表示不过期，默认 None）和 clock（返回当前时间的函数，默认 time.monotonic，测试时可以注入）；
+- 从写入算起满 ttl 秒就过期，正好 ttl 秒时已经过期；再次 set 同一个键重新计时，get 不续期；
+- 过期之后 get 返回 default；
+- 新增 purge()：删除所有已过期的条目，返回删除的条数。
+现有的用法和测试都要继续工作。
+"""

@@ -1,0 +1,9 @@
+id = "add-rate-limiter"
+title = "实现令牌桶限流"
+category = "feature"
+prompt = """
+limiter.py 里的 TokenBucket 还是空壳，只写了文档字符串，把它实现出来：
+- 构造参数是 capacity、rate（每秒补充的令牌数）和 clock（返回当前秒数的函数，默认 time.monotonic，测试时可以注入）；
+- 刚创建时桶是满的，令牌随时间连续补充，可以有小数，不会超过 capacity；
+- allow(n=1)：令牌够 n 个就扣掉并返回 True，不够就不扣，返回 False。
+"""

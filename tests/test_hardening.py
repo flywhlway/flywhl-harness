@@ -248,6 +248,79 @@ def test_existing_git_config_env_is_preserved(monkeypatch):
     assert env["GIT_CONFIG_KEY_1"] == "core.fsmonitor"
 
 
+def _git_status(path) -> list[str]:
+    out = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=path, check=True, capture_output=True, text=True)
+    return [line[3:] for line in out.stdout.splitlines()]
+
+
+def test_data_dir_stays_out_of_git(tmp_path):
+    """数据目录在工作区里，里面是会话库。不忽略的话工作区永远不干净，git add -A 还会把它带进仓库。"""
+    from flywhl_harness import HarnessConfig
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    data = HarnessConfig(workspace=str(tmp_path)).data_path()
+    for name in ("harness.db", "harness.db-wal", "shadow.git/HEAD", "shadow-ab12.git/HEAD", "server_token", "future-file"):
+        (data / name).parent.mkdir(exist_ok=True)
+        (data / name).write_text("sentinel", encoding="utf-8")
+    assert _git_status(tmp_path) == []
+
+
+def test_user_files_in_the_data_dir_stay_trackable(tmp_path):
+    """目录早就有了也要忽略会话库；用户自己的配置和技能不能跟着被藏起来。"""
+    from flywhl_harness import HarnessConfig
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".flywhl" / "skills" / "x").mkdir(parents=True)
+    (tmp_path / ".flywhl" / "config.toml").write_text("", encoding="utf-8")
+    (tmp_path / ".flywhl" / "skills" / "x" / "SKILL.md").write_text("", encoding="utf-8")
+    data = HarnessConfig(workspace=str(tmp_path)).data_path()
+    (data / "harness.db").write_text("sentinel", encoding="utf-8")
+    assert sorted(_git_status(tmp_path)) == [".flywhl/config.toml", ".flywhl/skills/x/SKILL.md"]
+
+
+def test_ignore_file_is_not_written_through_a_dangling_symlink(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    target = tmp_path / "outside"
+    (tmp_path / "ws" / ".flywhl").mkdir(parents=True)
+    (tmp_path / "ws" / ".flywhl" / ".gitignore").symlink_to(target)
+    HarnessConfig(workspace=str(tmp_path / "ws")).data_path()
+    assert not target.exists()
+
+
+def test_ignore_file_is_not_written_into_a_symlinked_data_dir(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".flywhl").symlink_to(outside)
+    HarnessConfig(workspace=str(tmp_path / "ws")).data_path()
+    assert list(outside.iterdir()) == []
+
+
+def test_existing_ignore_file_in_the_data_dir_is_left_alone(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    (tmp_path / ".flywhl").mkdir()
+    (tmp_path / ".flywhl" / ".gitignore").write_text("mine\n", encoding="utf-8")
+    HarnessConfig(workspace=str(tmp_path)).data_path()
+    assert (tmp_path / ".flywhl" / ".gitignore").read_text(encoding="utf-8") == "mine\n"
+
+
+def test_git_author_identity_survives_the_secret_filter(monkeypatch):
+    """名字里的 AUTH 撞上了密钥规则。删掉它们之后，靠环境变量配身份的提交会报身份未知。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "someone")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "someone@example.invalid")
+    monkeypatch.setenv("GIT_AUTH_TOKEN", "sentinel")
+    monkeypatch.setenv("GITHUB_AUTH", "sentinel")
+    env = _clean_env(True)
+    assert env["GIT_AUTHOR_NAME"] == "someone" and env["GIT_AUTHOR_EMAIL"] == "someone@example.invalid"
+    assert "GIT_AUTH_TOKEN" not in env and "GITHUB_AUTH" not in env
+
+
 @pytest.mark.parametrize("config,flagged", [
     ('[filter "x"]\n\tclean = touch pwned\n', True),
     ('[diff "y"]\n\ttextconv = sh -c id\n', True),

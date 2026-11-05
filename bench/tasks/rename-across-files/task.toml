@@ -1,0 +1,7 @@
+id = "rename-across-files"
+title = "跨文件重命名函数"
+category = "refactor"
+prompt = """
+把 pricing.py 里的 calc_total 改名为 compute_total。项目里所有用到它的地方都要跟着改，文档也一样，改完不留旧名字，也不留别名。
+只改这一个名字，名字相近的其他函数不要动。`python3 main.py` 的输出不能变。
+"""

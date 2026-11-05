@@ -127,7 +127,7 @@ flywhl-harness 的分工与此一一对应：**harness 负责“至少一次”*
 task.cancel()
 with contextlib.suppress(asyncio.CancelledError, Exception):
     await task
-if tool.effect_for(args) == Effect.EXTERNAL and not tool.idempotent:
+if tool.effect_in(args, self._root) == Effect.EXTERNAL and not tool.idempotent:
     # 外部副作用超时 ≠ 没发生：请求可能已经被对方处理，只是响应没回来
     return ToolResult.error(
         f"工具执行超时（{timeout:.0f}s），结果未知：请求可能已经生效（幂等键 {ctx.idempotency_key}）。"
@@ -150,7 +150,7 @@ bash 是 `manages_timeout=True` 的工具：它在自己的超时到点时杀掉
 ```python
 if task in done:
     r = task.result()
-    if (r.details or {}).get("timed_out") and tool.effect_for(args) == Effect.EXTERNAL and not tool.idempotent:
+    if (r.details or {}).get("timed_out") and tool.effect_in(args, self._root) == Effect.EXTERNAL and not tool.idempotent:
         # 工具自己管理超时（bash）时也一样：外部命令（git push、curl -X POST）超时 ≠ 没发生
         return ToolResult(f"{r.content}\n[结果未知：命令可能已经对外部系统生效（幂等键 {ctx.idempotency_key}）。"
                           "请先核实外部状态，不要直接重试。]", True, r.details, r.tainted), "unknown"

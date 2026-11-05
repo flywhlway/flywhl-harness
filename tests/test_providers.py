@@ -173,6 +173,7 @@ async def test_mid_stream_error_and_insufficient_resource():
     ("deepseek_bad_key", ErrorKind.AUTH),
     ("dashscope_model_not_found", ErrorKind.NOT_FOUND),
     ("kimi_bad_model", ErrorKind.NOT_FOUND),
+    ("openrouter_bad_model", ErrorKind.NOT_FOUND),      # OpenRouter 同样用 400，不识别的话降级链不接手
     ("zhipu_insufficient_balance", ErrorKind.BILLING),  # 智谱把余额不足包装成 429：不能当限流去重试
     ("kimi_context_overflow", ErrorKind.CONTEXT_OVERFLOW),
 ])
@@ -181,6 +182,14 @@ def test_recorded_errors_are_classified(label, kind):
     err = classify_http_error(e["status"], e["body"])
     assert err.kind == kind
     assert err.retryable is (kind in (ErrorKind.RATE_LIMIT,))
+
+
+def test_claude_through_openrouter_asks_for_caching():
+    """实测：不带标记时缓存命中一直是 0，带上之后第二次起命中。其他模型由服务端自动缓存，不发多余的字段。"""
+    p = OpenAICompatProvider(api_key="test", profile="openrouter")
+    claude = p._payload(ModelRequest(model="anthropic/claude-haiku-5.5", system="s", messages=[]))
+    other = p._payload(ModelRequest(model="deepseek/deepseek-v4.1-flash", system="s", messages=[]))
+    assert claude["cache_control"] == {"type": "ephemeral"} and "cache_control" not in other
 
 
 async def test_http_error_from_stream_endpoint():

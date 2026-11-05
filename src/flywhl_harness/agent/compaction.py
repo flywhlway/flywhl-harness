@@ -111,6 +111,11 @@ class CompactionResult:
     usage: Usage | None = None   # 摘要调用本身的用量：同样要计入预算与成本
 
 
+def _is_summary(text: str) -> bool:
+    """模板要求分小节输出。模型偶尔不做摘要、接着对话往下说（“我来读取 log2.txt”），这样的文本存下来，之前的事实就全丢了。"""
+    return sum(line.lstrip().startswith("#") for line in text.splitlines()) >= 2
+
+
 class Compactor:
     def __init__(self, provider: Provider, model: str, cfg: ContextConfig, max_summary_tokens: int = 2048):
         self.provider = provider
@@ -150,14 +155,16 @@ class Compactor:
             out = await self.provider.complete(req, cancel)
             usage = out.usage
             summary = out.text.strip()
-            if not summary:
-                raise ValueError("摘要为空")
+            if not _is_summary(summary):
+                raise ValueError(f"模型输出的不是摘要：{summary[:80]!r}")
         except Exception as e:  # 取消要向上传播；其它失败退化为确定性摘要
             from ..cancel import RunCancelled
 
             if isinstance(e, RunCancelled):
                 raise
             summary, used_fallback = deterministic_summary(req), True
+            if prev.get("summary"):   # 确定性摘要只抽取这一段对话，不带上上次的摘要，之前压缩保留下来的事实就丢了
+                summary = f"{clip(prev['summary'], self.max_summary_tokens * 4)}\n\n# 这一段的进展（模型摘要不可用，由程序抽取）\n{summary}"
 
         read, modified = extract_file_ops(to_sum)
         read |= set(prev.get("read_files", []))

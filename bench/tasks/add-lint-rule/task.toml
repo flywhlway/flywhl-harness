@@ -1,0 +1,10 @@
+id = "add-lint-rule"
+title = "给 linter 加行尾空白规则"
+category = "feature"
+prompt = """
+这是个小 linter，lint.py 是入口，rules/ 下每个文件一条规则，现在只有 W001（行太长）。
+按同样的方式加一条规则 W002，放在 rules/trailing_space.py：
+- 报告行尾的空白，也就是换行符之前的空格和制表符；只有换行符的空行不算；
+- 消息写 `trailing whitespace`，输出格式和 W001 一致，列号指向这段空白开始的位置。
+跑 `python3 lint.py 文件` 时新规则要生效。
+"""

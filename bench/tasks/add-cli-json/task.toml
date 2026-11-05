@@ -1,0 +1,9 @@
+id = "add-cli-json"
+title = "给 wordcount 加 --json 输出"
+category = "feature"
+prompt = """
+wordcount.py 是个小工具，打印文件的行数、词数和字节数。给它加一个 --json 选项，方便脚本调用：
+- 加了这个选项时只输出一行 JSON，键是 lines、words、bytes、file，file 就是命令行上给的文件名；
+- 不加这个选项时输出保持原样。
+数字的统计口径和现在一样。
+"""

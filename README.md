@@ -2,6 +2,8 @@
 
 [![tests](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/flywhlway/flywhl-harness/actions/workflows/tests.yml)
 
+简体中文 | [English](README.en.md)
+
 > **Agent = Model + Harness.** 模型负责“想”，harness 负责其余的一切。
 
 一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 1.5 万行（其中大量是中文注释），
@@ -30,11 +32,14 @@
 
 ## 三分钟上手
 
-```bash
-cd flywhl-harness
-uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv && pip install -e ".[dev,anthropic]"
+需要 Python 3.11+，支持 macOS 和 Linux。Linux 上要先装 [bubblewrap](https://github.com/containers/bubblewrap)（`sudo apt install bubblewrap`）：
+bash 工具默认在系统沙箱里运行，没有沙箱时拒绝执行，不会退回沙箱外。
 
-.venv/bin/flywhl serve -w playground                # 打开终端打印的带令牌链接
+```bash
+pipx install flywhl-harness      # 或 uv tool install flywhl-harness
+
+mkdir agent-demo
+flywhl serve -w agent-demo       # 打开终端打印的带令牌链接
 ```
 
 访问令牌默认开启：首次启动生成并保存到 `~/.flywhl/server_token`（权限 0600）。链接里的令牌在首次访问时换成 Cookie，之后用书签直接打开，重启服务也不失效。
@@ -49,11 +54,24 @@ uv venv && uv pip install -e ".[dev,anthropic]"     # 或 python -m venv .venv &
 接入真实模型（默认 `deepseek:deepseek-flash`）：
 
 ```bash
-cp .env.example .env                 # 填入密钥；flywhl 启动时从当前目录的 .env 读取密钥与模型选择
-.venv/bin/flywhl doctor              # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
-.venv/bin/flywhl serve -w playground # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
-.venv/bin/flywhl chat --model kimi:kimi-k2.6                 # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、
-                                                             # anthropic:claude-opus-5-5、ollama:qwen3.5:9b-mlx
+cd agent-demo
+export DEEPSEEK_API_KEY=sk-...       # 也可以写进启动目录的 .env
+flywhl doctor                        # 对每个配置了密钥的供应商跑一次流式文本 + 工具往返
+flywhl serve -w .                    # 有 DEEPSEEK_API_KEY 时 auto 模式即用 deepseek:deepseek-flash
+flywhl chat --model kimi:kimi-k2.6   # 其它写法：dashscope:qwen3.8-flash、minimax:MiniMax-M2.7、ollama:qwen3.5:9b-mlx
+```
+
+Anthropic 官方 SDK 是可选依赖：`pipx install 'flywhl-harness[anthropic]'`，之后用 `--model anthropic:claude-opus-5-5`。
+
+网络默认只放行白名单，模型要装包时把主机加进去，比如 `--net-allow pypi.org --net-allow files.pythonhosted.org`。
+升级前看 [CHANGELOG](CHANGELOG.md) 的“行为变化”。
+
+想读代码、跑示例和测试，就克隆仓库：
+
+```bash
+git clone https://github.com/flywhlway/flywhl-harness && cd flywhl-harness
+uv sync --all-extras                 # 或 python -m venv .venv && .venv/bin/pip install -e ".[dev,anthropic]"
+.venv/bin/flywhl serve -w playground
 ```
 
 ## 命令行
@@ -102,6 +120,8 @@ asyncio.run(main())
 
 ## 示例（全部无需 API Key）
 
+示例不在 wheel 里，要先克隆仓库。
+
 | 示例 | 演示 |
 |---|---|
 | `examples/01_minimal_loop.py` | 自定义工具、并行只读调用、五种异常都变成模型可读的错误 |
@@ -118,7 +138,7 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/11_kill9_cli_recover.py
-.venv/bin/python -m pytest -q          # 687 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python -m pytest -q          # 726 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
 
 `examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
@@ -145,12 +165,12 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 读不到真实家目录，原因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
 要看覆盖率：`FLYWHL_COVERAGE=1 .venv/bin/python -m pytest -q`，再运行 `.venv/bin/python -m coverage report`。
 
-2026-11-04 的复现结果：
+2026-11-05 的复现结果（候选版本 0.2.0）：
 
 | 环境 | 离线用例 | 系统沙箱用例 |
 |---|---|---|
-| macOS，Python 3.12.13 | 724 项通过 | 26 项通过，7 项跳过（6 项 Linux 专用，1 项只在 CI 上要求） |
-| 一次性 Linux 容器 | 720 项通过，4 项跳过 | 21 项通过，12 项 macOS 专用的跳过 |
+| macOS，Python 3.12.13 | 726 项通过 | 27 项通过，6 项 Linux 专用的跳过 |
+| 一次性 Linux 容器，Python 3.12 | 723 项通过，3 项跳过 | 21 项通过，12 项 macOS 专用的跳过 |
 
 干净安装验收（`scripts/sandbox_acceptance.py`：装 wheel、不写配置）在这两个环境都是 23 项通过。
 
@@ -166,11 +186,14 @@ Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算
 FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
 ```
 
+2026-11-05，候选版本 0.2.0 上 33 个用例全部通过（约 28 万 token、0.04 美元），记录见[发布门禁](docs/quality-audit/evidence/release-gate-0.2.0.md)。
 2026-10-16 复现：33 个用例全部通过（约 34 万 token、0.05 美元）。此前本机记录的 30 个失败逐项排查过：
 缺密钥 0 个（没有密钥只会跳过，不会失败）；当时的运行环境问题 29 个（同样的密钥重跑即通过）；真实缺陷 1 个。
 复跑过程中 plan 模式用例又暴露出第 2 个真实缺陷。两个缺陷都与 plan 模式有关：执行器记录的副作用等级没带工作区；
 规则命中后不再受 plan 模式约束，自动审批时能在规划阶段执行写操作。两个都已修复，并补了离线回归测试。
 需要哪些密钥、分类明细见 [tests/live/README.md](tests/live/README.md)。
+
+公开基准的第一次结果见[基准概览](docs/benchmark/index.md)：5 家模型、30 个小任务，绑定一个提交。它是 harness 机制的证据，不代表真实工作中的任务成功率。
 
 ## 教程
 

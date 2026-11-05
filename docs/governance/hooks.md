@@ -366,8 +366,8 @@ flowchart LR
 1. **fail-open 会把 hook 路径上的任何 bug 变成静默绕过。** 拦截逻辑写得再对，序列化崩了一样放行。
 2. **测试必须走真实调用路径。** 修复后加了回归测试 `test_command_hook_with_runtime_context_blocks`：用 bypass 模式跑一个完整 Run，
    断言 `rm -f x` 被命令 hook 拦下、`status == "denied"`。
-3. **默认值很重要。** `config.py` 里 `HookConfig.fail_closed` 的默认值是 `False`，从 `flywhl.toml` 的 `[[hooks]]` 注册的拦截脚本
-   如果忘了写 `fail_closed = true`，就会重演这个事故。
+3. **默认值很重要。** 事故时 `HookConfig.fail_closed` 默认 `False`，从 `flywhl.toml` 的 `[[hooks]]` 注册的拦截脚本忘了写 `fail_closed = true`，
+   就会重演这个事故。现在默认是 `None`，`pre_tool_use` 事件按 fail-closed 处理，其余事件 fail-open，要改就显式写。
 
 ## 超时
 

@@ -501,7 +501,7 @@ while True:
         return await self._race(tool, args, ctx, timeout)
     except TransientToolError as e:
         attempt += 1
-        retryable = tool.effect_for(args) == Effect.READ or tool.idempotent
+        retryable = tool.effect_in(args, self._root) == Effect.READ or tool.idempotent
         delay = 0.2 * 2 ** attempt
         left_now = rc.budget.deadline_left()
         if retryable and attempt < 3 and (left_now is None or left_now > delay + 1):

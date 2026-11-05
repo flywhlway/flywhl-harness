@@ -5,27 +5,31 @@
 
 ## 安装
 
-需要 Python 3.11+。推荐用 [uv](https://docs.astral.sh/uv/)：
+需要 Python 3.11+，支持 macOS 和 Linux：
 
 ```bash
-cd flywhl-harness
-uv venv
-uv pip install -e ".[dev,anthropic]"
+pipx install flywhl-harness      # 或 uv tool install flywhl-harness
 ```
 
-不用 uv 也可以：
+Linux 上还要有 [bubblewrap](https://github.com/containers/bubblewrap)（`sudo apt install bubblewrap`）。bash 工具默认在系统沙箱里运行，
+没有沙箱时拒绝执行，不会退回沙箱外，详见 [18 章](/governance/workspace-sandbox)。
+
+`anthropic` extra 只在使用 Anthropic provider 时需要（`pipx install 'flywhl-harness[anthropic]'`）；核心包只依赖 `httpx`，Web 层依赖 `fastapi` 与 `uvicorn`。
+
+本教程后面要读代码、跑示例，需要克隆仓库：
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[dev,anthropic]"
+git clone https://github.com/flywhlway/flywhl-harness && cd flywhl-harness
+uv sync --all-extras             # 或 python -m venv .venv && .venv/bin/pip install -e ".[dev,anthropic]"
 ```
 
-`anthropic` extra 只在使用 Anthropic provider 时需要；核心包只依赖 `httpx`，Web 层依赖 `fastapi` 与 `uvicorn`。
+下文的 `playground` 是仓库里的演示工作区；只用 pip 安装时，换成任意一个空目录即可。
 
 ## 启动 Web UI
 
 ```bash
-.venv/bin/flywhl serve -w playground
+mkdir agent-demo
+flywhl serve -w agent-demo       # 在克隆的仓库里：.venv/bin/flywhl serve -w playground
 ```
 
 打开终端打印的带令牌链接（`http://127.0.0.1:8765/?token=…`），之后同一浏览器直接访问 `http://127.0.0.1:8765` 即可。

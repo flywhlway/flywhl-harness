@@ -1,0 +1,13 @@
+id = "repo-resolve-conflict"
+title = "合并 feature 并解决配置冲突"
+category = "repo"
+git = true
+prompt = """
+把 feature 分支合并到 main，要一个正常的合并提交，不要 rebase 也不要 squash。settings.py 会冲突，按这个规则解决：
+
+- ALLOWED_ORIGINS：两边新加的都留下，整个列表按字母序排
+- 只有一边改过或加过的配置，保留改过的那一边
+- 两边都改了的 TIMEOUT_SECONDS，取较大的值
+
+合完工作区要是干净的。
+"""

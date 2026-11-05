@@ -156,7 +156,7 @@ def _git(self, *args: str, check: bool = True, errors: str = "strict") -> str:
 
 ```python
 # ToolExecutor._run_one：权限与审批通过之后、执行之前
-effect = tool.effect_for(args)
+effect = tool.effect_in(args, self._root)
 snapshot = None
 if effect != Effect.READ and rc.config.snapshots and rc.workspace.shadow is not None:
     snapshot = await rc.workspace.shadow.snapshot(f"before {tool.name} {call.id}")
@@ -577,6 +577,7 @@ macOS 是 Apple Silicon 本机，Linux 是同一台机器上 Docker 里的 arm64
 - **写进工作区、之后在沙箱外执行的东西。** `.git/hooks`、`.git/config` 已经只读，但沙箱里还能写 `Makefile`、`.envrc`、`package.json` 的脚本，
   以及嵌套仓库和子模块的配置（`.git/modules`）；工作区一开始没有 `.git` 时，第一条命令建出来的也没有保护。
   用户之后在终端里跑 `make`、进目录，或者批准一条 `outside_sandbox` 的命令，这些内容就在外面执行了。人工门上要看清楚命令本身，也要想到它会读工作区；
+- **文件工具。** 它不在沙箱里跑，所以 `.git/config`、`.git/hooks` 的只读对它不起作用，靠的是写 `.git/` 要审批。`on_ask="allow"`（`--yes`）会自动批准，模型就能把 `core.hooksPath` 指到工作区里的脚本，用户之后在终端里 `git commit` 时它在沙箱外执行。公开基准里观察到过，记在[台账](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/issues.md)，还没有修。无人值守又不想开这个口子时用 `on_ask="deny"`；
 - **工作区本身的数据。** 工作区可读，白名单里的主机是出得去的。放行一个谁都能上传的主机，等于放行外发；
 - **共享内核。** 系统沙箱挡的是误操作和注入驱动的越界，不是内核漏洞。跑不可信代码、尤其多租户时，见上文的运行时选型；
 - **Linux 上工作区特别大时。** 见开销一节，这时拒绝执行而不是少查；
@@ -774,6 +775,8 @@ seccomp 会拦下 bubblewrap 需要的 `unshare`（`--security-opt seccomp=uncon
 它们只在有可用 bubblewrap 的 Linux 上运行。
 这些用例和外层 bwrap 沙箱下的全量测试在 `python:3.12-slim` 一次性容器里跑过（不挂载宿主目录，代码用 tar 流传进去，普通用户运行），CI 上 Ubuntu 作业也跑，沙箱起不来时作业失败。
 `scripts/sandbox_acceptance.py` 用干净安装的 wheel、不写配置，在两个平台上验证同一组边界：家目录放在 `/tmp` 之外，并放一份普通文件做对照，因为 Linux 沙箱的 `/tmp` 是私有的，凭证放在那里读不到说明不了什么。
+
+容器里让 harness 当 PID 1 时要加 `docker run --init`。bwrap 退出后留下的进程归 PID 1 接管，Python 不回收，每条沙箱命令留一个僵尸，最后占满 `--pids-limit`，`fork` 开始失败。
 
 ### 设计草案：只在沙箱档位下允许 bypass（未实现）
 

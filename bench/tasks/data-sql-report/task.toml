@@ -1,0 +1,14 @@
+id = "data-sql-report"
+title = "写客户消费排行查询"
+category = "data"
+prompt = """
+shop.sql 是一份 SQLite 脚本，建表加数据。帮我写 report.sql，里面只放一条 SELECT：查已支付订单总额最高的 3 个客户，
+输出两列 name,total，total 高的在前，同额按 name 升序。口径如下：
+
+- orders.status 是 paid 才算已支付
+- refunds 表里有记录的订单算退款了，不计入
+- total 是 amount_cents 的合计，单位还是分
+- customers.id 才是客户的标识，同名的是两个人，要分开算
+
+这条查询以后要拿去跑别的月份的数据。
+"""

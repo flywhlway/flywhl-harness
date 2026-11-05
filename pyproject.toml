@@ -1,12 +1,31 @@
 [project]
 name = "flywhl-harness"
-version = "0.1.0"
-description = "从零手写的最小 Agent Harness：Loop、工具、上下文压缩、检查点恢复、取消语义、权限与 Hooks，附极简 Web UI"
-readme = "README.md"
+dynamic = ["version"]
+description = "A hand-written Agent Harness in Python: agent loop, tools, context compaction, crash recovery, permissions, a default-on OS sandbox, replay and a web console."
+readme = "README.en.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "flywhl" }]
-keywords = ["agent", "harness", "llm", "runtime", "tool-calling"]
+keywords = ["agent", "harness", "llm", "runtime", "tool-calling", "sandbox", "mcp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Natural Language :: Chinese (Simplified)",
+  "Natural Language :: English",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
   "httpx>=0.27",      # 模型 provider 的流式 HTTP
   "fastapi>=0.110",   # Web UI 与 REST/SSE 接口（核心包不依赖它）
@@ -17,6 +36,13 @@ dependencies = [
 anthropic = ["anthropic>=1.0"]   # Anthropic provider 使用官方 SDK
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "coverage>=7.10"]
 
+[project.urls]
+Homepage = "https://github.com/flywhlway/flywhl-harness"
+Documentation = "https://flywhlway.github.io/flywhl-harness/en/"
+Source = "https://github.com/flywhlway/flywhl-harness"
+Issues = "https://github.com/flywhlway/flywhl-harness/issues"
+Changelog = "https://github.com/flywhlway/flywhl-harness/blob/main/CHANGELOG.md"
+
 [project.scripts]
 flywhl = "flywhl_harness.cli:main"
 
@@ -24,8 +50,27 @@ flywhl = "flywhl_harness.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "src/flywhl_harness/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/flywhl_harness"]
+
+# sdist 用白名单：文档站、试验场、编辑器配置都不进包。
+# 根目录 conftest.py 和 scripts/safe_pytest.py 是测试的防线（系统沙箱、HOME 隔离、执行绊线），tests/ 进包，它们就必须跟着进
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/examples",
+  "/conftest.py",
+  "/scripts/safe_pytest.py",
+  "/README*.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
+  "/pyproject.toml",
+  "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -59,8 +59,9 @@ mode = "default"                  # default | accept_edits | plan | bypass
 on_ask = "wait"                   # wait（等待人审）| allow | deny（无人值守）
 approval_timeout = 600
 strip_secret_env = true
-sandbox = "off"                   # off | macos（sandbox-exec）| linux（bubblewrap）：凭证位置不可读写，写操作限制在工作区与临时目录；原型
-sandbox_network = "allow"         # allow | deny | allowlist；后两档要求开启沙箱，否则 bash 拒绝执行
+sandbox = "auto"                  # auto（探测，用不了时拒绝执行）| macos（sandbox-exec）| linux（bubblewrap）| off：凭证位置不可读写，写操作限制在工作区与临时目录
+                                  # off 只在用户配置、-c 指定的文件里生效，项目配置写的会被丢弃
+sandbox_network = "auto"          # auto（沙箱开着时是 allowlist）| allow | deny | allowlist；后两档要求开启沙箱，否则 bash 拒绝执行
                                   # deny 禁止一切对外连接（含回环地址、DNS 查询与本机 Unix 套接字）
 # network_allow = ["pypi.org", "files.pythonhosted.org", "*.github.com"]   # allowlist 时经本机代理只放行这些主机
 # unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]   # 沙箱里放行的本机 Unix 套接字（不能在工作区、临时目录里）；默认只放行 DNS，docker.sock、ssh-agent 都连不上

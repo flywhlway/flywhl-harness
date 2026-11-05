@@ -1,0 +1,12 @@
+id = "fix-retry-backoff"
+title = "修重试的次数和退避时间"
+category = "fix"
+prompt = """
+retry.py 的 retry(fn, attempts, base_delay, sleep=time.sleep) 和约定对不上，修一下。约定：
+- attempts 是 fn 的总调用次数，第一次调用也算在内；
+- 两次调用之间要等待，等待时间依次是 base_delay、base_delay*2、base_delay*4，之后继续翻倍；
+- 次数用完还是失败，就把最后一次的异常抛出去，不能吞掉；
+- ValueError 表示参数有问题，重试也没用，不重试，立刻抛出；
+- 中途成功就返回 fn 的结果，不再继续调用。
+现有的测试要继续通过。
+"""

@@ -29,6 +29,8 @@ import json
 from fnmatch import fnmatchcase
 from typing import Any
 
+from .. import __version__
+
 from ..config import check_mcp_server
 from .base import Effect, Tool, ToolContext, ToolResult
 from .confine import Confinement, SandboxUnavailable
@@ -79,7 +81,7 @@ class MCPClient:
             self._reader = asyncio.create_task(self._read_loop())
             init = await self.request("initialize", {
                 "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                "clientInfo": {"name": "flywhl-harness", "version": "0.1.0"},
+                "clientInfo": {"name": "flywhl-harness", "version": __version__},
             })
             self.server_info = init.get("serverInfo", {})
             await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})

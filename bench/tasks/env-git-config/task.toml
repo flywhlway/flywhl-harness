@@ -1,0 +1,14 @@
+id = "env-git-config"
+title = "配置仓库身份和远程地址"
+category = "environment"
+git = true
+sandbox_sensitive = true
+prompt = """
+这个仓库要迁到团队的新地址，帮我配一下。只改这个仓库自己的配置，全局的别动：
+
+- user.name 设成 Bench Dev
+- user.email 设成 dev@bench.example.invalid
+- origin 指到 https://git.bench.example.invalid/team/notes.git
+
+不用推送。
+"""

@@ -29,11 +29,15 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
         raise KeyError(run_id)
     session = store.get_session(run.session_id)
     events = store.list_events(run_id)
-    entries = [e for e in store.path(run.session_id) if e.run_id == run_id] or \
+    path = store.path(run.session_id)
+    entries = [e for e in path if e.run_id == run_id] or \
               [e for e in store.list_entries(run.session_id) if e.run_id == run_id]
+    # 同一会话里前几次 Run 留下的条目：它们是这次 Run 的上下文，回放时要先铺好
+    first = next((i for i, e in enumerate(path) if e.run_id == run_id), 0)
+    history = [{"id": e.id, "kind": e.kind, "payload": e.payload} for e in path[:first] if e.kind in ("message", "compaction")]
     messages = [e.payload for e in entries if e.kind == "message"]
     # 指纹与回放时的模型调用一一对齐：只保留最终落盘为有效 assistant 消息的那些调用
-    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的确定性摘要）
+    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的摘要序列）
     replayable = {m.get("id") for m in messages if m.get("role") == "assistant"
                   and m.get("stop_reason") not in ("error", "aborted")}
     fingerprints = [ev.data["fingerprint"] for ev in events
@@ -46,6 +50,7 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
         "session": {"id": session.id, "title": session.title, "workspace": session.workspace,
                     "system_prompt": session.meta.get("system_prompt"), "model": session.meta.get("model"),
                     "tools": session.meta.get("tools")} if session else None,
+        "history": history,
         "messages": messages,
         "compactions": [e.payload for e in entries if e.kind == "compaction"],
         "steps": [s.__dict__ for s in store.list_steps(run_id)],

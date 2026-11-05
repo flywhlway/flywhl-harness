@@ -1,0 +1,13 @@
+2026-01-05 10:12:01 INFO 服务启动，监听 8080
+2026-01-05 10:12:03 DEBUG 加载配置 config.toml
+2026-01-05 10:13:44 WARNING 连接池使用率 85%
+2026-01-05 10:14:02 ERROR 请求失败 status=502
+
+Traceback (most recent call last):
+  File "server.py", line 88, in handle
+    response = upstream.fetch(request)
+TimeoutError: upstream timed out
+2026-01-05 10:14:03 INFO 重试成功
+2026-01-05 10:15:09 INFO 处理完成 count=128
+--- 日志轮转 ---
+2026-01-05 10:16:10 WARNING 磁盘使用率 91%

@@ -1,0 +1,10 @@
+{
+  "items": [
+    {"sku": "PEN-01", "name": "中性笔", "price": 12.5},
+    {"sku": "INK-B", "name": "墨水", "price": 3.99},
+    {"sku": "CASE-L", "name": "收纳箱", "price": 120},
+    {"sku": "BAG-2", "name": "帆布包", "price": 45.25},
+    {"sku": "NB-A5", "name": "笔记本", "price": 7.8},
+    {"sku": "CLIP-S", "name": "回形针", "price": 0.47}
+  ]
+}

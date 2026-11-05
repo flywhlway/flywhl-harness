@@ -1,0 +1,65 @@
+# 基准的机器可读方案。这里的数字和 docs/benchmark/methodology.md 必须一致，tests/test_bench.py 会核对。
+# 开跑之后不改；要改就换一个 plan_id，旧结果不和新结果混算。
+
+plan_id = "2026-11"
+
+[budget]
+total_usd = 50.0        # 整次基准的硬上限，超过就停
+per_model_usd = 15.0    # 每家的硬上限
+
+# Q1：通用场景乘以供应商
+[q1]
+trials = 3
+models = [
+  "deepseek:deepseek-flash",
+  "dashscope:qwen3.8-flash",
+  "kimi:kimi-k2.6",
+  "minimax:MiniMax-M2.7",
+  "openrouter:anthropic/claude-haiku-5.5",
+]
+# 只需被测模型密钥的 24 个场景
+scenarios = [
+  "tests/live/test_live_agent.py::test_multi_step_read_task_keeps_reasoning",
+  "tests/live/test_live_agent.py::test_parallel_read_calls_in_one_turn",
+  "tests/live/test_live_agent.py::test_write_requires_approval_with_preview",
+  "tests/live/test_live_agent.py::test_rejection_reason_steers_the_model",
+  "tests/live/test_live_agent.py::test_edit_fix_with_verify_command",
+  "tests/live/test_live_agent.py::test_todo_plan_is_completed_before_stopping",
+  "tests/live/test_live_agent.py::test_plan_mode_is_read_only",
+  "tests/live/test_live_agent.py::test_subagent_returns_structured_contract",
+  "tests/live/test_live_agent.py::test_compaction_preserves_key_facts",
+  "tests/live/test_live_agent.py::test_budget_exhaustion_wraps_up_without_tools",
+  "tests/live/test_live_agent.py::test_prompt_injection_in_file_is_not_obeyed",
+  "tests/live/test_live_agent.py::test_externalized_output_is_found_via_handle",
+  "tests/live/test_live_provider.py::test_doctor_passes_for_live_model",
+  "tests/live/test_live_provider.py::test_thinking_switch_is_honoured",
+  "tests/live/test_live_provider.py::test_prefix_cache_hits_on_repeated_prefix",
+  "tests/live/test_live_provider.py::test_max_tokens_truncation_is_reported",
+  "tests/live/test_live_provider.py::test_error_classification_on_real_endpoints",
+  "tests/live/test_live_provider.py::test_fallback_from_missing_model_to_live_model",
+  "tests/live/test_live_runtime.py::test_cancel_mid_stream_then_continue_session",
+  "tests/live/test_live_runtime.py::test_steer_mid_run_is_followed",
+  "tests/live/test_live_runtime.py::test_pause_and_resume_at_safe_point",
+  "tests/live/test_live_runtime.py::test_kill_9_then_recover_completes",
+  "tests/live/test_live_runtime.py::test_replay_of_real_trajectory_is_deterministic",
+  "tests/live/test_live_runtime.py::test_web_api_end_to_end_with_approval",
+]
+
+# Q2：同一任务、同一模型下的配对消融
+[q2]
+# 开跑前用这几个任务验证流水线，每种配置各一次，数据不计入
+pilot_tasks = ["fix-pagination", "data-sql-report", "repo-split-commits", "env-git-hook"]
+model = "deepseek:deepseek-flash"
+trials = 3
+seed = 20261105          # 决定每对试验里 A、B 谁先跑，写死是为了复现
+max_turns = 30
+max_cost_usd = 0.20      # 单次试验的预算
+timeout_seconds = 420    # 单次试验的墙钟上限，到点取消，记为 timeout
+
+[q2.configs.A]           # 默认配置：沙箱开，出站白名单为空
+sandbox = "auto"
+sandbox_network = "auto"
+
+[q2.configs.B]           # 对照：沙箱关
+sandbox = "off"
+sandbox_network = "auto"

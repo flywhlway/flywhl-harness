@@ -1,0 +1,8 @@
+id = "data-log-aggregate"
+title = "按状态码统计访问日志"
+category = "data"
+prompt = """
+access.log 是一段 nginx 访问日志。帮我按 HTTP 状态码统计请求数，结果写到 status.csv。
+csv 有表头，两列 status,count；按 count 降序，count 相同的按状态码升序。
+状态码是引号里那段请求行后面紧跟的字段。以 # 开头的是日志轮转时写进去的标记，不算请求。
+"""

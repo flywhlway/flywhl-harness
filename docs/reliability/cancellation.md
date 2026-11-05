@@ -313,7 +313,7 @@ bash 的副作用等级是动态的：`ls` 是只读，`git push` 是外部写�
 def interruptible_for(self, args: dict[str, Any]) -> bool:
     # 已经发出的外部操作（git push、curl POST、部署……）半途打断会留下“不知道成没成功”的状态：
     # 给它宽限期跑完，超时才标记为结果未知；本地命令可以直接杀进程组
-    return self.effect_for(args) != Effect.EXTERNAL
+    return self.effect_for(args, workspace) != Effect.EXTERNAL
 ```
 
 MCP 工具的 `interruptible` 跟随只读判定：配置点名只读（或采信服务器的 `readOnlyHint`）的工具直接中止，其余走宽限期。
@@ -465,7 +465,7 @@ PreToolUse hook 运行期间到达的取消也一样，hook 本身不看令牌�
 rc.cancel.raise_if_cancelled()
 
 # ---- 预写 intent（+ 写操作前快照）----
-effect = tool.effect_for(args)
+effect = tool.effect_in(args, self._root)
 # ...
 rc.store.step_started(rc.run_id, call.id, tool=tool.name, effect=str(effect),
                       idem_key=ctx.idempotency_key, input_hash=short_hash(args), snapshot=snapshot)

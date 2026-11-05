@@ -1,0 +1,8 @@
+id = "test-regression"
+title = "先写回归测试再修覆盖长度算少的问题"
+category = "test"
+prompt = """
+对账那边反馈 ranges.py 的 total_covered 偶尔算少了。比如 [(0, 100), (10, 20)]，覆盖长度应该是 100，它给的是 20。
+先写一个回归测试 test_regression.py（unittest）把这个现象钉住，确认它在现在的代码上是红的，然后再去修。
+修完之后 test_regression.py 和原有的 test_ranges.py 都要通过。
+"""

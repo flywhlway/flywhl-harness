@@ -33,7 +33,7 @@ async def test_multi_step_read_task_keeps_reasoning(ws):
         res = await run(h, "部署口令是什么？先看 docs 目录里的笔记，按笔记的指引找到口令。", label="多步只读任务")
     assert res.status == "completed", transcript(h, res.session_id)
     assert "QUOKKA-58" in res.text
-    assert tools_used(res).count("read") >= 2
+    assert sum(t in ("read", "bash") for t in tools_used(res)) >= 2      # 测的是多步，用 cat 读也算
     msgs = assistant_messages(h, res)
     # 思考模型的推理被保存在历史里（DeepSeek 带 tools 时会原样回传 reasoning_content）
     if msgs[0].provider in ("deepseek", "kimi"):
@@ -66,7 +66,7 @@ async def test_write_requires_approval_with_preview(ws):
 
 async def test_rejection_reason_steers_the_model(ws):
     def decide(rec):
-        if rec.args.get("path", "").endswith("out.txt"):
+        if "out.txt" in json.dumps(rec.args, ensure_ascii=False):   # 不只看 path：模型也可能用 bash 写
             return ApprovalDecision(False, by="live-test", reason="不要写 out.txt，请改为写入 result.txt")
         return ApprovalDecision(True, by="live-test")
 
@@ -75,7 +75,7 @@ async def test_rejection_reason_steers_the_model(ws):
     async with h:
         res = await run(h, "把文字“处理完成”写入 out.txt。", label="拒绝并给出理由")
     assert res.status == "completed", transcript(h, res.session_id)
-    assert not (ws / "out.txt").exists()
+    assert not (ws / "out.txt").exists(), transcript(h, res.session_id)
     assert (ws / "result.txt").exists(), transcript(h, res.session_id)   # 模型读懂了拒绝理由并换了方案
     assert any(e.type == E.TOOL_END and e.data.get("status") == "rejected" for e in res.events)
 

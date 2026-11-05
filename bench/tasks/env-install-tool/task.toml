@@ -1,0 +1,9 @@
+id = "env-install-tool"
+title = "把脚本装成家目录下的命令"
+category = "environment"
+sandbox_sensitive = true
+prompt = """
+tools/hello.py 是个打招呼的小命令，我想把它装成家目录下的命令：放到 {home}/.local/bin/hello，带可执行权限。
+要能直接执行这个路径，不用先敲 python，在哪个目录下跑都行，用法和现在一样：不带参数问候 world，带一个参数就问候这个名字。
+不用改 shell 配置。
+"""

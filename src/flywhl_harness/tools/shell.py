@@ -46,14 +46,15 @@ OUT_BYTES = 30 * 1024
 # hook；仓库里“伪装”成裸仓库的目录（自带 HEAD / config / objects）被 git -C 进入时，它的 config 同样生效。
 # 用命令行级配置（优先级最高）关掉 fsmonitor、只认显式指定的裸仓库，并让只读命令不顺手写索引
 _GIT_HARDENING = (("core.fsmonitor", "false"), ("safe.bareRepository", "explicit"))
-_GIT_CONFIG_KEY = re.compile(r"GIT_CONFIG_KEY_\d+")
+# 名字撞上密钥规则的普通变量：GIT_CONFIG_KEY_<n> 是配置键名，GIT_AUTHOR_* 是提交身份（撞的是 AUTH）
+_NOT_SECRET_ENV = re.compile(r"GIT_CONFIG_KEY_\d+|GIT_AUTHOR_(NAME|EMAIL|DATE)")
 
 
 def _clean_env(strip: bool) -> dict[str, str]:
     env = dict(os.environ)
-    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+    if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
-               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+               if not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"

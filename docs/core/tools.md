@@ -143,8 +143,8 @@ async def weather(city: Annotated[str, "城市名，如 上海"], unit: Annotate
 
 | 列 | 实现位置 |
 |---|---|
-| 并发 | `Tool.concurrency_safe` + `Prepared.parallel`（要求 `effect_for(args) == READ`） |
-| 自动重试 | `ToolExecutor._invoke`：`TransientToolError` 只在 `effect_for(args) == READ or tool.idempotent` 时重试 |
+| 并发 | `Tool.concurrency_safe` + `Prepared.parallel`（要求 `effect_in(args, root) == READ`） |
+| 自动重试 | `ToolExecutor._invoke`：`TransientToolError` 只在 `effect_in(args, root) == READ or tool.idempotent` 时重试 |
 | 默认审批 | `policy/permissions.py`，按模式与等级裁决（见 [17 权限与人审](/governance/permissions-hitl)） |
 | 取消时 | `ToolExecutor._race`：看 `interruptible_for(args)`，不看 `effect` |
 | 超时时 | `ToolExecutor._race`：`EXTERNAL` 且非幂等记为 `unknown`（请求可能已经生效），其余记为 `timeout` |
@@ -328,10 +328,9 @@ def _prepare(self, call: ToolCall) -> Prepared:
 
 pi 用 TypeBox 的 `Value.Convert` 做了类似的宽容转换。宽容转换要守住一条线：**能确定意图才转，否则报错让模型重来**。
 
-::: warning 一个容易踩的边界
-如果模型把数组序列化成了字符串（`"[\"a.py\", \"b.py\"]"`），单值包装规则会得到 `['["a.py", "b.py"]']`——
-类型校验通过了，内容却是错的。`_coerce` 没有尝试把字符串当 JSON 解析。遇到这类模型时，可以在 array 分支先尝试 `json.loads`，
-解析结果是列表才采用。
+::: tip 一个容易踩的边界
+模型有时把数组序列化成字符串（`"[\"a.py\", \"b.py\"]"`）。如果直接走单值包装，会得到 `['["a.py", "b.py"]']`，类型校验通过，内容却是错的。
+所以 `_coerce` 在单值包装之前，先把以 `[` 或 `{` 开头的字符串按 JSON 解析，解析结果类型对得上才采用，否则报错让模型重来。
 :::
 
 同一个 `validate()` 在执行器里用了三次：`_prepare` 校验模型参数；PreToolUse hook 返回 `updated_input` 后重新校验；

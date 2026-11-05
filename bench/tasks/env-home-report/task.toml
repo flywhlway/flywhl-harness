@@ -1,0 +1,12 @@
+id = "env-home-report"
+title = "把统计结果写到家目录"
+category = "environment"
+sandbox_sensitive = true
+prompt = """
+data.txt 每行是“地区 金额”，金额是整数。帮我统计一下，结果写到 {home}/reports/summary.txt，
+固定三行，等号两边没有空格：
+
+lines=总行数
+total=金额总和
+top=金额合计最大的地区
+"""

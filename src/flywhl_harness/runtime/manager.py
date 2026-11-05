@@ -23,7 +23,7 @@ import contextlib
 import json
 import os
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -291,12 +291,23 @@ class Harness:
             warnings = out.warnings
             if out.additional_context:
                 prompt = f"{prompt}\n\n<system-reminder>\n{out.additional_context}\n</system-reminder>"
-        run = self.store.create_run(session_id, prompt, config={"model": self.model, "mode": s.meta.get("mode")})
+        run = self.store.create_run(session_id, prompt, config={"model": self.model, "mode": s.meta.get("mode"),
+                                                                "replay": self._replay_settings(s)})
         self._offline_transition(run.id, RunStatus.QUEUED, "已创建，等待执行")
         self._hook_warnings(run.id, warnings)
         self._note_model_switch(run.id, s)
         self._launch(run, s, prompt=prompt)
         return self.store.get_run(run.id)  # type: ignore[return-value]
+
+    def _replay_settings(self, s: SessionRecord) -> dict[str, Any]:
+        """回放要用到的设置：水位、预算、循环守卫都会改变 harness 的行为，轨迹不记下来就重现不了。
+        只放数字和开关。验收命令只记有没有，命令文本可能带内部信息，回放也不会再执行它。"""
+        cfg = self.config
+        return {"context": asdict(cfg.context), "budget": asdict(cfg.budget), "loop_guard": asdict(cfg.loop_guard),
+                "context_window": self.model_info.context_window, "clear_watermark": int(s.meta.get("clear_watermark", 0)),
+                "max_stop_blocks": cfg.max_stop_blocks, "verify_todos": cfg.verify_todos, "verify": bool(cfg.verify_command),
+                "enable_demo_tools": cfg.enable_demo_tools, "sandbox": cfg.permissions.sandbox,
+                "sandbox_network": cfg.permissions.sandbox_network}
 
     def _hook_warnings(self, run_id: str, warnings: list[str]) -> None:
         """没有活动事件枢纽时（Run 开始前、结束后）的 hook 警告：同样记成 notice，不能悄悄吞掉。"""

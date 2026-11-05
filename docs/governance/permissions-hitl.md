@@ -573,6 +573,8 @@ except RunCancelled:
 
 ```python
 if not dec.approved:
+    if dec.reason and not dec.by.startswith(("policy:", "system")):   # 人写的理由走提醒通道，见下文
+        return done(ToolResult.error("用户拒绝了该操作。请按随后的用户指示调整方案。", approver_note=dec.reason), "rejected")
     why = f"：{dec.reason}" if dec.reason else ""
     return done(ToolResult.error(f"用户拒绝了该操作{why}。请调整方案（例如改用只读方式），或询问用户的意图。"), "rejected")
 if dec.edited_args:
@@ -595,8 +597,10 @@ if dec.remember:
     self._persist_grants()
 ```
 
-- **拒绝理由回给模型。** 拒绝不是异常，而是一条 `is_error` 的工具结果，附带审批人的理由和建议（“改用只读方式，或询问用户的意图”）。
-  模型读到“不要写到根目录，写到 out/ 下”就能自己修正，而不是盲目重试。
+- **拒绝理由回给模型。** 拒绝不是异常，而是一条 `is_error` 的工具结果。模型读到“不要写到根目录，写到 out/ 下”就能自己修正，而不是盲目重试。
+  但人写的理由不放在结果里，结果落盘后转成一条 `<system-reminder>`。系统提示词要求把工具结果当数据，理由放在结果里时，
+  模型会按这条规则把用户的话当成不可信内容，停下来反问，真实模型的回归里出现过。这个标签伪造不了：工具结果里的同名标签在进上下文前就被转义了。
+  理由记在 `details` 里，回放时走同一条路，上下文不分叉。无人值守、超时这类拒绝是 harness 写的，不算用户指示，仍然留在结果里。
 - **改参后重新校验和判定（防 TOCTOU）。** 审批人能直接改参数，比如把通知收件人从 `all-staff` 改成 `ops-team`。
   “检查时”和“使用时”之间参数变了，就必须重新检查：schema 校验防止改出非法参数，权限判定防止改出 deny 的动作
   （比如把路径改到 `.ssh/` 下）。重新判定为 ask 时不再二次询问——审批人已经看过修改后的版本。
