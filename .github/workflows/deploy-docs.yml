@@ -36,7 +36,7 @@ jobs:
       - run: npm run build
         env:
           BASE: /${{ github.event.repository.name }}/   # 项目页部署在子路径下
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/.vitepress/dist
 
