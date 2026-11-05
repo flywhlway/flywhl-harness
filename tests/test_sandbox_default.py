@@ -900,6 +900,49 @@ async def test_git_file_of_a_linked_worktree_stays_read_only(ws):
 
 
 @real_sandbox
+@pytest.mark.parametrize("name", ["commondir", "config.worktree"])
+async def test_files_that_redirect_git_cannot_be_planted(ws, name):
+    """commondir 决定 git 去哪读 config 和 hooks，指到工作区里就等于改了只读的 .git/config。"""
+    run_git(ws, "init", "-q")
+    await in_box(Confinement(LEVEL, "deny"), ws, f"echo evil > .git/{name}")
+    assert not (ws / ".git" / name).exists()
+    run_git(ws, "status", "--short")
+
+
+@real_sandbox
+async def test_a_pre_existing_redirect_file_is_left_alone(ws):
+    run_git(ws, "init", "-q")
+    keep = ws / ".git" / "config.worktree"
+    keep.write_text("[core]\n\tbare = false\n")
+    await in_box(Confinement(LEVEL, "deny"), ws, "echo evil >> .git/config.worktree; true")
+    assert keep.read_text() == "[core]\n\tbare = false\n"
+
+
+@real_sandbox
+async def test_other_worktrees_of_a_repository_are_read_only(ws):
+    run_git(ws, "init", "-q")
+    run_git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
+    run_git(ws, "worktree", "add", "-q", str(ws.parent / f"{ws.name}-linked"))
+    meta = next((ws / ".git" / "worktrees").iterdir()) / "commondir"
+    before = meta.read_bytes()
+    await in_box(Confinement(LEVEL, "deny"), ws, f"echo evil > .git/worktrees/{meta.parent.name}/commondir")
+    assert meta.read_bytes() == before
+
+
+@real_sandbox
+@pytest.mark.parametrize("trick", ["mv ../repo ../moved && touch ../moved/.flywhl/x ../moved/.git/hooks/x; mv ../moved ../repo",
+                                   "cd ../.. && mv a b && touch b/repo/.flywhl/x b/repo/.git/hooks/x; mv b a"])
+async def test_renaming_the_workspace_does_not_lift_the_read_only_paths(ws, trick):
+    """工作区在临时目录这类可写位置下时，只读规则写死的路径会因为上级目录改名而失效。"""
+    repo = ws / "a" / "repo"
+    repo.mkdir(parents=True)
+    run_git(repo, "init", "-q")
+    (repo / ".flywhl").mkdir()
+    await in_box(Confinement(LEVEL, "deny"), repo, f"{trick}; true")
+    assert repo.is_dir() and not (repo / ".flywhl" / "x").exists() and not (repo / ".git" / "hooks" / "x").exists()
+
+
+@real_sandbox
 async def test_git_init_still_works_in_an_empty_workspace(ws):
     code, out = await in_box(Confinement(LEVEL, "deny"), ws, "git init -q")
     assert code == 0 and (ws / ".git" / "HEAD").exists(), out

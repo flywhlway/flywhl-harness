@@ -510,11 +510,17 @@ sandbox = "off"                 # 只在用户配置里有效，项目配置写�
 | `.flywhl/`、`flywhl.toml` | 下一次启动时读成配置 |
 | 数据目录（`data_dir` 可以改到别处） | 影子仓库和会话库，harness 在沙箱外读写 |
 | `.git/hooks`、`.git/config` | 用户的 `git commit`，或一条获准离开沙箱的 `git push` |
+| `.git/commondir`、`.git/config.worktree`、`.git/worktrees` | 决定 git 去哪读配置和钩子，写得了它们就等于写得了 `.git/config` |
 
 工作区还没有 `.git` 时都不保护，空工作区里 `git init` 照常能用。有了 `.git` 目录，`hooks` 不存在也保护：`git init --template=` 建出来的仓库就没有它，
 Linux 上会在 `.git` 里留下一个空目录做挂载点。`.git` 是文件时（linked worktree、子模块），文件本身只读：`gitdir:` 指向哪里，用的就是哪份配置。
 `.git` 目录本身也不能改名，否则挪开再建一个新的就绕过去了：
 macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的索引、对象、引用照常写，`git add`、`git commit` 不受影响。
+
+只读规则写的是路径，工作区在 `/tmp` 这类可写位置下时，上级目录改个名就脱离了规则。所以 macOS 上工作区和它往上每一级目录都不能改名，Linux 上工作区是挂载点，本来就改不了。
+
+`commondir` 这类文件平时不存在。macOS 上照样写不进去；Linux 上不存在的文件挂不成只读，占位的空文件又会让 git 报错，所以命令结束后由 harness 删掉沙箱里新建的 `commondir`、`config.worktree`。命令运行期间有一段窗口，长期运行的 MCP 服务器要到关闭时才清理。
+
 代价是 `git config`、`git remote add`、`git push -u` 这类要改 `.git/config` 的命令在沙箱里会失败，要走 `outside_sandbox`，或者自己在终端里跑。
 
 工作区放在数据目录里面时不保护数据目录，否则整个工作区都成了只读。这种布局要自己留意。

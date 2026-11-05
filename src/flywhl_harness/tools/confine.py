@@ -33,8 +33,8 @@ from typing import Any, AsyncIterator, Iterable
 
 from ..config import flywhl_home
 from .egress import EgressProxy, local_ports, parse_rules
-from .sandbox import (EGRESS_PORT, SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, default_writable, detect, pin_sockets,
-                      require_bwrap, sandbox_argv)
+from .sandbox import (EGRESS_PORT, SANDBOX_LEVELS, SANDBOX_NETWORK, absent_git_redirects, bwrap_argv, default_writable, detect,
+                      pin_sockets, require_bwrap, sandbox_argv, sweep_git_redirects)
 
 OFF_HINT = ('确实要在没有沙箱的环境里运行，在用户配置 ~/.flywhl/config.toml 的 [permissions] 里写 sandbox = "off"，'
             "或者启动时加 --sandbox off")
@@ -181,6 +181,7 @@ class Confinement:
                 if self.level == "linux":
                     require_bwrap()
                     self.private_tmp()
+                    stack.callback(sweep_git_redirects, absent_git_redirects(workspace))
                 proxy = await self._start_proxy(stack) if self.network == "allowlist" else None
                 wrapped = await asyncio.to_thread(self._wrap, argv, workspace, proxy, chdir)   # 大工作区要遍历一阵
             except (RuntimeError, OSError) as e:   # OSError：TMPDIR 太长，放不下 Unix 套接字的路径；状态目录建不出来

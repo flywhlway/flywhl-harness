@@ -43,9 +43,11 @@ Linux 档（``sandbox = "linux"``）用 bubblewrap，规则对齐 macOS，做法
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import functools
 import glob
+import logging
 import os
 import pwd
 import re
@@ -59,6 +61,8 @@ from pathlib import Path
 from typing import Iterable
 
 from ..policy.sensitive import CREDENTIAL_GLOBS
+
+log = logging.getLogger(__name__)
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 SANDBOX_LEVELS = ("auto", "off", "macos", "linux")
@@ -247,9 +251,12 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     extra = default_writable() if writable is None else [os.path.realpath(p) for p in writable]
     allowed = " ".join([f"(subpath {_str(ws)})", *(f"(subpath {_str(p)})" for p in extra), *_DEVICES])
     _refuse_writable(unix_sockets, [ws, *extra])
-    frozen = [f"(subpath {_str(p)})" for p in _read_only(ws, protected)]
+    read_only = _read_only(ws, protected)
+    frozen = [f"(subpath {_str(p)})" for p in read_only]
     if os.path.isdir(os.path.join(ws, ".git")):   # 整个 .git 换掉就绕过了里面的只读。只管目录本身，里面照常写
         frozen.append(f"(literal {_str(os.path.join(ws, '.git'))})")
+    # 规则写的是路径，上级目录改个名，里面的东西就不再匹配。工作区在临时目录这类可写位置下时改得了，所以路径上每一级都不许动
+    frozen += [f"(literal {_str(p)})" for p in sorted({ws, *(str(q) for f in (ws, *read_only) for q in Path(f).parents)})]
     lines = [
         "(version 1)",
         "(allow default)",
@@ -273,10 +280,29 @@ def seatbelt_profile(workspace: str | Path, *, writable: Iterable[str] | None = 
     return "\n".join(lines)
 
 
+_GIT_REDIRECTS = ("commondir", "config.worktree")   # git 用它们决定去哪读配置和钩子，写得了它们就等于写得了 config
+
+
+def absent_git_redirects(workspace: str | Path) -> list[str]:
+    """``.git`` 里现在还没有的重定向文件。Linux 上不存在的文件挂不成只读：bwrap 留下的空占位文件会让 git 读
+    ``commondir`` 时直接报错退出，所以这些位置在命令结束后由 ``sweep_git_redirects`` 清理。"""
+    git = os.path.join(os.path.realpath(workspace), ".git")
+    return [p for p in (os.path.join(git, n) for n in _GIT_REDIRECTS) if not os.path.lexists(p)]
+
+
+def sweep_git_redirects(paths: Iterable[str]) -> None:
+    """删掉沙箱里的命令新建的重定向文件，下一条沙箱外的 git 命令就不会照着它们去读工作区里的配置。"""
+    for p in paths:
+        with contextlib.suppress(OSError):
+            os.unlink(p)
+            log.warning("沙箱里的命令新建了 %s，git 会照着它读配置和钩子，已删除", p)
+
+
 def _git_frozen(ws: str) -> list[str]:
     """``.git`` 里写不得的位置。工作区还没有 ``.git`` 时什么都不保护：``git init`` 要能在空工作区里运行。
 
     - ``.git`` 是目录：``hooks`` 没有也要保护，``git init --template=`` 建出来的仓库就没有它，沙箱里建一个就是沙箱外执行的钩子；
+      ``commondir``、``config.worktree`` 把 git 引到别处读配置，``worktrees`` 里是其他 linked worktree 的同类文件；
     - ``.git`` 是文件（linked worktree、子模块）：``gitdir:`` 指向哪里，用的就是哪份配置，所以文件本身只读。
 
     路径和解析后的路径都算：``hooks`` 是软链接时，把链接换掉也绕过了只读。"""
@@ -284,7 +310,7 @@ def _git_frozen(ws: str) -> list[str]:
     if not os.path.isdir(git):
         return [git] if os.path.lexists(git) else []
     hooks, config = os.path.join(git, "hooks"), os.path.join(git, "config")
-    names = [hooks, *([config] if os.path.exists(config) else [])]
+    names = [hooks, *([config] if os.path.exists(config) else []), *(os.path.join(git, n) for n in (*_GIT_REDIRECTS, "worktrees"))]
     return list(dict.fromkeys([*names, *map(os.path.realpath, names)]))
 
 

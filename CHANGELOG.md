@@ -9,6 +9,7 @@
 | 你会看到 | 原因 | 怎么处理 |
 |---|---|---|
 | 项目 `flywhl.toml` 里的 `sandbox_network = "allow"` 不生效，单条 hook、MCP 服务器写的也一样 | 放开网络和关沙箱同等对待，信任项目配置也不行 | 写进用户配置或 `-c` 文件，或启动时加 `--network allow`；只要几个主机时用 `network_allow` |
+| 沙箱里写不了 `.git/commondir`、`.git/config.worktree`、`.git/worktrees`，Linux 上新建的会在命令结束后删掉；macOS 上改不了工作区和上级目录的名字 | 前者决定 git 去哪读配置，写得了就绕过了 `.git/config` 的只读；后者让写死路径的只读规则失效 | 这些操作放到沙箱外做 |
 | linked worktree 里沙箱内的命令改不了 `.git` 文件；`.git` 没有 `hooks` 时写不进去 | 这两处都会让内容之后在沙箱外执行 | 走 `outside_sandbox`，或者自己在终端里改 |
 
 ## [0.2.0] - 2026-11-05

@@ -95,7 +95,7 @@ hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了�
 - 网络默认只放行 `network_allow` 里的主机，默认一个都没有，被拦时结果里写明主机和放行办法。`sandbox_network = "deny"` 整体断网。
 - 用不了沙箱时命令拒绝执行，不退回沙箱外。Linux 上 `apt install bubblewrap`；确实要在没有沙箱的环境里运行，在用户配置里写 `sandbox = "off"` 或加 `--sandbox off`，项目配置写的不算。
 - 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。
-- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。所以 `git config`、`git remote add` 在沙箱里会失败，`git add`、`git commit` 不受影响。
+- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`，以及决定 git 去哪读配置的 `commondir` 这类文件。所以 `git config`、`git remote add` 在沙箱里会失败，`git add`、`git commit` 不受影响。
 - 系统沙箱挡的是误操作和注入驱动的越界，和宿主共用内核。跑不可信代码、多租户时请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。
 
