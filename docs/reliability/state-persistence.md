@@ -137,7 +137,7 @@ meta = {
 
 为什么系统提示要存一份 **渲染后的全文**，而不是每次请求时现场生成？原因有两个：
 
-1. **前缀稳定**：`build_system_prompt` 会读 AGENTS.md 和技能清单。用户在会话中途改了 AGENTS.md，如果每轮都重新生成，
+1. **前缀稳定**：`build_project_context` 会读 AGENTS.md 和技能清单。用户在会话中途改了 AGENTS.md，如果每轮都重新生成，
    系统提示就变了，之前缓存的前缀全部失效（见 [07 上下文工程与压缩](/core/context-engineering)）；
 2. **恢复一致**：崩溃之后用新进程恢复时，新进程的代码或配置可能已经升级。会话按创建时的提示继续，
    而不是半路换成另一套指令（版本钉住的完整讨论见 [11 检查点与崩溃恢复](/reliability/checkpoint-recovery)）。

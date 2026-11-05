@@ -156,6 +156,7 @@ class HarnessConfig:
     append_system_prompt: str | None = None
     load_agents_md: bool = True            # 加载工作区 AGENTS.md / CLAUDE.md
     load_skills: bool = True               # 渐进披露：只把技能清单放进提示词
+    trust_workspace: bool = False          # 信任所有工作区。项目配置写的丢弃，只在用户配置、-c 指定的文件里有效，见 is_workspace_trusted
     # ---- 运行时 ----
     workspace: str = "."
     data_dir: str = ".flywhl"
@@ -202,7 +203,7 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _keep_sandbox_on(data, project.resolve())
+                data = _no_self_trust(_keep_sandbox_on(data, project.resolve()), project.resolve())
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -369,6 +370,16 @@ def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
     return out
 
 
+def _no_self_trust(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    """仓库不能宣布自己可信，配置被信任过也一样：信任配置是同意它的 hook 和模型设置，不是同意把它的文件当成自己人写的。"""
+    if "trust_workspace" not in data:
+        return data
+    if data["trust_workspace"]:
+        warnings.warn(f"{path} 里的 trust_workspace 不生效：项目配置不能信任自己所在的工作区。确实要信任，启动时加 --trust，"
+                      f"或者写在用户配置 {flywhl_home() / 'config.toml'} 里", UntrustedConfigWarning, stacklevel=3)
+    return {k: v for k, v in data.items() if k != "trust_workspace"}
+
+
 def split_untrusted(data: dict[str, Any], base: Path | None = None,
                     auto_approve: Iterable[str] = ()) -> tuple[dict[str, Any], list[str]]:
     """把来自不可信位置的配置拆成 (可以直接生效的部分, 需要信任的设置)。base 是 hook、MCP 服务器实际运行的目录
@@ -511,6 +522,36 @@ def record_trust(req: TrustRequest) -> None:
     """记下“这个位置的这份内容可信”。同一路径只保留最近一次确认的内容。"""
     records = _trust_records()
     records[str(req.path)] = {"sha256": req.digest, "trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    _save_trust(records)
+
+
+def trust_root(path: str | Path) -> Path:
+    """工作区信任的单位：所在的 git 仓库根，不在仓库里时是这个目录本身。子目录跟着仓库走；vendor/ 里的嵌套仓库是另一个作者写的，
+    单独算。解析到真实路径：软链接换个名字还是同一个工作区。"""
+    cur = Path(path).expanduser().resolve()
+    return next((d for d in [cur, *cur.parents] if (d / ".git").exists()), cur)
+
+
+def is_workspace_trusted(path: str | Path) -> bool:
+    """用户说过这个工作区里的文件是自己人写的吗。没说过的工作区，文件内容算不可信（污点来源），项目指令文件标注为不可信。
+    只认 ``trusted.json`` 里用户亲自确认的记录：这个文件在工作区之外，沙箱里写不到，文件工具对 ``.flywhl/`` 一律拒绝。
+    记录绑定路径，不绑定内容：工作区每天都在变。删掉仓库再在同一路径克隆一个别的，信任还在。"""
+    rec = _workspace_records().get(str(trust_root(path)))
+    return isinstance(rec, dict)
+
+
+def record_workspace_trust(path: str | Path) -> None:
+    records = _trust_records()
+    records["workspaces"] = {**_workspace_records(records), str(trust_root(path)): {"trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}}
+    _save_trust(records)
+
+
+def _workspace_records(records: dict[str, Any] | None = None) -> dict[str, Any]:
+    found = (_trust_records() if records is None else records).get("workspaces")
+    return found if isinstance(found, dict) else {}
+
+
+def _save_trust(records: dict[str, Any]) -> None:
     f = _trust_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")

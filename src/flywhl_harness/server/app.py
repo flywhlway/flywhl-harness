@@ -114,6 +114,7 @@ class SessionPatch(BaseModel):
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_BULKY_META = frozenset({"system_prompt", "project_context"})   # 上下文检查器单独给，会话列表不带
 TOKEN_COOKIE = "flywhl_token"
 TOKEN_MAX_AGE = 30 * 24 * 3600
 MAX_BODY = 8 * 1024 * 1024
@@ -339,7 +340,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
     @app.post("/api/sessions")
     async def new_session(body: NewSession) -> dict[str, Any]:
         s = h.create_session(body.title or "新会话", mode=body.mode)
-        return {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k != "system_prompt"}}
+        return {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k not in _BULKY_META}}
 
     @app.get("/api/sessions/{sid}")
     async def session_detail(sid: str) -> dict[str, Any]:
@@ -348,7 +349,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         view = log.context()
         runs = h.store.list_runs(sid, limit=50)
         return {
-            "session": {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k != "system_prompt"}},
+            "session": {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k not in _BULKY_META}},
             "messages": [m.to_dict() for m in log.messages()],
             # 时间线：当前分支上的条目（消息 + 压缩摘要），UI 按它渲染，压缩点显示为折叠分隔线
             "timeline": [{"id": e.id, "kind": e.kind, "run_id": e.run_id,
@@ -402,10 +403,14 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         view = h.log(sid).context()
         cm = ContextManager(h.config.context, h.model_info)
         sp = s.meta.get("system_prompt", "")
+        pc = s.meta.get("project_context") or ""   # 不在历史里，但每次请求都带着，水位要算上
         specs = h.tools.specs()
-        stats = cm.estimate(view.messages, sp, specs)
+        stats = cm.estimate(view.messages, f"{sp}\n\n{pc}" if pc else sp, specs)
         items = [{"id": m.id, "role": m.role, "kind": m.kind, "tool": m.tool_name, "tokens": message_tokens(m),
                   "preview": (m.text or ", ".join(c.name for c in m.tool_calls))[:160]} for m in view.messages]
+        if pc:
+            items.insert(0, {"id": "project-context", "role": "user", "kind": "project_context", "tool": None,
+                             "tokens": estimate_tokens(pc), "preview": pc[:160]})
         return {"stats": stats.to_dict(), "system_tokens": estimate_tokens(sp),
                 "tools_tokens": estimate_tokens(json.dumps(specs, ensure_ascii=False)),
                 "messages_tokens": sum(i["tokens"] for i in items), "items": items,

@@ -219,6 +219,9 @@ args = ["examples/mcp_echo_server.py"]
 上面的 `verify_command`、allow 规则、`[[hooks]]` 与 `[mcp_servers]` 会执行命令或放宽审批：写在启动目录的 `flywhl.toml` 里时，
 要先信任这份配置才生效（终端里会逐项询问，或加 `--trust`），原因见 [19 安全](/governance/security)。
 
+工作区本身也要信任一次：第一次在某个仓库运行时终端会问，`--trust` 直接信任，`--json` 或管道运行不问也不信任。
+没信任过的工作区里，读到的文件算不可信内容，之后的写操作要人确认，所以在 CI 里跑自己的代码要加 `--trust`。
+
 加载顺序：默认值 → 用户配置 `~/.flywhl/config.toml` → `flywhl.toml` → 环境变量（`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_BASE_URL`、
 `FLYWHL_PERMISSION_MODE`……）→ 命令行参数。完整字段见 `src/flywhl_harness/config.py`。
 

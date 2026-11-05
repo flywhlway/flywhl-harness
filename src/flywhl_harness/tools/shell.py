@@ -123,6 +123,7 @@ def _sandbox_hint(box: Confinement, output: str, denied: bool) -> str:
 
 class BashTool(Tool):
     name = "bash"
+    reads_workspace = True
     description = (
         "在工作区根目录执行 bash 命令，返回合并后的 stdout/stderr 与退出码。适合运行测试、构建、git 等。"
         "长输出只保留结尾部分（完整输出会给出句柄，可用 read_ref 查看）。"

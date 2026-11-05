@@ -75,6 +75,7 @@ The goal is that opening an untrusted repository is safe with no configuration. 
   blocked call names the host and how to allow it.
 - Local IPC that would bypass the sandbox: keychain, clipboard, `open`, launchd, Unix sockets.
 - A repository's own config turning any of this off. Only your user config, a file passed with `-c`, or `--sandbox off` can do that.
+- A repository's `AGENTS.md` gaining the authority of the system prompt. Project files run in a separate labelled message, and until you trust the workspace, what the agent reads there taints the session, so later writes need a person. The terminal asks once, `--trust` records it, and non-interactive runs stay untrusted.
 
 If no sandbox is available, the harness refuses to run commands. It does not quietly fall back.
 
