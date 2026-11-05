@@ -19,9 +19,11 @@
 | `git push`（SSH）、`gh`、`kubectl`、`docker` 失败 | 沙箱里没有凭证和本机套接字 | 让模型带 `outside_sandbox: true` 请求，由人确认后在沙箱外执行；或者自己在终端里跑 |
 | `git config`、`git remote add`、`git push -u` 失败 | `.git/hooks`、`.git/config` 在沙箱里只读。`git add`、`git commit` 不受影响 | 同上 |
 | 项目 `flywhl.toml` 里的 `sandbox = "off"` 不生效 | 关闭沙箱只有三个入口：用户配置、`-c` 指定的文件、`--sandbox off`。信任项目配置也不行 | 改用这三个入口之一 |
+| 无人值守时 `write`、`edit` 改 `.git/config`、`.git/hooks`、`flywhl.toml` 被拒绝，`--yes` 也不行；有人看时每次都要确认 | 这些位置在沙箱里只读，文件工具不在沙箱里，放开就能绕过沙箱。没开沙箱时不受影响 | 由人确认，或者自己在终端里改 |
 | 写了 `sandbox = "macos"` 或 `"linux"` 的配置连不上网 | 没写 `sandbox_network` 时从 `allow` 变成 `allowlist` | 显式写 `sandbox_network = "allow"`，或把主机加进白名单 |
 
 `outside_sandbox` 是一道独立的人工门：任何模式下都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时直接拒绝。
+`write`、`edit` 写沙箱里只读的位置走同一道门。
 
 **English summary.** bash, command hooks, stdio MCP servers and `verify_command` now run inside an OS sandbox by default
 (`sandbox-exec` on macOS, bubblewrap on Linux). Credentials are unreadable, writes are limited to the workspace and temp directories,
@@ -29,7 +31,8 @@ and the network starts as an empty allowlist. If no sandbox is available the har
 install bubblewrap, or opt out with `sandbox = "off"` in `~/.flywhl/config.toml` or `--sandbox off`; project config cannot opt out.
 Allow hosts with `--net-allow` or `permissions.network_allow`. Commands that need your credentials (`git push` over SSH, `gh`, `kubectl`)
 either go through the human-only `outside_sandbox` gate or run in your own terminal. `.git/hooks` and `.git/config` are read-only inside the
-sandbox, so `git config`, `git remote add` and `git push -u` fail there. Configs that set `macos` or `linux` without `sandbox_network`
+sandbox, so `git config`, `git remote add` and `git push -u` fail there. `write` and `edit` on those paths and on `flywhl.toml` take the same
+human-only gate, so unattended runs refuse them, including `--yes`. Configs that set `macos` or `linux` without `sandbox_network`
 move from `allow` to `allowlist`.
 
 ### 新增

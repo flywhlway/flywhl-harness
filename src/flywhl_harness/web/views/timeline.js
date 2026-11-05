@@ -224,7 +224,7 @@ export function approvalCard(a, ctx) {
       <span class="src">${icon("clock", "sm")} ${esc(fmt.ago(a.created_at))}${a.expires_at ? ` · ${esc(expiresIn(a.expires_at))}` : ""}</span>
       <span class="spacer"></span>
       <button class="btn danger-outline" type="button" data-act="reject">${icon("ban")}拒绝…</button>
-      ${a.args?.outside_sandbox ? "" : `<button class="btn" type="button" data-act="always" data-tip="${esc(a.grant ? `批准并为本会话添加 ${a.grant}：同类操作不再询问` : "批准并为本会话添加授权规则：同类操作不再询问")}">${icon("shieldCheck")}本会话始终允许</button>`}
+      ${a.args?.outside_sandbox || (["write", "edit"].includes(a.tool) && a.risk === "critical") ? "" : `<button class="btn" type="button" data-act="always" data-tip="${esc(a.grant ? `批准并为本会话添加 ${a.grant}：同类操作不再询问` : "批准并为本会话添加授权规则：同类操作不再询问")}">${icon("shieldCheck")}本会话始终允许</button>`}
       <button class="btn primary" type="button" data-act="approve">${icon("check")}批准</button>
     </div>`;
   const ta = $("textarea", card);

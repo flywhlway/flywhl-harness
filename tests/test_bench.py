@@ -17,7 +17,8 @@ pytest.importorskip("bench.taskset", reason="bench/ 不在 sdist 里")
 
 from bench import redact, report  # noqa: E402
 from bench.common import (  # noqa: E402
-    BudgetExceeded, Ledger, append_jsonl, load_plan, read_jsonl, require_disposable, require_sandbox, unexpected_mounts,
+    REGRESSION, BudgetExceeded, Ledger, append_jsonl, load_plan, read_jsonl, require_disposable, require_sandbox,
+    unexpected_mounts,
 )
 from bench.q2 import run_q2, schedule, trial_env  # noqa: E402
 from bench.q3 import run_q3  # noqa: E402
@@ -133,6 +134,12 @@ def test_real_runs_refuse_to_start_without_a_working_sandbox(monkeypatch):
     monkeypatch.setattr("bench.common.probe", lambda: Detected("", "user namespace 被禁用"))
     with pytest.raises(SystemExit, match="user namespace"):
         require_sandbox()
+
+
+def test_regression_reruns_real_tasks_under_its_own_id():
+    regression, plan = load_plan(REGRESSION), load_plan()
+    assert regression["id"].startswith(plan["plan_id"] + "-")
+    assert set(regression["tasks"]) <= {t.id for t in load_tasks() if t.sandbox_sensitive}
 
 
 def test_rehearsal_flags_results_that_prove_nothing():

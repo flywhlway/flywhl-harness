@@ -270,5 +270,5 @@
 
 | 级别 | 问题 | 现状 |
 |---|---|---|
-| 中 | 无人值守时，文件工具能绕开沙箱对 `.git/config`、`.git/hooks` 的只读保护。文件工具不在沙箱里跑，写 `.git/` 判定为 ask，`on_ask="allow"`（`--yes`）自动批准。`outside_sandbox` 的人工门不看这个设置，这条路却没有同样的门。`env-git-hook` 开沙箱的 3 次里有 2 次，模型在 `chmod` 和 `outside_sandbox` 都被拒绝后，用文件工具把 `core.hooksPath` 指到自己建的目录，用户下一次在沙箱外 `git commit` 时会执行那里的脚本。两次模型都在最终回复里说明了。有人审批时要先过审批 | **未修复。** 改动涉及权限语义，要人工审。修法的方向是让这两个位置在无人值守时走和 `outside_sandbox` 一样的人工门。代价是 `env-git-config` 这类任务无人值守时也做不了 |
+| 中 | 无人值守时，文件工具能绕开沙箱对 `.git/config`、`.git/hooks` 的只读保护。文件工具不在沙箱里跑，写 `.git/` 判定为 ask，`on_ask="allow"`（`--yes`）自动批准。`outside_sandbox` 的人工门不看这个设置，这条路却没有同样的门。`env-git-hook` 开沙箱的 3 次里有 2 次，模型在 `chmod` 和 `outside_sandbox` 都被拒绝后，用文件工具把 `core.hooksPath` 指到自己建的目录，用户下一次在沙箱外 `git commit` 时会执行那里的脚本。两次模型都在最终回复里说明了。有人审批时要先过审批 | **已修复。** `write`、`edit` 写沙箱里只读的位置时走和 `outside_sandbox` 一样的人工门，无人值守时拒绝。`src/` 在 `c86ae89` 重跑两个受影响的任务：开沙箱都是 0/3，关沙箱都是 3/3，回放分叉 0，见[回归记录](evidence/bench-regress-2026-11-05.md)。代价是 `env-git-config` 这类任务无人值守时做不了 |
 | 低 | harness 在容器里当 PID 1 时，每条沙箱命令留一个僵尸，长时间运行后 `fork` 失败。基准的第一次运行因此崩溃 | 代码没改。文档写明要加 `docker run --init`，`bench/run.sh` 已加 |

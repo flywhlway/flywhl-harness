@@ -135,7 +135,8 @@ async def terminal_approval(rec) -> ApprovalDecision:
     print()
     print(_c("bold", f"⚠ 需要审批：{_safe(rec.summary)}") + _c("dim", f"  [风险 {rec.risk}] {_safe(rec.reason)}"))
     print(_c("dim", _safe(json.dumps(rec.args, ensure_ascii=False, indent=2)[:1500])))
-    once = bool(rec.args.get("outside_sandbox"))     # 沙箱外执行每次都问，没有“总是允许”
+    # 人工门每次都问，没有“总是允许”。文件工具只有过这道门时风险才是 critical
+    once = bool(rec.args.get("outside_sandbox")) or (rec.tool in ("write", "edit") and rec.risk == "critical")
     prompt = "  [y] 允许  [n] 拒绝 > " if once else "  [y] 允许  [n] 拒绝  [a] 本会话总是允许 > "
     ans = (await asyncio.to_thread(input, prompt)).strip().lower()
     if ans in ("y", "yes", "是") or (ans == "a" and not once):

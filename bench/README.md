@@ -33,6 +33,14 @@ bench/run.sh --env-file ~/bench.env --out /tmp/bench-pilot-q2 pilot-q2
 
 `pilot-q2` 用方案里的 4 个任务走通 Q2，数据不计入。
 
+正式运行之后修了 harness，只重跑受影响的任务，任务清单在 `bench/regression.toml`：
+
+```bash
+bench/run.sh --env-file ~/bench.env --out /tmp/bench-regress regress
+```
+
+它沿用 `plan.toml` 的模型、次数、种子和配置，`manifest.json` 里的 `plan_id` 是 `regression.toml` 的 `id`。结果单独报告，不进结果页的统计。
+
 确认次数放得下预算，再正式运行：
 
 ```bash

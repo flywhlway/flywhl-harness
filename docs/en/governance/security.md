@@ -36,7 +36,7 @@ The chapter's summary names the main ones.
 - **Project instruction files reach the system prompt.** `build_system_prompt` puts `AGENTS.md`, `CLAUDE.md` and the skill list into it (capped at 32 KiB of UTF-8, oversize files skipped whole). On an unfamiliar repo the author gains system-prompt authority. Disable `load_agents_md` and `load_skills`, or review in `plan` mode first.
 - **Shared kernel, and workspace content that later runs outside the sandbox.** The sandbox stops mistakes and injection-driven overreach, not kernel exploits. `Makefile`, `.envrc` and submodule config written inside the sandbox can run later outside it (see chapter 18).
 - **Bash analysis is not a security boundary.** Anything that depends on runtime state, such as a value computed by command substitution or a script's contents, cannot be classified statically. The analyzer reduces approval fatigue and catches careless or simple cases. Determined obfuscation after an injection is for the sandbox to stop.
-- **`on_ask="allow"` (`--yes`)** approves every ask, leaving only deny rules. Use it only in a disposable sandbox.
+- **`on_ask="allow"` (`--yes`)** approves every ask except human-gated calls, leaving deny rules and that gate. Use it only in a disposable sandbox.
 - **Output filtering** in `post_tool_use` does not reach streamed `tool_update` events.
 - **Taint is coarse.** It covers the whole session and is only ever set, never cleared.
 - **The approver identity** is recorded as `web-user`. A shared deployment needs real authentication in front.

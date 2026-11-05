@@ -9,6 +9,7 @@ pi 的核心工具只有 read / write / edit / bash 四个，外加 grep / find 
 - **过期读取保护**：文件在上次 read 之后被外部修改过，就拒绝 edit/write，要求重新读取，
   避免覆盖用户在 Agent 运行期间的并发修改。
 - **details 给 UI**：write/edit 在 details 里附 unified diff，UI 渲染成彩色差异，模型只看到一句话结论。
+- **沙箱里只读的位置要过人工门**：write/edit 跑在沙箱外，不拦的话，bash 写不了的 ``.git/config`` 换个工具就写进去了。
 """
 
 from __future__ import annotations
@@ -17,13 +18,17 @@ import difflib
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._utils import truncate_head
 from ..policy.sensitive import CREDENTIAL_GLOBS, SECRET_HINT_GLOBS, sensitivity
 from ..runtime.workspace import IGNORED_DIRS, IGNORED_FILES, CredentialPath, PathEscape
 from . import regex_search
 from .base import Effect, Tool, ToolContext, ToolResult
+from .sandbox import frozen_landing, frozen_paths
+
+if TYPE_CHECKING:
+    from .confine import Confinement
 
 MAX_LINES = 2000
 MAX_BYTES = 50 * 1024
@@ -135,7 +140,34 @@ class ReadTool(Tool):
         )
 
 
-class WriteTool(Tool):
+class _GatedWrite(Tool):
+    """沙箱里只读的位置，内容之后都会在沙箱外起作用（下一次 ``git commit`` 跑的 hook、``flywhl.toml`` 里的配置）。
+    write、edit 不在沙箱里，写进去等于绕开沙箱，所以和 ``outside_sandbox`` 过同一道人工门。门放在工具上，不放在权限层：
+    回放用的 ``RecordedTool`` 没有这道门，已有轨迹里的这类写入才能照原样重放。"""
+
+    def __init__(self, confinement: Confinement | None = None):
+        self.confinement = confinement   # 和 bash 共用一份。没开沙箱时没有边界可绕，不过这道门
+
+    def human_gate(self, args: dict[str, Any], workspace: str | None = None) -> str | None:
+        box, path = self.confinement, args.get("path")
+        if box is None or not box.active or not workspace or not path:
+            return None
+        target = Path(os.path.expanduser(str(path)))
+        target = target if target.is_absolute() else Path(workspace) / target
+        hit = frozen_landing(target, frozen_paths(workspace, box.protected))
+        if hit is None:
+            return None
+        return f"{os.path.relpath(hit, os.path.realpath(workspace))} 在系统沙箱里是只读的，写进去的内容之后会在沙箱外起作用"
+
+    def _refuse_ungated(self, p: Path, ctx: ToolContext) -> ToolResult | None:
+        """执行时按真实路径再查一次：判定之后软链接可能已经换了，回放和直接调用也走不到审批。没有人确认过就拒绝。"""
+        gate = self.human_gate({"path": str(p)}, str(ctx.workspace.root))
+        if gate and not ctx.human_approved:
+            return ToolResult.error(f"{gate}。必须由人当场确认，这次调用没有经过确认：文件未改动")
+        return None
+
+
+class WriteTool(_GatedWrite):
     name = "write"
     description = "创建新文件或整体覆盖已有文件（会自动创建父目录）。修改已有文件的局部内容请优先使用 edit。"
     parameters = {
@@ -159,6 +191,8 @@ class WriteTool(Tool):
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         p = _resolve(ctx, args["path"])
+        if refused := self._refuse_ungated(p, ctx):
+            return refused
         if stale := _check_stale(ctx, p):
             return ToolResult.error(stale)
         old = ""
@@ -180,7 +214,7 @@ class WriteTool(Tool):
         )
 
 
-class EditTool(Tool):
+class EditTool(_GatedWrite):
     name = "edit"
     description = (
         "精确字符串替换：把文件中的 old_string 替换为 new_string。old_string 必须与文件内容完全一致"
@@ -213,6 +247,8 @@ class EditTool(Tool):
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         p = _resolve(ctx, args["path"])
+        if refused := self._refuse_ungated(p, ctx):
+            return refused
         if not p.exists():
             return ToolResult.error(f"文件不存在：{args['path']}。新建文件请使用 write。")
         if stale := _check_stale(ctx, p):
