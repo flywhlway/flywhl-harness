@@ -98,7 +98,7 @@ def main() -> int:
             asyncio.run(q2.run_q2(plan, args.out))
         if args.command in ("q3", "all"):
             print(json.dumps(asyncio.run(q3.run_q3(args.out)), ensure_ascii=False))
-        if args.command == "all":
+        if args.command in ("pilot", "all"):    # 原始数据不出容器，不脱敏就什么也取不走
             print(json.dumps({"redaction_hits": redact.publish(args.out, args.public)}, ensure_ascii=False))
     except BudgetExceeded as e:
         print(f"预算用完，已经跑完的数据都在：{e}", file=sys.stderr)
