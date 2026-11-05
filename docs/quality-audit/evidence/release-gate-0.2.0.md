@@ -94,4 +94,4 @@ Python 3.11、3.13 的 Linux 矩阵仍以 PR 上的 CI 结果为准。
 
 PR 上的 CI 在 `890ffea` 全部通过，`src/` 和候选代码相同：Ubuntu 上 Python 3.11～3.13、macOS 上 3.12 的离线套件，两个平台的沙箱验收。
 
-这份记录仍然不代表已经发布：PyPI、TestPyPI 的发布者配置、GitHub environment 和 `v0.2.0` 标签都还没做。
+这份记录不代表已经发布。`dd4331a` 之后到打标签只改文档，`src/`、工作流、`uv.lock`、`pyproject.toml`、`scripts/` 都没有变，门禁不再重跑。发布配置在打标签之前配好：GitHub 上有 `testpypi`、`pypi` 两个 environment，`pypi` 要人工批准，PyPI、TestPyPI 的发布者由维护者配置。发布结果以 PyPI 和 `v0.2.0` 的 GitHub Release 为准。
