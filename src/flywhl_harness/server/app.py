@@ -71,8 +71,8 @@ class RevalidatingStaticFiles(StaticFiles):
 
 # 运行结束后仍值得在时间线上看到的提示：审批疲劳、新加的会话授权、hook 告警、执行中混入的不可信内容、模型降级与切换、
 # 恢复时的重新执行。排队、暂停这类过程性提示不留
-KEPT_NOTICES = frozenset({"approval_fatigue", "grant", "hook_warning", "tainted", "fallback", "server_fallback",
-                          "model_switched", "recover_reexecute"})
+KEPT_NOTICES = frozenset({"approval_fatigue", "approve_outside", "grant", "hook_warning", "tainted", "fallback",
+                          "server_fallback", "model_switched", "recover_reexecute"})
 
 
 class NewSession(BaseModel):

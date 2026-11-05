@@ -36,6 +36,9 @@ class ApprovalDecision:
 Resolver = Callable[[ApprovalRecord], Awaitable[ApprovalDecision]]
 
 
+OUTSIDE_BY = "policy:approve_outside"
+
+
 class ApprovalBroker:
     def __init__(self, store: Store, *, on_ask: str = "wait", timeout: float = 600.0, resolver: Resolver | None = None):
         self.store = store
@@ -49,11 +52,18 @@ class ApprovalBroker:
         self, *, run_id: str, session_id: str, call_id: str, tool: str, args: dict[str, Any], summary: str,
         risk: str, reason: str, cancel: CancelToken,
         on_created: Callable[[ApprovalRecord], Awaitable[None]] | None = None,
-        auto_rule: str | None = None, auto_why: str = "",
+        auto_rule: str | None = None, auto_why: str = "", outside_rule: str | None = None,
     ) -> ApprovalDecision:
         if self.on_ask == "allow":
             return ApprovalDecision(True, by="policy:auto_allow", reason="无人值守模式自动放行")
         if self.on_ask == "deny":
+            if outside_rule:   # 离开沙箱是最重的放行：没人看，就要在 approvals 表里留一条单独的记录
+                decision = ApprovalDecision(True, by=OUTSIDE_BY, reason=f"无人值守：命中 --approve-outside {outside_rule}")
+                rec = self.store.create_approval(ApprovalRecord(
+                    id=new_id("ap_"), run_id=run_id, session_id=session_id, call_id=call_id, tool=tool, args=args,
+                    summary=summary, risk=risk, reason=reason, status="pending", expires_at=now()))
+                self.resolve(rec.id, decision)
+                return decision
             if auto_rule:
                 return ApprovalDecision(True, by="policy:auto_approve", reason=f"无人值守：命中自动批准规则 {auto_rule}")
             why = f"（{auto_why}）" if auto_why else ""

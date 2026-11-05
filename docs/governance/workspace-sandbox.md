@@ -536,7 +536,7 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 | default、accept_edits、bypass 模式 | 都要人确认 |
 | 有 `allow` 规则、会话授权，或命中 `auto_approve` | 照样要人确认，这些都放行不了 |
 | plan 模式、`deny` 规则、凭证位置、灾难性命令 | 拒绝，人工门不能把拒绝变成放行 |
-| 无人值守（`on_ask` 不是 `wait`） | 拒绝，`--yes` 也不行 |
+| 无人值守（`on_ask` 不是 `wait`） | 拒绝，`--yes` 也不行。例外只有 `--approve-outside` 写明的命令，见下文 |
 | 审批卡片、终端提示 | 写明“将在沙箱外执行”，风险记为 critical，没有“本会话始终允许” |
 | 人点了批准并勾选“记住” | 只放行这一次，不产生授权 |
 | hook 在审批之前把参数改成沙箱外 | 重新判定，走人工门，hook 自己放行不了 |
@@ -546,15 +546,48 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 | 没配沙箱（`off`） | 没有门：本来就在沙箱外 |
 
 实现上，工具用 `Tool.human_gate()` 声明这道门，权限判定把它记成 `PermissionResult.human_only`，放在模式、规则、授权之上，
-执行器看到这个标记就不走 `auto_approve` 和无人值守分支。批准之后的复查和改写后的重新判定都看同一个标记，
+执行器看到这个标记就不走 `auto_approve`，无人值守分支只认 `--approve-outside`。批准之后的复查和改写后的重新判定都看同一个标记，
 所以 hook 也不能在批准之后把参数改成沙箱外。
 
-工具自己还要再核对一次。执行器只在人批准之后才设 `ToolContext.human_approved`，`BashTool` 和文件工具只认这个标记，只看参数不够：
+工具自己还要再核对一次。执行器只在过了人工门之后才设 `ToolContext.human_approved`，`BashTool` 和文件工具只认这个标记，只看参数不够：
 回放把工具包成 `RecordedTool`，权限层看不到人工门，模式又是 bypass，没有录制结果的调用落到真实工具上时，`outside_sandbox` 就直接生效了。
 这样任何走不到审批的路径，默认都是拒绝。
 
 文件工具的门要知道工作区在哪，权限层通过 `Tool.human_gate_in()` 取。门放在工具上而不是权限层，是为了回放：
 `RecordedTool` 没有这道门，已有轨迹里写过 `.git/config` 的调用才能照原样重放，不会分叉。
+
+**无人值守时的显式放行。** 发布任务走到 `git push` 时没有人能点批准，只能失败。`--approve-outside` 让人把这一个决定提前做了：
+
+```bash
+flywhl run "发布 0.3.0" --json --trust --approve-outside 'git push origin main'
+```
+
+这个决定只能由当时在命令行前的人做，所以限制写得很死：
+
+- 只有 `flywhl run` 的命令行参数，配置文件和环境变量都写不了，`resume`、`serve` 也没有；
+- 必须写命令模式，第一个词要是具体的命令名。`*`、路径（工作区里的脚本沙箱里的命令能改）、解释器和包装命令（`bash`、`python`、`env`、`sudo`……）都拒绝；
+- 只在无人值守时生效（`--json`、`--approve`、`on_ask = "deny"`），有人在场时照样问人，不能和 `--yes` 一起用；
+- 只管 bash，`write`、`edit` 写 `.git/hooks`、`.git/config` 不在其中。
+
+判定比 `auto_approve` 严，因为命令离开沙箱就没有东西兜底：
+
+| 不放行 | 原因 |
+|---|---|
+| 复合命令里有一段不匹配 | `git push && curl …` 不能搭便车 |
+| 实际执行的程序不在命令文本里，或者嵌着另一段代码 | 命令替换、`git push --receive-pack=…`、`ext::` 地址都能匹配 `git push*` |
+| 命令分析为高危 | `git push --force` 同样匹配。人工门把 `risk` 一律记成 critical，这里看的是命令分析 |
+| 输出重定向到文件 | `git push > ~/.zshrc` 也匹配 `git push*`，`2>&1` 不算 |
+| 托管基线要求确认的 | 同 `auto_approve` |
+| 会话有污点 | 没信任过的工作区里读过文件也算，所以这个参数只对信任过的仓库有用 |
+| PreToolUse hook 要求确认的 | 守卫明确要人看 |
+
+plan 模式、`deny` 规则、凭证位置、灾难性命令在这之前已经拒绝了，回放和脚本直接调用走不到这里。
+
+每次放行留两条记录：`approvals` 表里一条 `decided_by = policy:approve_outside` 的记录（别的无人值守判定不建这种记录），事件流里一条 `approve_outside` 通知，写明命令和命中的模式。
+
+模式按文本匹配，担保不了命令读到的东西。`make deploy`、`npm run release` 跑的是工作区里的文件，而沙箱里的命令能改这些文件，这类命令写进模式之前要想清楚。
+
+`bash` 工具的参数描述还写着“无人值守时直接拒绝”。工具描述算进回放指纹，改它会让已发布的轨迹分叉，所以没动：模型看到的比实际严，不影响判定。
 
 用户选择了让命令在外面跑，后果也在外面：它能读凭证、能写工作区之外，网络不受限。环境变量照样剥离。
 
@@ -915,8 +948,8 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - 系统沙箱默认开启（`sandbox = "auto"`），用不了时拒绝执行，不退回沙箱外；只有用户配置、`-c`、`--sandbox off` 能关掉，项目配置不能。
   bash、命令 hook、MCP 服务器、`verify_command` 共用一层：凭证位置不可读写、写操作限制在工作区与临时目录。
 - 网络默认是空白名单的 `allowlist`：经代理按主机名放行，DNS 与本机套接字一并拒绝，被拦时报错写明主机和放行办法。Linux 上代理经 Unix 套接字和沙箱里的转发器接起来。
-- 要在沙箱外跑命令用 `outside_sandbox`，这是一道独立的人工门，任何模式都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时拒绝。
-  工具只认执行器在人批准之后给的标记，回放和直接调用走不到这里。
+- 要在沙箱外跑命令用 `outside_sandbox`，这是一道独立的人工门，任何模式都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时拒绝，只有命令行上 `--approve-outside` 写明的命令例外。
+  工具只认执行器过了人工门之后给的标记，回放和直接调用走不到这里。
 - 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。影子 git 自己也跑在沙箱外，不收录嵌套仓库，不执行它们的配置。
 - “只在沙箱档位下允许 bypass”还是设计草案。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash、MCP 服务器、命令 hook 共用一套规则）只是最小实现。

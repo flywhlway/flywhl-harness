@@ -38,7 +38,7 @@ from .config import (HarnessConfig, TrustRequest, flywhl_home, is_workspace_trus
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
-from .policy.permissions import auto_approve_rule
+from .policy.permissions import auto_approve_rule, outside_rule
 from .runtime.manager import Harness
 from .tools.confine import OFF_HINT, Confinement
 from .tools.mcp import MCPError
@@ -292,7 +292,16 @@ async def cmd_run(args: argparse.Namespace) -> int:
     confirm_workspace(args, cfg)
     if args.json and cfg.permissions.on_ask == "wait":
         cfg.permissions.on_ask = "deny"  # 无人值守：需要审批的操作一律拒绝（可用 --yes 改为放行）
-    async with Harness(cfg, approval_resolver=None if args.json else terminal_approval) as h:
+    outside = args.approve_outside or []
+    if outside and cfg.permissions.on_ask == "allow":
+        raise SystemExit("--approve-outside 不能和 --yes（或配置里的 on_ask = \"allow\"）一起用：--yes 放行不了人工门")
+    try:
+        rules = [outside_rule(p) for p in outside]
+    except ValueError as e:
+        raise SystemExit(f"--approve-outside：{e}") from None
+    if rules and cfg.permissions.on_ask == "wait":
+        print(_c("yellow", "--approve-outside 只在无人值守时生效，这次有人在场，沙箱外命令照样问你"), file=sys.stderr)
+    async with Harness(cfg, approval_resolver=None if args.json else terminal_approval, approve_outside=outside) as h:
         s = h.create_session(args.prompt[:30])
         status = await _stream_run(h, s.id, args.prompt, args.json, args.thinking)
     return 0 if status == "completed" else 1
@@ -525,6 +534,9 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--json", action="store_true", help="输出 JSONL 事件流")
     sp.add_argument("--approve", action="append", metavar="规则",
                     help="无人值守时自动批准的操作，如 'bash(npm test*)'、'write(src/**)'，可重复；其余需要审批的一律拒绝")
+    sp.add_argument("--approve-outside", action="append", metavar="模式",
+                    help="无人值守时放行命令模式匹配的 outside_sandbox 命令，如 'git push origin*'，可重复；只有命令行能写，"
+                         "只在 --json、--approve 这类无人值守运行中生效，有污点、高危、复合命令里有不匹配的段时照样拒绝")
     sp.set_defaults(fn=cmd_run)
     sub.add_parser("sessions", parents=[common], help="列出会话").set_defaults(fn=cmd_sessions)
     sp = sub.add_parser("runs", parents=[common], help="列出运行")

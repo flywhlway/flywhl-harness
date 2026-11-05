@@ -166,6 +166,8 @@ class CommandAnalysis:
     # 命令里嵌着另一段要执行的代码（sh -c、eval、find -exec、解释器内联代码……）：前几个词说明不了实际执行什么，
     # “本会话总是允许”只能精确授权这一条，不能按前缀放行
     inline: bool = False
+    # 输出重定向到文件：写到哪里由重定向决定，命令模式按文本匹配时担保不了
+    writes_file: bool = False
     workspace: str | None = field(default=None, repr=False)
     depth: int = field(default=0, repr=False)   # sh -c / eval 的递归深度
     # 按段的先后跟踪的 shell 状态：赋过的值（None 是运行时才知道的值）、执行到当前这段时一定赋过值的变量、
@@ -1424,6 +1426,7 @@ def _classify_words(expanded: list[str], a: CommandAnalysis) -> None:
             target = words[j + 1]
             if target in ("/dev/null", "&1", "&2") or (w == ">&" and (target.isdigit() or target == "-")):
                 continue
+            a.writes_file = True
             if target.startswith("/dev/"):
                 if _BLOCK_DEV.match(target):
                     a.flag_catastrophic(f"写入块设备 {target}")
@@ -1850,6 +1853,7 @@ def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child", 
 
 
 # 值是一条命令的配置键：git -c core.pager='rm -rf ~' log 执行的就是 rm -rf ~
+_GIT_HELPER_URL = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*::")
 _GIT_EXEC_KEYS = re.compile(r"core\.(pager|sshcommand|fsmonitor|editor|hookspath|gitproxy|askpass)|diff\.external"
                             r"|sequence\.editor|credential\.([^=]*\.)?helper|[^=]*\.(command|program|textconv|cmd|clean|smudge"
                             r"|process|driver)", re.I)
@@ -2007,6 +2011,10 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
             (sub == "reflog" and positional[:1] not in (["expire"], ["delete"])):
         read(f"git {sub} 只读查询")
     elif sub in GIT_EXTERNAL:
+        if _git_remote_program(sub, rest):
+            # 按远端地址或选项运行程序：allow:bash(git push*) 这类前缀规则看不见它
+            a.bump("external", f"git {sub} 的选项或远端地址指定了要运行的程序")
+            a.inline = a.opaque = True
         if "--force" in rest or "-f" in rest or any(x.startswith(("+", "--force")) for x in rest):
             a.bump("dangerous", "强制推送会改写远端历史")
         else:
@@ -2018,6 +2026,12 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
         a.bump("external", f"git {sub} 可能配置命令执行或访问远端")
     else:
         a.bump("write", f"git {sub} 修改仓库")
+
+
+def _git_remote_program(sub: str, args: list[str]) -> bool:
+    """``--receive-pack`` 这类选项在远端（本地路径就是本机）运行指定的程序，``ext::cmd`` 这类地址调用 ``git-remote-<协议>``。"""
+    options = {"--receive-pack", "--upload-pack", "--exec", *(["-u"] if sub == "clone" else [])}
+    return any(x.split("=", 1)[0] in options or _GIT_HELPER_URL.match(x) for x in args)
 
 
 def _git_flags(args: list[str]):
