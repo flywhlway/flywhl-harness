@@ -82,9 +82,10 @@ hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了�
 
 ## Web 访问控制
 
-- **令牌默认开启。** 首次启动生成令牌并保存到 `~/.flywhl/server_token`（权限 0600），终端打印带 `?token=` 的链接；在 `/` 上兑换成 30 天的 HttpOnly Cookie 后 303 跳转，地址栏不留令牌。API 也接受 `Authorization: Bearer`。`--token` 指定令牌，`--no-token` 只允许监听回环地址。
+- **令牌默认开启。** 首次启动生成令牌并保存到 `~/.flywhl/server_token`（权限 0600），终端打印带 `?token=` 的链接；在 `/` 上兑换成 30 天的 HttpOnly Cookie 后 303 跳转，地址栏不留令牌。API 也接受 `Authorization: Bearer`。`--token` 指定令牌。`--no-token` 只允许监听回环地址，Agent 运行的命令连得到控制台端口时也拒绝启动：没有令牌时，这些命令能调用审批接口，批准自己的人工门。“连得到”指沙箱档位是 off、网络策略是 `allow`，或者白名单放行了回环地址上的这个端口，hook 和 MCP 服务器自己的沙箱设置同样算；沙箱用不了时命令不会执行，不算。
+- **监听非回环地址要显式声明。** 没加 `--expose` 时拒绝启动，退出码 2。这类地址必须带令牌，`--token` 手动指定时至少 16 个字符。
 - **请求体上限** 8 MB，超出返回 413；不接受分块上传，缺少 `Content-Length` 返回 411。
-- **Host 白名单** 抵御 DNS 重绑定（反向代理域名用 `--allow-host` 加入）；所有写请求要求 Origin 与服务同主机同端口。
+- **Host 白名单** 抵御 DNS 重绑定，不能关闭：只接受回环地址和 `--allow-host` 写的主机名或 IP，不接受 `*`。监听具体的 IP 时这个 IP 自动加入，监听 `0.0.0.0`、`::` 时不加。所有写请求要求 Origin 与服务同主机同端口。
 - **安全响应头**：CSP 禁止内联脚本并设 `frame-ancestors 'none'`，另有 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 
 ## 执行环境
