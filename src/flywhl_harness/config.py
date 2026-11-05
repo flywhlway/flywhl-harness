@@ -240,8 +240,20 @@ class HarnessConfig:
         p = Path(self.data_dir)
         if not p.is_absolute():
             p = Path(self.workspace).resolve() / p
-        p.mkdir(mode=0o700, parents=True, exist_ok=True)   # 新建时只给属主：里面是会话库与审批记录
-        return p
+        return ensure_data_dir(p)
+
+
+def ensure_data_dir(path: Path) -> Path:
+    """建数据目录。里面是会话库、审批记录和快照：只给属主，并放一个忽略一切的 .gitignore，
+    不然工作区永远不干净，``git add -A`` 还会把它们带进仓库。只在自己新建时放，已有的目录可能是用户的。"""
+    try:
+        path.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        if path.is_dir():
+            return path
+        raise
+    (path / ".gitignore").write_text("*\n", encoding="utf-8")
+    return path
 
 
 def read_dotenv(path: str | Path = ".env") -> dict[str, str]:

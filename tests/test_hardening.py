@@ -248,6 +248,25 @@ def test_existing_git_config_env_is_preserved(monkeypatch):
     assert env["GIT_CONFIG_KEY_1"] == "core.fsmonitor"
 
 
+def test_data_dir_stays_out_of_git(tmp_path):
+    """数据目录在工作区里，里面是会话库。不忽略的话工作区永远不干净，git add -A 还会把它带进仓库。"""
+    from flywhl_harness import HarnessConfig
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    HarnessConfig(workspace=str(tmp_path)).data_path()
+    (tmp_path / ".flywhl" / "harness.db").write_text("sentinel", encoding="utf-8")
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    assert out.stdout == ""
+
+
+def test_data_dir_leaves_an_existing_directory_alone(tmp_path):
+    from flywhl_harness import HarnessConfig
+
+    (tmp_path / "mine").mkdir()
+    HarnessConfig(workspace=str(tmp_path), data_dir="mine").data_path()
+    assert not (tmp_path / "mine" / ".gitignore").exists()
+
+
 def test_git_author_identity_survives_the_secret_filter(monkeypatch):
     """名字里的 AUTH 撞上了密钥规则。删掉它们之后，靠环境变量配身份的提交会报身份未知。"""
     from flywhl_harness.tools.shell import _clean_env

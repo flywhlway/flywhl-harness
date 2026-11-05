@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .._utils import short_hash
+from ..config import ensure_data_dir
 
 IGNORED_DIRS = {
     ".git", ".flywhl", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
@@ -65,7 +66,7 @@ class Workspace:
         self.root.mkdir(parents=True, exist_ok=True)
         dd = Path(data_dir)
         self.data_dir = dd if dd.is_absolute() else self.root / dd
-        self.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)   # 新建的数据目录只给属主（会话库、审批记录、快照）
+        ensure_data_dir(self.data_dir)
         # 一个 Harness 可以服务多个工作区（共用数据目录）：影子仓库必须按工作区分开，
         # 否则不同工作树共用同一个 index，快照与回滚会互相覆盖
         # （只有数据目录就在本工作区根下时才用固定名字；工作区是别的工作区的父目录时也要区分开）
