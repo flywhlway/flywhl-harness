@@ -1,0 +1,8 @@
+id = "extract-module"
+title = "把文本函数抽成独立模块"
+category = "refactor"
+prompt = """
+app.py 里混了几个文本处理函数：normalize_spaces、slugify、truncate。把它们移到新文件 textutils.py，app.py 改成从那里导入。
+report.py 原来从 app 导入这几个函数，也改成直接从 textutils 导入。
+textutils.py 不能反过来依赖 app.py。`python3 app.py` 和 `python3 report.py` 的输出都不能变。
+"""

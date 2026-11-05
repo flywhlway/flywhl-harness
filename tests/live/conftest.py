@@ -3,7 +3,8 @@
 - 只在这里加载项目根目录的 ``.env``：离线测试不受本机密钥影响；
 - 每个测试模块用 ``pytestmark = pytest.mark.live`` 标记，默认的 ``pytest`` 不会运行它们；
 - 被测模型由 ``FLYWHL_LIVE_MODEL`` 指定（默认 ``deepseek:deepseek-flash``），没有对应密钥时整组跳过；
-- 每个测试的 token 与费用汇总打印在测试报告末尾，方便估算一次完整回归要花多少钱。
+- 每个测试的 token 与费用汇总打印在测试报告末尾，方便估算一次完整回归要花多少钱；
+- 设了 ``FLYWHL_LIVE_ARTIFACTS`` 时，把每个用例的结果写进该目录的 ``results.jsonl``，轨迹写进 ``trajectories.jsonl``，基准用它们出数据。
 """
 
 from __future__ import annotations
@@ -20,16 +21,66 @@ from flywhl_harness import Harness, HarnessConfig, Store
 from flywhl_harness.config import load_dotenv
 from flywhl_harness.events import E
 from flywhl_harness.llm.profiles import resolve
+from flywhl_harness.observe.trace import dumps, export_trajectory
 from flywhl_harness.policy.approvals import ApprovalDecision
 
 ROOT = Path(__file__).resolve().parents[2]
 _LEDGER: list[dict[str, Any]] = []
+_ARTIFACTS = os.environ.get("FLYWHL_LIVE_ARTIFACTS")
+_RESULTS: dict[str, dict[str, Any]] = {}
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _dotenv():
     # 放在 fixture 里而不是模块顶层：普通的离线 pytest 也会导入本文件，但不应因此读到本机密钥
     load_dotenv(ROOT / ".env")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """记下每个用例的结局。跳过可能发生在 setup，失败可能发生在 teardown，所以三个阶段都看。"""
+    rep = (yield).get_result()
+    if not _ARTIFACTS:
+        return
+    row = _RESULTS.setdefault(item.nodeid, {"nodeid": item.nodeid, "outcome": "passed", "seconds": 0.0, "detail": ""})
+    row["seconds"] = round(row["seconds"] + rep.duration, 3)
+    if rep.failed or (rep.skipped and row["outcome"] == "passed"):
+        row["outcome"] = rep.outcome
+        row["detail"] = str(rep.longrepr)[-6000:]
+
+
+def _save_trajectories(nodeid: str, tmp_path: Path) -> list[dict[str, Any]]:
+    """把用例留下的数据库导出成轨迹。kill -9 那条的数据库在工作区里，所以按文件名找。"""
+    usage = []
+    for db in tmp_path.rglob("harness.db"):
+        store = Store(db)
+        try:
+            with open(Path(_ARTIFACTS) / "trajectories.jsonl", "a", encoding="utf-8") as f:  # type: ignore[arg-type]
+                for s in store.list_sessions(limit=1000):
+                    for r in store.list_runs(s.id, limit=1000):
+                        usage.append({"run_id": r.id, "status": r.status, **(r.usage or {})})
+                        f.write(json.dumps({"nodeid": nodeid, "trajectory": json.loads(dumps(export_trajectory(store, r.id)))},
+                                           ensure_ascii=False) + "\n")
+        finally:
+            store.close()
+    return usage
+
+
+@pytest.fixture(autouse=True)
+def _artifacts(request, tmp_path: Path):
+    yield
+    if _ARTIFACTS:
+        Path(_ARTIFACTS).mkdir(parents=True, exist_ok=True)
+        _RESULTS.setdefault(request.node.nodeid, {"nodeid": request.node.nodeid, "outcome": "passed", "seconds": 0.0,
+                                                  "detail": ""})["runs"] = _save_trajectories(request.node.nodeid, tmp_path)
+
+
+def pytest_sessionfinish(session):
+    if _ARTIFACTS and _RESULTS:
+        Path(_ARTIFACTS).mkdir(parents=True, exist_ok=True)
+        with open(Path(_ARTIFACTS) / "results.jsonl", "w", encoding="utf-8") as f:
+            for row in _RESULTS.values():
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def live_model() -> str:

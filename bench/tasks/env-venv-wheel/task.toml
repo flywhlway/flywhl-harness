@@ -1,0 +1,7 @@
+id = "env-venv-wheel"
+title = "建虚拟环境离线装 wheel"
+category = "environment"
+prompt = """
+wheels/ 里有个内部小工具 hello_bench 的 wheel。帮我在工作区建一个虚拟环境 .venv，
+不要联网，只从 wheels/ 把它装进去，然后用 .venv 里的 hello-bench 命令跑一下，把输出写进 out.txt。
+"""

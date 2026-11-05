@@ -1,0 +1,11 @@
+id = "data-json-flatten"
+title = "把嵌套的订单展开成 CSV"
+category = "data"
+prompt = """
+orders.json 是导出的订单，结构是嵌套的，财务要一份平的表。帮我展开成 orders.csv，用标准 CSV 转义，规则如下：
+
+- 列依次是 order_id,customer,city,coupon,sku,qty,unit_price,line_total
+- 每个商品一行，顺序跟文件里一致；没有商品的订单也留一行，sku 到 line_total 这四列留空
+- customer 取 customer.name，city 取 customer.address.city，coupon 取 coupon.code，这几个字段缺失或者是 null 都留空
+- unit_price 就是商品的 price，line_total 是 qty 乘 price，这两列都保留两位小数
+"""

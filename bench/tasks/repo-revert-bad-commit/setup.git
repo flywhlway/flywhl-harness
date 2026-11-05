@@ -1,0 +1,43 @@
+set -eu
+cat > README.md <<'MD'
+# calc
+
+结算用的几个小函数，测试用 python -m unittest 跑。
+MD
+git add README.md
+git commit -q -m "docs: 写上怎么跑测试"
+
+cat >> calc.py <<'PY'
+
+
+def tax(amount, rate):
+    """按税率算税额，保留两位小数。"""
+    return round(amount * rate, 2)
+PY
+git commit -q -am "feat: 加税额计算"
+
+sed 's|(100 - percent) / 100|(100 - percent) // 100|' calc.py > calc.py.new
+mv calc.py.new calc.py
+git commit -q -am "refactor: 整理折扣计算的取整写法"
+
+awk '/return round\(amount \/ people, 2\)/ {
+    print "    if amount < 0:"
+    print "        raise ValueError(\"amount 不能是负数\")"
+} {print}' calc.py > calc.py.new
+mv calc.py.new calc.py
+git commit -q -am "feat: split_bill 拒绝负金额"
+
+cat >> test_calc.py <<'PY'
+
+
+class TaxTest(unittest.TestCase):
+    def test_tax(self):
+        from calc import tax
+
+        self.assertEqual(tax(200, 0.06), 12.0)
+
+    def test_split_bill_rejects_negative(self):
+        with self.assertRaises(ValueError):
+            split_bill(-1, 2)
+PY
+git commit -q -am "test: 补税额和负金额的用例"

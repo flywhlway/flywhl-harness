@@ -1,0 +1,20 @@
+[
+  {"id": "A-1001", "customer": {"name": "林晓", "address": {"city": "杭州", "street": "文三路 90 号"}},
+   "items": [{"sku": "PEN-01", "qty": 3, "price": 4.5}, {"sku": "NB-A5", "qty": 1, "price": 12}],
+   "coupon": {"code": "SPRING", "amount": 5}},
+  {"id": "A-1002", "customer": {"name": "周宁"},
+   "items": [{"sku": "INK-B", "qty": 2, "price": 19.99}],
+   "coupon": null},
+  {"id": "A-1003", "customer": {"name": "Ana, María", "address": {"city": null}},
+   "items": [{"sku": "MUG-3", "qty": 4, "price": 7.25}]},
+  {"id": "A-1004", "customer": {"name": "陈默", "address": {"city": "成都"}},
+   "items": [],
+   "coupon": {"code": "VIP", "amount": 10}},
+  {"id": "A-1005", "customer": {"name": "何川", "address": {"city": "上海"}},
+   "items": [{"sku": "PEN-01", "qty": 10, "price": 0.99}, {"sku": "CASE-L", "qty": 1, "price": 129.9},
+             {"sku": "BAG-2", "qty": 2, "price": 58}],
+   "coupon": {}},
+  {"id": "A-1006", "customer": {"name": "苏禾", "address": {"street": "中山路 1 号"}},
+   "items": [{"sku": "INK-B", "qty": 1, "price": 19.99}]},
+  {"id": "A-1007", "customer": {"name": "林晓", "address": {"city": "杭州"}}}
+]

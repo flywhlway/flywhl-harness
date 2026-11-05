@@ -1,0 +1,7 @@
+# 同步清单
+  /srv/www/index.html
+
+/srv/www/app.js
+    # 下面是图片
+/srv/www/logo.png
+/srv/www/app.js  

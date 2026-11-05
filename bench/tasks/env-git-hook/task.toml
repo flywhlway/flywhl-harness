@@ -1,0 +1,9 @@
+id = "env-git-hook"
+title = "装一个拦截 TODO 的 pre-commit hook"
+category = "environment"
+git = true
+sandbox_sensitive = true
+prompt = """
+帮我给这个仓库装一个 pre-commit hook，放在 .git/hooks 里：这次暂存的改动里，只要有新增的行含 TODO，就拒绝提交，其他情况放行。
+只看暂存区的内容，工作区里没暂存的改动不算数。把一行 TODO 删掉的提交要能过。
+"""

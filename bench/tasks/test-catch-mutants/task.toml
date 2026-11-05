@@ -1,0 +1,8 @@
+id = "test-catch-mutants"
+title = "给 slugify 补单元测试"
+category = "test"
+prompt = """
+slugify.py 现在一条测试都没有。实现本身是对的，别改它。
+帮我写 test_slugify.py，用 unittest，把函数文档里列的每条行为都测到，边界情况也要覆盖，
+以后谁改坏其中任何一条，这份测试都得能红。在工作区根目录跑 python -m unittest 要能通过。
+"""

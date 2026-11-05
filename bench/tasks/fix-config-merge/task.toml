@@ -1,0 +1,11 @@
+id = "fix-config-merge"
+title = "修配置的深度合并"
+category = "fix"
+prompt = """
+merge.py 的 deep_merge(base, override) 负责把环境配置叠加到默认配置上，现在好几处行为都不对。约定：
+- 两边都是字典的键要递归合并，嵌套多少层都一样；其他情况用 override 的值盖掉 base 的值；
+- 列表不合并，整体替换；
+- 不能修改 base 和 override，嵌套层也不行；
+- override 里值为 None 表示删掉这个键，任何一层都一样。键本来就不存在时什么也不用做，这个 None 也不能出现在结果里。只有 None 有这个含义，0、False、空字符串都是普通的值。
+现有的测试要继续通过。
+"""

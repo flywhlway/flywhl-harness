@@ -1,0 +1,8 @@
+id = "fix-pagination"
+title = "修分页的边界错误"
+category = "fix"
+prompt = """
+pager.py 的 paginate 在最后一页和超出范围的页码上行为不对。
+约定：页码从 1 开始；每页 size 条；超出范围返回空列表；page 或 size 小于 1 时抛 ValueError。
+修好它，现有的测试也要继续通过。
+"""

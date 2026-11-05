@@ -16,6 +16,8 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 - 断言只针对 harness 的可观测结果（工具序列、文件内容、Run 状态、事件），提示词要求原样输出时才匹配文字。
   模型偶尔不按要求做时，失败信息里附带完整对话记录（`transcript()`），可以直接判断是 harness 的问题还是模型的问题。
 
+设了 `FLYWHL_LIVE_ARTIFACTS=<目录>` 时，每个用例的结果写进该目录的 `results.jsonl`，轨迹写进 `trajectories.jsonl`。公开基准（`bench/`）用它们出数据。
+
 ## 需要哪些密钥
 
 每个用例开头用 `need()` 检查自己要的密钥，缺了就 **跳过**（skipped），不会失败。没有任何密钥时 33 个全部跳过——

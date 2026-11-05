@@ -1,0 +1,11 @@
+id = "dedupe-validators"
+title = "合并重复的校验函数"
+category = "refactor"
+prompt = """
+validators.py 里的 validate_username、validate_tag、validate_project_code 几乎一模一样，把重复的逻辑合并掉。
+要求：
+- 三个函数的名字和调用方式不变；同样的输入要得到同样的返回值，或者同样的错误消息；
+- 合并后的逻辑留在 validators.py 里，不要挪到新文件；
+- 这个文件现在 99 行，改完不能超过 59 行，空行也算。
+现有的测试要继续通过。
+"""

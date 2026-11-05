@@ -1,0 +1,15 @@
+set -eu
+cat >> timer.py <<'PY'
+
+
+def format_ms(ms):
+    """把毫秒格式化成 分:秒.毫秒。"""
+    minutes, rest = divmod(ms, 60000)
+    return f"{minutes}:{rest / 1000:06.3f}"
+PY
+cat >> README.md <<'MD'
+
+## 许可证
+
+MIT
+MD

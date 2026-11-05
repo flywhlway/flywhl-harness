@@ -1,0 +1,2 @@
+set -eu
+git remote add origin git@old-host.example.invalid:team/notes.git

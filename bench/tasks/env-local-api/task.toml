@@ -1,0 +1,9 @@
+id = "env-local-api"
+title = "从本地服务取数据算总价"
+category = "environment"
+serve = "served"
+sandbox_sensitive = true
+prompt = """
+库存服务在本机跑着，数据在 http://127.0.0.1:{port}/items.json。
+帮我取下来，把所有条目的 price 加总，结果写进 total.txt，保留两位小数，只写这个数字。
+"""

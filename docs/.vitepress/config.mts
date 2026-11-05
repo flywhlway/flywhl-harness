@@ -72,6 +72,13 @@ const sidebar = [
     ],
   },
   {
+    text: "基准",
+    items: [
+      { text: "概览", link: "/benchmark/" },
+      { text: "方法说明", link: "/benchmark/methodology" },
+    ],
+  },
+  {
     text: "参考",
     items: [
       { text: "知识地图", link: "/reference/knowledge-map" },
@@ -165,6 +172,10 @@ const enSidebar = [
       { text: "29 Compared with pi", link: "/en/advanced/pi-comparison" },
       { text: "30 Extension guide", link: "/en/advanced/extending" },
     ],
+  },
+  {
+    text: "Benchmark",
+    items: [{ text: "Overview", link: "/en/benchmark/" }],
   },
   {
     text: "Reference",

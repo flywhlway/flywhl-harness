@@ -1,0 +1,11 @@
+id = "add-template-render"
+title = "实现极简模板渲染"
+category = "feature"
+prompt = """
+template.py 的 render(template, ctx) 还是空壳，实现它。模板语法：
+- `{{ name }}` 换成 ctx 里的值，不是字符串的用 str 转换；花括号里的空格可有可无；
+- `{{ user.name }}` 用点号取嵌套字典，层数不限；
+- `{{ name|default:"x" }}` 变量不存在时用双引号里的默认值；变量存在时用变量自己的值，哪怕是 0 或空字符串；
+- 变量不存在又没有默认值时抛 KeyError，错误信息里带完整的变量名，比如 user.name。路径走不通（中间一层不是字典）也算不存在。
+模板里的其他文字原样保留；填进去的值不再当模板解析。
+"""

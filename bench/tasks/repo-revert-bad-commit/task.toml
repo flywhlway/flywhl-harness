@@ -1,0 +1,8 @@
+id = "repo-revert-bad-commit"
+title = "找出引入 bug 的提交并 revert"
+category = "repo"
+git = true
+prompt = """
+test_calc.py 现在是红的。初始提交时还是绿的，问题出在后来的 5 个提交里的某一个。
+帮我找出是哪个提交引入的，用 git revert 撤销它。不要改写历史，其他提交的改动都要留着，测试也别动。
+"""
