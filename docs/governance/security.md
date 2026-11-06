@@ -178,7 +178,7 @@ if "system-reminder" in result.content.lower():
 是否加载某个项目自带的资源，而不是把它当安全边界。本项目可以通过 `load_agents_md` / `load_skills` 配置关闭加载；
 处理不可信仓库时，应当关闭它们，或者先用 plan 模式只读审阅。
 
-加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，总量上限按 **UTF-8 字节** 计：
+加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，不在仓库里时只看工作区本身，总量上限按 **UTF-8 字节** 计。这些文件不经过权限层，所以指向项目之外或密钥位置的符号链接直接跳过：
 
 ```python
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:
@@ -186,14 +186,14 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
     for d in [cur, *cur.parents]:
         for name in ("AGENTS.md", "CLAUDE.md"):
             f = d / name
-            if f.is_file():
+            if f.is_file() and _may_load(f, root):
                 text = f.read_text(encoding="utf-8", errors="replace")
                 size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
                 if total + size <= max_bytes:
                     found.append((f, text))
                     total += size
                 break
-        if (d / ".git").exists():
+        if d == root:
             break
     return list(reversed(found))
 ```

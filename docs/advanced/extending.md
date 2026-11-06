@@ -411,7 +411,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `thinking` / `reasoning_effort` | `None` / `None` | 思考开关（`enabled` / `disabled`）与强度，按供应商翻译成各自的字段 |
 | `extra_body` | `{}` | 原样并入 OpenAI 兼容请求体的厂商私有参数 |
 | `request_timeout` / `max_retries` | `300.0` / `4` | 模型请求超时；`RetryPolicy.max_attempts`（含首次） |
-| `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示 |
+| `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示。写在项目配置里要先信任才生效 |
 | `load_agents_md` / `load_skills` | `True` / `True` | 加载 AGENTS.md（或 CLAUDE.md）/ 技能清单 |
 | `workspace` / `data_dir` | `"."` / `".flywhl"` | 工作区；数据目录（相对工作区） |
 | `tool_timeout` / `parallel_tool_limit` | `120.0` / `8` | 工具默认超时；只读并行批的并发上限 |

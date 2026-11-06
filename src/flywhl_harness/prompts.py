@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import platform
 import re
+import warnings
 from datetime import date
 from pathlib import Path
+
+from .policy.sensitive import sensitivity
 
 SYSTEM_PROMPT = """你是 flywhl，一个在用户工作区内完成软件工程与文件任务的编码助手。
 
@@ -93,25 +96,41 @@ def reminder(text: str) -> str:
     return f"<system-reminder>\n{text}\n</system-reminder>"
 
 
+def project_root(workspace: Path) -> Path:
+    """项目文件的边界：所在的 git 仓库根，不在仓库里时是工作区本身。上层目录不是这个项目的。"""
+    cur = workspace.resolve()
+    return next((d for d in [cur, *cur.parents] if (d / ".git").exists()), cur)
+
+
+def _may_load(path: Path, root: Path) -> bool:
+    """这些文件是自动读进上下文的，不经过权限层：仓库里的符号链接不能借此把项目之外的文件或密钥送给模型。"""
+    real = path.resolve()
+    if real.is_relative_to(root) and (real == path or sensitivity(real) is None):
+        return True
+    warnings.warn(f"跳过 {path}：这个符号链接指向项目之外或密钥位置", UserWarning, stacklevel=3)
+    return False
+
+
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:
     """从工作区向上查找项目指令文件（每个目录优先 AGENTS.md，其次 CLAUDE.md），祖先目录在前。
 
-    只读到 git 仓库根（或文件系统根）为止；总大小设上限，避免规则文件挤占上下文。
+    只读到 ``project_root`` 为止；总大小设上限，避免规则文件挤占上下文。
     """
     found: list[tuple[Path, str]] = []
     cur = workspace.resolve()
+    root = project_root(cur)
     total = 0
     for d in [cur, *cur.parents]:
         for name in ("AGENTS.md", "CLAUDE.md"):
             f = d / name
-            if f.is_file():
+            if f.is_file() and _may_load(f, root):
                 text = f.read_text(encoding="utf-8", errors="replace")
                 size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
                 if total + size <= max_bytes:
                     found.append((f, text))
                     total += size
                 break
-        if (d / ".git").exists():
+        if d == root:
             break
     return list(reversed(found))
 
@@ -122,10 +141,13 @@ def find_skills(workspace: Path) -> list[dict[str, str]]:
     渐进披露：系统提示里只放清单（几十 token / 项），模型需要时再用 read 读取 SKILL.md 全文。
     """
     out = []
+    root = project_root(workspace)
     for base in (workspace / ".flywhl" / "skills", workspace / "skills"):
         if not base.is_dir():
             continue
         for skill in sorted(base.glob("*/SKILL.md")):
+            if not _may_load(skill, root):
+                continue
             head = skill.read_text(encoding="utf-8", errors="replace")[:2000]
             m = re.match(r"^---\s*\n(.*?)\n---", head, re.S)
             meta = dict(re.findall(r"^(\w+):\s*(.+)$", m.group(1), re.M)) if m else {}

@@ -305,10 +305,11 @@ PROJECT_CONFIG_FILES = ("flywhl.toml", ".flywhl/config.toml")
 
 # 和启动目录的 .env 一样用白名单：只影响“用哪家模型、花多少钱、何时收尾”的设置直接生效，最坏是效果差一点、多花一点钱。
 # 其余字段都要信任——hooks / mcp_servers / verify_command 会执行命令；base_url / api_key / api_key_env / extra_body
-# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写。新增字段默认落在需要信任的一侧。
+# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写；
+# system_prompt / append_system_prompt 是 harness 对模型说的话，不能由仓库作者来写。新增字段默认落在需要信任的一侧。
 _SAFE_KEYS = frozenset({
     "provider", "model", "fallback_models", "max_tokens", "temperature", "thinking", "reasoning_effort",
-    "request_timeout", "max_retries", "system_prompt", "append_system_prompt", "load_agents_md", "load_skills",
+    "request_timeout", "max_retries", "load_agents_md", "load_skills",
     "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
