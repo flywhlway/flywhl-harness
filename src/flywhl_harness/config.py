@@ -217,7 +217,7 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _keep_sandbox_on(data, project.resolve())
+                data = _only_turn_off(_keep_sandbox_on(data, project.resolve()))
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -320,10 +320,11 @@ PROJECT_CONFIG_FILES = ("flywhl.toml", ".flywhl/config.toml")
 
 # 和启动目录的 .env 一样用白名单：只影响“用哪家模型、花多少钱、何时收尾”的设置直接生效，最坏是效果差一点、多花一点钱。
 # 其余字段都要信任——hooks / mcp_servers / verify_command 会执行命令；base_url / api_key / api_key_env / extra_body
-# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写。新增字段默认落在需要信任的一侧。
+# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写；
+# system_prompt / append_system_prompt 是 harness 对模型说的话，不能由仓库作者来写。新增字段默认落在需要信任的一侧。
 _SAFE_KEYS = frozenset({
     "provider", "model", "fallback_models", "max_tokens", "temperature", "thinking", "reasoning_effort",
-    "request_timeout", "max_retries", "system_prompt", "append_system_prompt", "load_agents_md", "load_skills",
+    "request_timeout", "max_retries", "load_agents_md", "load_skills",
     "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
@@ -382,6 +383,11 @@ def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
         warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
                       f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
     return out
+
+
+def _only_turn_off(data: dict[str, Any]) -> dict[str, Any]:
+    """项目文件的加载，项目配置只能关不能开：用户为了看陌生仓库关掉的，仓库不能自己打开。"""
+    return {k: v for k, v in data.items() if k not in ("load_agents_md", "load_skills") or v is False}
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None,

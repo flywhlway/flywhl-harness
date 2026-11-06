@@ -175,10 +175,10 @@ if "system-reminder" in result.content.lower():
 
 `build_system_prompt` 从工作区向上查找 `AGENTS.md` / `CLAUDE.md`，连同技能清单一起拼进系统提示词。这对可信仓库是好事——项目约定被稳定地遵守；
 对刚克隆下来的陌生仓库则意味着 **仓库作者获得了系统提示词级别的话语权**。pi 的 project trust 机制控制的就是这件事：
-是否加载某个项目自带的资源，而不是把它当安全边界。本项目可以通过 `load_agents_md` / `load_skills` 配置关闭加载；
+是否加载某个项目自带的资源，而不是把它当安全边界。本项目可以通过 `load_agents_md` / `load_skills` 配置关闭加载，项目配置只能关，不能开；
 处理不可信仓库时，应当关闭它们，或者先用 plan 模式只读审阅。
 
-加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，总量上限按 **UTF-8 字节** 计：
+加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，不在仓库里时只看工作区本身，总量上限按 **UTF-8 字节** 计。这些文件不经过权限层，所以指向项目之外或密钥位置的符号链接直接跳过：
 
 ```python
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:
@@ -186,14 +186,14 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
     for d in [cur, *cur.parents]:
         for name in ("AGENTS.md", "CLAUDE.md"):
             f = d / name
-            if f.is_file():
+            if f.is_file() and _may_load(f, root):
                 text = f.read_text(encoding="utf-8", errors="replace")
                 size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
                 if total + size <= max_bytes:
                     found.append((f, text))
                     total += size
                 break
-        if (d / ".git").exists():
+        if d == root:
             break
     return list(reversed(found))
 ```
@@ -214,7 +214,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 
 | 设置 | 未信任时 | 理由 |
 |---|---|---|
-| 模型选择、限额、上下文、循环守卫、提示词、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
+| 模型选择、限额、上下文、循环守卫、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
 | `permissions` 中只收紧的部分：`deny` / `ask` 规则、`plan` 模式、`on_ask = "deny"`、`sandbox = "auto"` / `"macos"` / `"linux"`、`sandbox_network = "deny"` | 直接生效 | 只会让审批更严 |
 | 其余字段，以及 `allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、其余的 `sandbox_network` 取值、`network_allow` | 忽略并提示 | 执行命令、改变请求去向、放宽审批或移动读写范围 |
 | `sandbox = "off"`，包括单条 hook、MCP 服务器上的 | 信任了也丢弃并提示 | 信任一个仓库的配置，不等于同意拆掉隔离 |
