@@ -111,6 +111,16 @@ def _may_load(path: Path, root: Path) -> bool:
     return False
 
 
+def _read_project_file(path: Path, root: Path) -> str | None:
+    """自动读进上下文的项目文件。读不了的当作没有：仓库里一个坏文件不能让会话起不来。"""
+    if not path.is_file() or not _may_load(path, root):
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:
     """从工作区向上查找项目指令文件（每个目录优先 AGENTS.md，其次 CLAUDE.md），祖先目录在前。
 
@@ -123,8 +133,8 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
     for d in [cur, *cur.parents]:
         for name in ("AGENTS.md", "CLAUDE.md"):
             f = d / name
-            if f.is_file() and _may_load(f, root):
-                text = f.read_text(encoding="utf-8", errors="replace")
+            text = _read_project_file(f, root)
+            if text is not None:
                 size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
                 if total + size <= max_bytes:
                     found.append((f, text))
@@ -146,9 +156,10 @@ def find_skills(workspace: Path) -> list[dict[str, str]]:
         if not base.is_dir():
             continue
         for skill in sorted(base.glob("*/SKILL.md")):
-            if not _may_load(skill, root):
+            text = _read_project_file(skill, root)
+            if text is None:
                 continue
-            head = skill.read_text(encoding="utf-8", errors="replace")[:2000]
+            head = text[:2000]
             m = re.match(r"^---\s*\n(.*?)\n---", head, re.S)
             meta = dict(re.findall(r"^(\w+):\s*(.+)$", m.group(1), re.M)) if m else {}
             out.append({

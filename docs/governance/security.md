@@ -214,7 +214,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 
 | 设置 | 未信任时 | 理由 |
 |---|---|---|
-| 模型选择、限额、上下文、循环守卫、提示词、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
+| 模型选择、限额、上下文、循环守卫、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
 | `permissions` 中只收紧的部分：`deny` / `ask` 规则、`plan` 模式、`on_ask = "deny"`、`sandbox = "auto"` / `"macos"` / `"linux"`、`sandbox_network = "deny"` | 直接生效 | 只会让审批更严 |
 | 其余字段，以及 `allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、其余的 `sandbox_network` 取值、`network_allow` | 忽略并提示 | 执行命令、改变请求去向、放宽审批或移动读写范围 |
 | `sandbox = "off"`，包括单条 hook、MCP 服务器上的 | 信任了也丢弃并提示 | 信任一个仓库的配置，不等于同意拆掉隔离 |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -131,6 +132,48 @@ def test_skill_inside_the_project_still_loads(repo):
     (repo / "skills" / "x").mkdir(parents=True)
     (repo / "skills" / "x" / "SKILL.md").write_text("---\ndescription: 发布流程\n---\n", encoding="utf-8")
     assert [s["description"] for s in find_skills(repo)] == ["发布流程"]
+
+
+def broken_directory(path: Path) -> None:
+    path.mkdir()
+
+
+def broken_dangling_link(path: Path) -> None:
+    path.symlink_to("missing.md")
+
+
+def broken_link_loop(path: Path) -> None:
+    path.symlink_to(path.name)
+
+
+def broken_fifo(path: Path) -> None:
+    os.mkfifo(path)
+
+
+def broken_unreadable(path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root 不受文件权限限制")
+    path.write_text("---\ndescription: 读不到\n---\n", encoding="utf-8")
+    path.chmod(0)
+
+
+BROKEN = [broken_directory, broken_dangling_link, broken_link_loop, broken_fifo, broken_unreadable]
+
+
+@pytest.mark.parametrize("make", BROKEN)
+def test_broken_skill_does_not_stop_the_session(repo, make):
+    (repo / "skills" / "bad").mkdir(parents=True)
+    (repo / "skills" / "good").mkdir()
+    (repo / "skills" / "good" / "SKILL.md").write_text("---\ndescription: 发布流程\n---\n", encoding="utf-8")
+    make(repo / "skills" / "bad" / "SKILL.md")
+    assert [s["description"] for s in find_skills(repo)] == ["发布流程"]
+
+
+@pytest.mark.parametrize("make", BROKEN)
+def test_broken_instruction_file_falls_through_to_the_next_name(repo, make):
+    make(repo / "AGENTS.md")
+    (repo / "CLAUDE.md").write_text("项目规则\n", encoding="utf-8")
+    assert texts(repo) == ["项目规则\n"]
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")

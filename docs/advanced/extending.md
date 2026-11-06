@@ -388,7 +388,7 @@ asyncio.create_task(watch(h, run.id))
 `permissions.rules` 追加合并，其余字段后者覆盖前者。
 
 启动目录的配置文件可能来自刚克隆的仓库，其中下列设置要先信任这份文件的当前内容才生效：`hooks`、`mcp_servers`、`verify_command`、
-`base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`，以及 `permissions` 中放宽审批的取值
+`base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`、`system_prompt`、`append_system_prompt`，以及 `permissions` 中放宽审批的取值
 （`allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`）。其余字段直接生效（白名单见 `config.py::_SAFE_KEYS`）。
 信任按“绝对路径 + 内容 SHA-256”记在 `~/.flywhl/trusted.json`，内容变化后重新确认；用户配置与 `-c` 指定的文件视为可信。
 库代码默认忽略未信任的设置并发出 `UntrustedConfigWarning`，要自己做确认时传回调：
