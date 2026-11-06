@@ -74,12 +74,37 @@
 
 `npm audit --prefix docs` 有 6 条：esbuild、katex、mermaid、vite、vitepress、vitepress-plugin-mermaid，low 2、moderate 3、high 1。和 [0.2.0 的例外](release-gate-0.2.0.md#已评估的例外站点依赖)是同一批包，理由不变：这些包只用来构建站点，不进 wheel 和 sdist。
 
+## 发布结果
+
+标签 `v0.2.1` 指向 `7431be9`，[发布流水线](https://github.com/flywhlway/flywhl-harness/actions/runs/42242245845)第 2 次尝试全部成功。第 1 次有两个 macOS 冒烟作业排了 15 分钟没拿到运行器，被取消，`pypi` 没有执行。第 2 次只重跑了这两个作业和下游，没有改代码。
+
+| 检查 | 环境 | 结果 |
+|---|---|---|
+| 离线套件 | GitHub 运行器，Linux，Python 3.11、3.12、3.13 | 各 880 passed，1 skipped |
+| 系统沙箱用例 | 同上 | 各 21 passed，12 skipped |
+| 审计不变量 | 同上 | 各 12 passed，1 skipped |
+| 离线套件 | GitHub 运行器，macOS，Python 3.12 | 881 passed |
+| 系统沙箱用例 | 同上 | 27 passed，6 skipped |
+| 审计不变量 | 同上 | 13 passed |
+| 沙箱验收 | GitHub 运行器，macOS / Linux | 23/23 / 23/23 |
+| wheel 冒烟 | GitHub 运行器，两个平台，Python 3.11～3.13 | 全部通过 |
+| 从 PyPI 干净安装 | macOS 和一次性 Linux 容器，Python 3.11～3.13 | 版本号正确，不带令牌 401，带令牌 200 |
+| PyPI 版本的端到端 | 一次性 Linux 容器，Python 3.12，假模型服务 | 13 个场景和上文 0.2.1 一列相同 |
+
+PyPI 文件在 2026-11-06 15:40（UTC）上传，摘要和流水线产物、TestPyPI 都一致：
+
+| 文件 | SHA-256 |
+|---|---|
+| `flywhl_harness-0.2.1-py3-none-any.whl` | `3e2243193a4be99fe88d50c9b39b109d9d09da7dce327f1839887ef76b698303` |
+| `flywhl_harness-0.2.1.tar.gz` | `4bcb924ed41d3900a654ac27fb6acf76d176d0d61e75e680db080477ee6abc81` |
+
+两个文件各有一份来源证明，发布者是本仓库 `release.yml` 的 `pypi` 环境。[GitHub Release](https://github.com/flywhlway/flywhl-harness/releases/tag/v0.2.1) 的附件是这两个文件，说明和 CHANGELOG 对应一节相同。公告在 2026-11-06 15:46（UTC）公开，公开时没有 CVE 编号，也还没有进入 GitHub Advisory Database。
+
 ## 没有闭环的事
 
-- **CI。** 这个分支没有跑过 CI，`tests`、`sandbox-acceptance`、`coverage-audit` 和各平台冒烟都要等标签触发的发布流水线。批准 `pypi` 之前要确认它们全部通过。
-- **逐行审。** 三个修复提交涉及信任和权限语义，由维护者在打标签前审。
-- **修复进 `main`。** 发布后再走 PR，和开着的 #12 有冲突，解法已经在本地验证过。
-- **发布结果。** 标签、运行链接、PyPI 摘要和来源证明，发布后补到这份记录里。
+- **逐行审。** 三个修复提交涉及信任和权限语义。维护者打标签前查看了 diff，是否算逐行审完，由维护者在合入 `main` 的 PR 上确认。修复和发布前的审查是同一个 agent 做的，没有独立审查。
+- **修复进 `main`。** 走 PR。和开着的 [#12](https://github.com/flywhlway/flywhl-harness/pull/12) 有冲突，解法已经在本地验证过。
+- **live 和基准。** 8 个 live 场景和基准回归，上文列出的缺口在发布后仍然没有证据。
 - **模型费用。** 这轮 live 和语言检查约 0.05 美元，加上之前的运行累计约 2.00 美元，到了确认的额度线。再跑花钱的检查要维护者同意。
 
-这份记录不代表已经发布。标签由维护者打，`pypi` 环境由维护者批准。
+标签由维护者打，`pypi` 环境由维护者批准。
