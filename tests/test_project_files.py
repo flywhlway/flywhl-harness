@@ -63,6 +63,24 @@ def test_trusted_project_config_shows_the_full_text_first(tmp_path, monkeypatch,
     assert any("仓库作者的话" in line for line in shown), "人要看到全文才谈得上确认"
 
 
+@pytest.mark.parametrize("key", ["load_agents_md", "load_skills"])
+def test_project_config_cannot_turn_loading_back_on(tmp_path, monkeypatch, key):
+    home = tmp_path / "fw"
+    home.mkdir()
+    (home / "config.toml").write_text(f"{key} = false\n", encoding="utf-8")
+    monkeypatch.setenv("FLYWHL_HOME", str(home))
+    (tmp_path / "flywhl.toml").write_text(f"{key} = true\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert getattr(HarnessConfig.load(), key) is False
+
+
+@pytest.mark.parametrize("key", ["load_agents_md", "load_skills"])
+def test_project_config_can_still_turn_loading_off(tmp_path, monkeypatch, key):
+    (tmp_path / "flywhl.toml").write_text(f"{key} = false\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert getattr(HarnessConfig.load(), key) is False
+
+
 # ---------------------------------------------------------------------- 符号链接
 @pytest.mark.parametrize("name", ["AGENTS.md", "CLAUDE.md"])
 def test_instruction_file_cannot_link_out_of_the_project(repo, credential, name):

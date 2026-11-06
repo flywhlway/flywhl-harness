@@ -175,7 +175,7 @@ if "system-reminder" in result.content.lower():
 
 `build_system_prompt` 从工作区向上查找 `AGENTS.md` / `CLAUDE.md`，连同技能清单一起拼进系统提示词。这对可信仓库是好事——项目约定被稳定地遵守；
 对刚克隆下来的陌生仓库则意味着 **仓库作者获得了系统提示词级别的话语权**。pi 的 project trust 机制控制的就是这件事：
-是否加载某个项目自带的资源，而不是把它当安全边界。本项目可以通过 `load_agents_md` / `load_skills` 配置关闭加载；
+是否加载某个项目自带的资源，而不是把它当安全边界。本项目可以通过 `load_agents_md` / `load_skills` 配置关闭加载，项目配置只能关，不能开；
 处理不可信仓库时，应当关闭它们，或者先用 plan 模式只读审阅。
 
 加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，不在仓库里时只看工作区本身，总量上限按 **UTF-8 字节** 计。这些文件不经过权限层，所以指向项目之外或密钥位置的符号链接直接跳过：

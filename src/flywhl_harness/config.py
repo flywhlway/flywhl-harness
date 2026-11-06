@@ -202,7 +202,7 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _keep_sandbox_on(data, project.resolve())
+                data = _only_turn_off(_keep_sandbox_on(data, project.resolve()))
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -368,6 +368,11 @@ def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
         warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
                       f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
     return out
+
+
+def _only_turn_off(data: dict[str, Any]) -> dict[str, Any]:
+    """项目文件的加载，项目配置只能关不能开：用户为了看陌生仓库关掉的，仓库不能自己打开。"""
+    return {k: v for k, v in data.items() if k not in ("load_agents_md", "load_skills") or v is False}
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None,
