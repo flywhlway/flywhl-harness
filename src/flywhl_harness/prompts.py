@@ -113,12 +113,12 @@ def _may_load(path: Path, root: Path) -> bool:
 
 def _read_project_file(path: Path, root: Path) -> str | None:
     """自动读进上下文的项目文件。读不了的当作没有：仓库里一个坏文件不能让会话起不来。"""
-    if not path.is_file() or not _may_load(path, root):
-        return None
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
+    try:    # 链接目标在进不去的目录里时，is_file 本身也会报 PermissionError
+        if path.is_file() and _may_load(path, root):
+            return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        pass
+    return None
 
 
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:

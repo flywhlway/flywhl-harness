@@ -35,6 +35,10 @@
 ### 新增
 
 - `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
+### 修复
+
+- `AGENTS.md`、`CLAUDE.md`、`SKILL.md` 是符号链接，目标又在进不去的目录里时，会话起不来。现在和其他读不了的项目文件一样跳过。
+
 ## [0.2.1] - 2026-11-06
 
 安全补丁，在不可信仓库上运行 `flywhl` 的用户都应该升级，说明见[安全公告](https://github.com/flywhlway/flywhl-harness/security/advisories/GHSA-7cw9-49p4-27vj)。只改了项目文件这条通道，沙箱和权限规则没有变。

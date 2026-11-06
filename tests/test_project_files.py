@@ -157,7 +157,17 @@ def broken_unreadable(path: Path) -> None:
     path.chmod(0)
 
 
-BROKEN = [broken_directory, broken_dangling_link, broken_link_loop, broken_fifo, broken_unreadable]
+def broken_unreachable_target(path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root 不受文件权限限制")
+    locked = path.parent / "locked"
+    locked.mkdir()
+    path.symlink_to(locked / "target.md")
+    locked.chmod(0)
+
+
+BROKEN = [broken_directory, broken_dangling_link, broken_link_loop, broken_fifo, broken_unreadable,
+          broken_unreachable_target]
 
 
 @pytest.mark.parametrize("make", BROKEN)
