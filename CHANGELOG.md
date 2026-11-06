@@ -4,7 +4,7 @@
 
 ## [0.2.1] - 2026-11-06
 
-安全补丁，在不可信仓库上运行 `flywhl` 的用户都应该升级。只改了项目文件这条通道，沙箱和权限规则没有变。
+安全补丁，在不可信仓库上运行 `flywhl` 的用户都应该升级，说明见[安全公告](https://github.com/flywhlway/flywhl-harness/security/advisories/GHSA-7cw9-49p4-27vj)。只改了项目文件这条通道，沙箱和权限规则没有变。
 
 ### 安全
 
