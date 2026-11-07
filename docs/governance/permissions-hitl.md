@@ -13,7 +13,7 @@
 | 模式 | 这个会话整体有多信任 Agent | `Mode`（default / accept_edits / plan / bypass） | 规则 |
 | 规则 | 哪些动作被显式放行 / 禁止 | `Rule`、`MANAGED_BASELINE` | 命令分析、人审 |
 | 命令分析 | 这条 bash 实际做了什么 | `policy/bash_analyzer.py::analyze` | 人审、沙箱 |
-| 污点 | 当前上下文是否可能已被注入 | `RunContext.tainted` | 人审 |
+| 污点 | 当前上下文是否可能已被注入，来源见 [19 章](/governance/security#污点-来源声明与默认值) | `RunContext.tainted` | 人审 |
 | hooks | 团队自定义的额外约束 | [16 Hooks](/governance/hooks)（只能收紧） | 沙箱 |
 | 人审 | 人是否认可这个具体动作 | `ApprovalBroker` | 沙箱、快照回滚 |
 | 沙箱 | 即使以上全部失效，损失能有多大（要离开沙箱是一道单独的人工门，规则和模式都放行不了，见 [18 章](/governance/workspace-sandbox#离开沙箱)） | [18 Workspace 与沙箱](/governance/workspace-sandbox) | 审计与恢复 |
@@ -759,7 +759,7 @@ print("重复", Counter(a.summary for a in approved).most_common(5))
 
 pi 的作者持相反立场：默认不做权限控制。理由是只要 Agent 能写代码、跑代码、访问网络，权限提示就挡不住真正的风险——
 上面那张“分析器绕过”表就是例证；他建议把 Agent 放进容器里以“YOLO”方式运行，`permission-gate` 只作为示例扩展存在，
-project trust 也只决定加载哪些项目资源，不是安全边界。
+project trust 也只决定加载哪些项目资源，不是安全边界（本项目的工作区信任决定读到的内容算不算污点，见 [19 章](/governance/security#项目指令文件-独立通道和工作区信任)）。
 
 两种立场并不矛盾，它们防的是不同的东西：
 

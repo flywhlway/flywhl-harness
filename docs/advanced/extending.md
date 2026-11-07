@@ -413,6 +413,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `request_timeout` / `max_retries` | `300.0` / `4` | 模型请求超时；`RetryPolicy.max_attempts`（含首次） |
 | `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示。写在项目配置里要先信任才生效 |
 | `load_agents_md` / `load_skills` | `True` / `True` | 加载 AGENTS.md（或 CLAUDE.md）/ 技能清单。项目配置只能关，不能开 |
+| `trust_workspace` | `False` | 信任所有工作区。项目配置写的会被丢弃，只用于只跑自己代码的 CI 或一次性容器 |
 | `workspace` / `data_dir` | `"."` / `".flywhl"` | 工作区；数据目录（相对工作区） |
 | `tool_timeout` / `parallel_tool_limit` | `120.0` / `8` | 工具默认超时；只读并行批的并发上限 |
 | `cancel_grace_seconds` | `5.0` | 不可中断工具在取消后的宽限期 |

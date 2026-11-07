@@ -110,6 +110,7 @@ class MsgKind:
     RESUME_NOTE = "resume_note"  # 恢复说明：暂停/崩溃期间发生了什么
     STOP_FEEDBACK = "stop_feedback"  # Stop 钩子阻止停止时给出的缺口
     WRAP_UP = "wrap_up"          # 预算耗尽前的收尾指令
+    PROJECT_CONTEXT = "project_context"  # 项目指令通道：组装请求时排在最前面，不进历史
 
 
 Role = Literal["user", "assistant", "tool"]

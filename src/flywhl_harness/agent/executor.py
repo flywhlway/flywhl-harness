@@ -312,11 +312,13 @@ class ToolExecutor:
 
         # ---- 外置大结果 + 污点 ----
         result = rc.context.shape_tool_result(result, rc.store.blobs, rc.scope)
-        if (result.tainted or tool.untrusted_for(args)) and not rc.tainted:
+        foreign = tool.reads_workspace and not rc.workspace_trusted   # 没信任过的工作区：文件是仓库作者写的，不是用户写的
+        if (result.tainted or tool.untrusted_for(args) or foreign) and not rc.tainted:
             rc.tainted = True
             self._persist_session_meta(tainted=True)  # 污点属于会话：暂停恢复、崩溃接管之后依然有效
+            source = "没有信任过的工作区" if foreign else "不可信来源"
             publish(E.NOTICE, {"level": "info", "code": "tainted",
-                               "text": f"{call.name} 的输出来自不可信来源：之后的副作用操作将需要人工确认"})
+                               "text": f"{call.name} 的输出来自{source}：之后的副作用操作将需要人工确认"})
         msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
         if decision == Decision.ASK:
             msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]

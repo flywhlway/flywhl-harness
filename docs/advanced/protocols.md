@@ -301,7 +301,7 @@ for base in (workspace / ".flywhl" / "skills", workspace / "skills"):
         })
 ```
 
-`build_system_prompt` 把清单渲染为：
+`build_project_context` 把清单渲染为：
 
 ```text
 <available_skills>
@@ -369,7 +369,7 @@ return list(reversed(found))
 2. **上限按 UTF-8 字节计。** 比较的是 `len(text.encode("utf-8"))`，与参数名 `max_bytes` 一致。若按字符数计，中文为主的文件（一个汉字 3 字节）实际能放进约 3 倍的体积；按字节计，32 KiB 大约是一万字的中文。
 3. **边界是项目本身。** 工作区不在 git 仓库里时只看工作区这一层，上层目录不是这个项目的。符号链接只认项目之内：这些文件不经过权限层，指向项目之外或密钥位置的链接直接跳过，并给出警告。
 
-每个文件以 `<project_context path="...">` 包裹，模型可以知道指令来自哪一层。OpenAI 在《Harness engineering》中的建议值得借鉴：AGENTS.md 只做目录，指向 `docs/` 里的权威文档，而不是把所有规则堆进去——这与 32K 上限是一致的约束。
+每个文件以 `<file path="...">` 包裹，整体放进 `<project-context trust="...">` 消息，模型可以知道指令来自哪一层、工作区有没有被信任过。OpenAI 在《Harness engineering》中的建议值得借鉴：AGENTS.md 只做目录，指向 `docs/` 里的权威文档，而不是把所有规则堆进去——这与 32K 上限是一致的约束。
 
 ## A2A：Agent 找 Agent 协作
 

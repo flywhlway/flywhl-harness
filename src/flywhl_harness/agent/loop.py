@@ -203,6 +203,9 @@ class AgentLoop:
                 for ev in self._hook_notices():
                     yield ev
                 if gaps:
+                    if rc.config.verify_command and not rc.workspace_trusted and not rc.tainted:
+                        rc.tainted = True     # 验收反馈里是仓库代码的输出，和读文件一样
+                        self._save_session_meta(tainted=True)
                     if rc.stop_blocks < rc.config.max_stop_blocks:
                         rc.stop_blocks += 1
                         yield self._ev(E.NOTICE, level="warn", code="stop_blocked",
@@ -273,7 +276,7 @@ class AgentLoop:
     async def _maybe_compact(self, force: bool = False) -> AsyncIterator[Event]:
         rc = self.rc
         view = rc.log.context()
-        stats = rc.context.estimate(view.messages, rc.system_prompt, rc.tools.specs())
+        stats = rc.context.estimate(view.messages, self._prefix(), rc.tools.specs())
         if not force and not rc.context.should_compact(stats):
             return
         skipped_at = rc.state.get("compact_skipped_at")
@@ -313,16 +316,22 @@ class AgentLoop:
             # 提醒作为一条用户消息 **追加并落盘**：历史保持只追加，回放时模型看到的与当时完全一致
             yield self._append(user_message(reminder(text), kind=MsgKind.REMINDER))
 
+    def _prefix(self) -> str:
+        """每次请求都带上的固定内容，估算上下文水位时算在一起。"""
+        return f"{self.rc.system_prompt}\n\n{self.rc.project_context}" if self.rc.project_context else self.rc.system_prompt
+
     async def _call_model(self, *, purpose: str = "turn", tool_choice: str = "auto") -> AsyncIterator[Event]:
         rc = self.rc
         view = rc.log.context()
         specs = rc.tools.specs()
-        stats = rc.context.estimate(view.messages, rc.system_prompt, specs)
+        stats = rc.context.estimate(view.messages, self._prefix(), specs)
         messages, wm = rc.context.apply_clearing(view.messages, stats, rc.clear_watermark)
         if wm != rc.clear_watermark:
             rc.clear_watermark = wm
             self._save_session_meta(clear_watermark=wm)
             yield self._ev(E.NOTICE, level="info", code="clear_tool_results", text=f"已清理第 {wm} 条之前的大工具结果")
+        if rc.project_context:   # 不进历史：压缩碰不到它；每次都排在最前面：前缀缓存不受影响
+            messages = [user_message(rc.project_context, kind=MsgKind.PROJECT_CONTEXT), *messages]
         req = ModelRequest(
             model=rc.model, system=rc.system_prompt, messages=messages, tools=specs,
             max_tokens=rc.config.max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
