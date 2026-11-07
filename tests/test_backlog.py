@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import os
 import shlex
 import shutil
@@ -377,6 +378,40 @@ async def test_egress_proxy_checks_resolved_addresses():
     assert await proxy.vet("db.corp", 443) == ["10.0.0.6"]          # 写全名的规则可以连内网
     assert await proxy.vet("tailnet.corp", 443) == ["100.64.1.2"]   # CGNAT 段（Tailscale 等）同样按内网
     assert await proxy.vet("localhost", 5432) == ["::1", "127.0.0.1"]
+
+
+@pytest.mark.parametrize("entry", ["0.0.0.0:5000", "169.254.169.254", "100.100.100.200", "127.0.0.2:5000", "224.0.0.1:*"])
+def test_allowlist_refuses_literal_addresses_it_would_never_connect_to(entry):
+    """写成 IP 的规则也走地址判定：0.0.0.0 连的是本机，元数据地址写全了也不放。启动时报错，不要悄悄失效。"""
+    from flywhl_harness.tools.egress import AllowRule, parse_rules
+
+    with pytest.raises(ValueError, match="localhost"):
+        parse_rules([entry])
+    host = entry.partition(":")[0]
+    assert not AllowRule(host, None).reaches(ipaddress.ip_address(host))
+
+
+async def test_egress_proxy_refuses_hosts_that_resolve_to_the_unspecified_address():
+    """规则写成域名或别的写法，解析出 0.0.0.0、:: 时同样不连：它们都落到本机。"""
+    from flywhl_harness.tools.egress import EgressDenied, EgressProxy, parse_rules
+
+    table = {"zero.corp": ["0.0.0.0"], "zero6.corp": ["::"], "000.000.000.000": ["0.0.0.0"]}
+
+    async def resolve(host, port):
+        return [ipaddress.ip_address(a) for a in table[host]]
+
+    proxy = EgressProxy(parse_rules(["zero.corp", "zero6.corp", "000.000.000.000"]), resolve=resolve)
+    for host in table:
+        with pytest.raises(EgressDenied, match=host):
+            await proxy.vet(host, 443)
+
+
+def test_allowlist_keeps_literal_addresses_it_can_connect_to():
+    from flywhl_harness.tools.egress import local_ports, parse_rules
+
+    rules = parse_rules(["127.0.0.1:5432", "10.0.0.5:8080", "8.8.8.8"])
+    assert [r.host for r in rules] == ["127.0.0.1", "10.0.0.5", "8.8.8.8"]
+    assert local_ports(rules) == ["5432"]
 
 
 @needs_seatbelt

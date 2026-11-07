@@ -277,10 +277,8 @@ def test_serve_refusal_lets_valid_arguments_through(host, kw):
 LOOPBACK_RULES = [
     ("localhost:8765", True), ("127.0.0.1:8765", True), ("localhost:*", True), ("127.0.0.1:*", True),
     ("LOCALHOST:8765", True),
-    ("0.0.0.0:8765", True),            # 连 0.0.0.0 落到本机，代理接受写全 IP 的规则
-    ("0.0.0.0:*", True),
     ("localhost", False),              # 没写端口只放行 80、443
-    ("localhost:5432", False), ("127.0.0.1:5432", False), ("0.0.0.0:5432", False),
+    ("localhost:5432", False), ("127.0.0.1:5432", False),
     ("*.localhost:8765", False),       # 通配不含 localhost 本身
     ("*.0.0.1:8765", False),           # 字符串上匹配 127.0.0.1，但通配规则进不了回环地址
     ("pypi.org", False), ("registry.local:8765", False), ("192.168.1.20:8765", False),
@@ -338,7 +336,6 @@ def test_console_reachers_global(box, reached):
     (SANDBOXED, {"sandbox": "off"}, True),
     (SANDBOXED, {"sandbox_network": "allow"}, True),
     (SANDBOXED, {"network_allow": ["localhost:8765"]}, True),
-    (SANDBOXED, {"network_allow": ["0.0.0.0:8765"]}, True),
     (SANDBOXED, {"network_allow": ["localhost:5432"]}, False),
     ({"level": "macos", "network": "deny"}, {"network_allow": ["localhost:8765"]}, False),
     ({"level": "macos", "network": "deny"}, {"sandbox_network": "allowlist", "network_allow": ["localhost:8765"]}, True),

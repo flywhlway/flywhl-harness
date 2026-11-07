@@ -22,6 +22,10 @@
 
 **English summary.** `flywhl serve` no longer disables the Host allowlist on `0.0.0.0` and `::`, and `*` is refused by both `--allow-host` and `create_app`. Listening on a non-loopback address now requires `--expose` plus a token, and a manual `--token` there needs at least 16 characters. A wildcard listen trusts only loopback names and `--allow-host` entries, so remote browsers get 403 until you add the address, and the printed link uses a loopback address. `--no-token` is refused when commands the agent runs can reach the console port, because they could otherwise approve their own human gate: sandbox off, `sandbox_network = "allow"`, or an allowlist rule for that loopback port, globally or on a single hook or MCP server. `access.any_host` is gone from `/api/settings`.
 
+### 修复
+
+**出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和地址字面相同就放行，`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在这类条目启动时报错，要连本机端口写 `localhost:端口`。
+
 **会话库默认按断电耐久落盘。** 新配置项 `durability` 默认 `full`：`synchronous=FULL`，加上 `fullfsync` 和 `checkpoint_fullfsync`。
 之前是 `NORMAL`，断电可能丢掉最后几次提交，其中可能有执行前写的工具 intent，恢复时看不到记录，非幂等调用会再执行一次。
 保证只覆盖会话库，影子 git 和工作区文件不在内。
