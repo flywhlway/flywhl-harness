@@ -1,4 +1,36 @@
 # 正式运行之后修了 harness，只重跑受影响的任务。模型、次数、种子、配置都沿用 plan.toml。
 # 这不是新方案：结果单独报告，不和正式结果混算，也不改结果页的统计。
-id = "2026-11-r1"
-tasks = ["env-git-config", "env-git-hook"]   # 正式运行里只有这两个任务用文件工具写过沙箱里只读的位置
+id = "2026-11-r3"
+# 系统提示词和污点规则变了，每个任务都受影响，所以这次全部重跑
+tasks = [
+  "add-cache-ttl",
+  "add-cli-json",
+  "add-lint-rule",
+  "add-rate-limiter",
+  "add-template-render",
+  "data-clean-script",
+  "data-json-flatten",
+  "data-log-aggregate",
+  "data-sql-report",
+  "dedupe-validators",
+  "env-git-config",
+  "env-git-hook",
+  "env-home-report",
+  "env-install-tool",
+  "env-local-api",
+  "env-venv-wheel",
+  "extract-module",
+  "fix-config-merge",
+  "fix-csv-quoting",
+  "fix-logparse-crash",
+  "fix-lru-eviction",
+  "fix-pagination",
+  "fix-retry-backoff",
+  "rename-across-files",
+  "repo-resolve-conflict",
+  "repo-revert-bad-commit",
+  "repo-split-commits",
+  "test-catch-mutants",
+  "test-deflake",
+  "test-regression",
+]

@@ -210,9 +210,9 @@ if "system-reminder" in result.content.lower():
 bypass 模式不看污点。
 
 信任绑定路径，不绑定内容：工作区每天都在变，绑内容就要每天确认。代价是删掉仓库、在同一路径克隆一个别的，信任还在。要撤销，删掉 `trusted.json` 里对应的那一行。
-不想加载这些文件时，`load_agents_md`、`load_skills` 仍然可以关掉。
+不想加载这些文件时，`load_agents_md`、`load_skills` 仍然可以关掉，项目配置只能关，不能开。
 
-加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，总量上限按 **UTF-8 字节** 计：
+加载量也有上限。`find_project_context` 从工作区逐级向上找到 git 仓库根为止，不在仓库里时只看工作区本身，总量上限按 **UTF-8 字节** 计。这些文件不经过权限层，所以指向项目之外或密钥位置的符号链接直接跳过：
 
 ```python
 def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tuple[Path, str]]:
@@ -220,14 +220,14 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
     for d in [cur, *cur.parents]:
         for name in ("AGENTS.md", "CLAUDE.md"):
             f = d / name
-            if f.is_file():
+            if f.is_file() and _may_load(f, root):
                 text = f.read_text(encoding="utf-8", errors="replace")
                 size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
                 if total + size <= max_bytes:
                     found.append((f, text))
                     total += size
                 break
-        if (d / ".git").exists():
+        if d == root:
             break
     return list(reversed(found))
 ```
@@ -248,7 +248,7 @@ def find_project_context(workspace: Path, max_bytes: int = 32 * 1024) -> list[tu
 
 | 设置 | 未信任时 | 理由 |
 |---|---|---|
-| 模型选择、限额、上下文、循环守卫、提示词、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
+| 模型选择、限额、上下文、循环守卫、超时 | 直接生效 | 最坏是效果差一点、多花一点钱 |
 | `permissions` 中只收紧的部分：`deny` / `ask` 规则、`plan` 模式、`on_ask = "deny"`、`sandbox = "auto"` / `"macos"` / `"linux"`、`sandbox_network = "deny"` | 直接生效 | 只会让审批更严 |
 | 其余字段，以及 `allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、其余的 `sandbox_network` 取值、`network_allow` | 忽略并提示 | 执行命令、改变请求去向、放宽审批或移动读写范围 |
 | `sandbox = "off"`，包括单条 hook、MCP 服务器上的 | 信任了也丢弃并提示 | 信任一个仓库的配置，不等于同意拆掉隔离 |
