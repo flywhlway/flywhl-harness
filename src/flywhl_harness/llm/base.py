@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, AsyncIterator
 
-from .._utils import safe_json_loads
+from .._utils import new_id, safe_json_loads
 from ..cancel import CancelToken
 from ..types import Message, StopReason, TextBlock, ThinkingBlock, ToolCall, Usage
 from .models import ModelInfo, get_model_info
@@ -159,6 +159,9 @@ class MessageBuilder:
         b["signature"] = (b.get("signature") or "") + sig
 
     def tool_start(self, index: int, call_id: str, name: str) -> None:
+        # 工具结果按 id 配对：服务端给了重复的 id，后一个调用的结果会覆盖前一个，副作用却都发生了
+        if any(i != index and b["type"] == "tool_call" and b["id"] == call_id for i, b in self._blocks.items()):
+            call_id = new_id("call")
         self._blocks[index] = {"type": "tool_call", "id": call_id, "name": name, "json": ""}
 
     def tool_delta(self, index: int, partial: str) -> None:

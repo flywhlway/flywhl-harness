@@ -16,12 +16,15 @@ import time
 
 import pytest
 
-from flywhl_harness import HarnessConfig, HookEvent, HookOutput
+from flywhl_harness import HarnessConfig, HookEvent, HookOutput, ScriptedProvider, Store
 from flywhl_harness.policy.approvals import ApprovalDecision
 from flywhl_harness.policy.bash_analyzer import analyze
+from flywhl_harness.policy.hooks import WITHHELD_RESULT, Hook, HookBus, HookInput
 from flywhl_harness.policy.permissions import Decision, PermissionPolicy
 from flywhl_harness.runtime.workspace import Workspace
 from flywhl_harness.tools import default_tools
+from flywhl_harness.tools.base import Effect, TransientToolError, tool
+from flywhl_harness.types import unpaired_tool_calls
 
 from .conftest import make_harness, tool_ends
 from .test_security import needs_seatbelt, with_resolver
@@ -704,3 +707,195 @@ async def test_settings_overview_reports_effective_security_posture(ws):
     assert d["permissions"]["baseline"] > 50
     assert d["hooks"][0]["fail_closed"] is True
     assert d["tools"] == len(h.tools) and "api_key" not in str(d)
+
+
+# ---------------------------------------------------------------- 工具已经执行之后，模型看到什么
+WRITE_A = [{"tool_calls": [{"name": "write", "args": {"path": "a.txt", "content": "原文 sentinel"}}]}, "结束"]
+
+
+def request_text(req) -> str:
+    return str([m.text for m in req.messages])
+
+
+async def test_fail_closed_post_hook_does_not_undo_an_earlier_redaction(ws):
+    provider = ScriptedProvider(WRITE_A)
+    h = make_harness(ws, provider, permissions__mode="bypass")
+
+    @h.hooks.on(HookEvent.POST_TOOL_USE, priority=1)
+    async def redact(inp):
+        return HookOutput(updated_result="[已脱敏]")
+
+    @h.hooks.on(HookEvent.POST_TOOL_USE, priority=2, fail_closed=True)
+    async def audit(inp):
+        raise ValueError("审计库不可用")
+
+    res = await h.run("x")
+    end = tool_ends(res.events)[0]
+    assert end["is_error"] and end["content"].startswith("[已脱敏]")
+    assert "sentinel" not in request_text(provider.requests[1]) and "a.txt" not in end["content"]
+
+
+async def test_fail_closed_post_hook_withholds_output_nobody_redacted(ws):
+    (ws / "b.txt").write_text("密钥 sentinel", encoding="utf-8")
+    provider = ScriptedProvider([{"tool_calls": [{"name": "read", "args": {"path": "b.txt"}}]}, "结束"])
+    h = make_harness(ws, provider, permissions__mode="bypass")
+
+    @h.hooks.on(HookEvent.POST_TOOL_USE, fail_closed=True)
+    async def redact(inp):
+        raise ValueError("脱敏服务不可用")
+
+    res = await h.run("x")
+    end = tool_ends(res.events)[0]
+    assert end["is_error"] and WITHHELD_RESULT in end["content"] and "脱敏服务不可用" in end["content"]
+    assert "sentinel" not in request_text(provider.requests[1])
+
+
+async def test_fail_open_warnings_survive_a_later_fail_closed_hook():
+    bus = HookBus()
+
+    async def broken(inp):
+        raise ValueError("观测上报失败")
+
+    async def guard(inp):
+        raise ValueError("守卫失败")
+
+    bus.add(Hook(HookEvent.PRE_TOOL_USE, broken, "metrics", priority=1))
+    bus.add(Hook(HookEvent.PRE_TOOL_USE, guard, "guard", priority=2, fail_closed=True))
+    inp = HookInput(event=HookEvent.PRE_TOOL_USE, run_id="r", session_id="s", tool_name="write", tool_input={})
+    out = await bus.run(HookEvent.PRE_TOOL_USE, inp)
+    assert out.decision == "deny" and "观测上报失败" in out.warnings[0]
+
+
+# ---------------------------------------------------------------- 工具调用 id 重复
+async def test_each_call_gets_its_own_result_when_the_server_repeats_an_id(ws):
+    write = lambda name: {"id": "dup", "name": "write", "args": {"path": name, "content": "x"}}  # noqa: E731
+    provider = ScriptedProvider([{"tool_calls": [write("a.txt"), write("b.txt")]}, "结束"])
+    h = make_harness(ws, provider, permissions__mode="bypass")
+    res = await h.run("x")
+    ends = tool_ends(res.events)
+    assert len(ends) == 2 and len({e["call_id"] for e in ends}) == 2
+    assert not unpaired_tool_calls(h.log(res.session_id).messages())
+    steps = [h.store.get_step(res.run_id, e["call_id"]) for e in ends]
+    assert [s.status for s in steps] == ["ok", "ok"]
+
+
+# ---------------------------------------------------------------- 结果未知不能说成“未执行”
+async def until(cond, tries: int = 300) -> None:
+    for _ in range(tries):
+        if cond():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("等待条件超时")
+
+
+async def test_a_failed_reconcile_leaves_the_result_unknown(ws, tmp_path):
+    calls: list[str] = []
+
+    async def check(args, ctx):
+        raise ConnectionError("对账接口不可用")
+
+    @tool(name="charge", effect=Effect.EXTERNAL, reconcile=check)
+    async def charge(ctx) -> str:
+        """扣款：外部系统可查。"""
+        calls.append(ctx.idempotency_key)
+        await asyncio.sleep(30)
+        return "已扣款"
+
+    script = [{"tool_calls": [{"name": "charge", "args": {}}]}, "处理完毕"]
+    h1 = make_harness(ws, script, store=Store(tmp_path / "h.db"))
+    h1.tools.register(charge)
+    s = h1.create_session("t")
+    run = await h1.start_run(s.id, "扣款")
+    await until(lambda: calls)
+    h1._active[run.id].task.cancel()
+    await asyncio.sleep(0.05)
+    h2 = make_harness(ws, script, store=Store(tmp_path / "h.db"), stale_after_seconds=0.1)
+    h2.tools.register(charge)
+    await asyncio.sleep(0.3)
+    assert await h2.recover(auto_resume=True) == [run.id]
+    rec = await h2.wait(run.id)
+    msg = [m for m in h2.log(s.id).messages() if m.role == "tool"][0]
+    assert len(calls) == 1 and msg.details["status"] == "unknown"
+    assert "结果未知" in msg.text and "未执行" not in msg.text and rec.status == "completed"
+
+
+async def test_cancelling_a_retry_of_an_external_tool_does_not_say_it_never_ran(ws):
+    attempts: list[str] = []
+
+    @tool(name="notify", effect=Effect.EXTERNAL, idempotent=True)
+    async def notify(ctx) -> str:
+        """第一次抛瞬时错误，这时请求可能已经到了对方。"""
+        attempts.append(ctx.idempotency_key)
+        raise TransientToolError("连接被重置")
+
+    h = make_harness(ws, [{"tool_calls": [{"name": "notify", "args": {}}]}, "结束"], permissions__mode="bypass")
+    h.tools.register(notify)
+    s = h.create_session("t")
+    run = await h.start_run(s.id, "x")
+    await until(lambda: attempts)
+    assert await h.cancel(run.id, "用户不等了")
+    await h.wait(run.id)
+    msg = [m for m in h.log(s.id).messages() if m.role == "tool"][0]
+    assert msg.details["status"] == "unknown" and "结果未知" in msg.text
+
+
+# ---------------------------------------------------------------- bash 工具的边角
+async def test_timeout_also_ends_background_processes_of_a_finished_shell(ws):
+    from flywhl_harness.tools.shell import BashTool
+
+    from .test_sandbox_default import _ctx
+
+    result = await BashTool(sandbox="off").execute({"command": "sleep 20 & echo $!", "timeout": 1}, _ctx(ws))
+    assert result.details["timed_out"]
+    pid = int(result.content.split()[0])
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        await asyncio.sleep(0.05)
+    os.kill(pid, 9)
+    raise AssertionError("后台进程还在运行")
+
+
+def test_a_stripped_git_config_value_takes_its_key_with_it(monkeypatch, tmp_path):
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "url.https://mirror/.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://u:sentinel@host/")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "user.name")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "flywhl")
+    env = _clean_env(True)
+
+    assert "sentinel" not in str(env)
+    assert (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]) == ("user.name", "flywhl")
+    r = subprocess.run(["git", "config", "user.name"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert (r.returncode, r.stdout.strip()) == (0, "flywhl")
+
+
+async def test_proxy_names_the_error_when_the_exception_has_no_text():
+    from flywhl_harness.tools.egress import EgressProxy, parse_rules
+
+    async def stuck(host, port):
+        await asyncio.sleep(5)
+
+    async with EgressProxy(parse_rules(["pypi.org:443"]), resolve=stuck, connect_timeout=0.05) as proxy:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        writer.write(b"CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org\r\n\r\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.read(), 2)
+        writer.close()
+    assert b"502" in reply and b"TimeoutError" in reply
+
+
+async def test_fail_closed_on_other_events_blocks_without_touching_results():
+    bus = HookBus()
+
+    async def gate(inp):
+        raise ValueError("验收脚本崩溃")
+
+    bus.add(Hook(HookEvent.STOP, gate, "gate", fail_closed=True))
+    out = await bus.run(HookEvent.STOP, HookInput(event=HookEvent.STOP, run_id="r", session_id="s"))
+    assert out.decision == "block" and "验收脚本崩溃" in out.reason and out.updated_result is None

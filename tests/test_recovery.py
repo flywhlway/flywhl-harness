@@ -11,7 +11,11 @@ import textwrap
 import time
 from pathlib import Path
 
-from flywhl_harness import Store
+import pytest
+
+from flywhl_harness import HookEvent, Store
+from flywhl_harness.runtime.store import ApprovalRecord
+from flywhl_harness.tools.base import Effect, tool
 from flywhl_harness.tools.demo import FakeNotifyService
 
 from .conftest import make_harness
@@ -136,3 +140,151 @@ async def test_recovered_result_precedes_resume_note(ws, tmp_path):
     sent = prepare_history(msgs)
     tool_msgs = [m for m in sent if m.role == "tool"]
     assert len(tool_msgs) == 1 and "对账" in tool_msgs[0].text
+
+
+# ---------------------------------------------------------------- 接管的边界
+SLOW = [{"tool_calls": [{"name": "sleep", "args": {"seconds": 5}}]}, "完成", "完成", "完成"]
+
+
+def _running(h, session_id: str, *, parent: str | None = None, worker: str = "w-dead") -> str:
+    """造一个停在 running 的 Run：Worker 已经不在。"""
+    run = h.store.create_run(session_id, "p", parent_run_id=parent)
+    h.state.transition(run.id, "queued")
+    h.state.transition(run.id, "running", worker_id=worker)
+    return run.id
+
+
+async def _until(cond, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "等待超时"
+        await asyncio.sleep(0.01)
+
+
+async def test_a_failed_resume_does_not_stop_the_rest_of_the_takeover(ws):
+    h = make_harness(ws, list(SLOW), stale_after_seconds=0)
+    busy = h.create_session("甲")
+    holder = await h.start_run(busy.id, "占住会话")
+    blocked = _running(h, busy.id)
+    other = _running(h, h.create_session("乙").id)
+
+    recovered = await h.recover()
+
+    assert other in recovered and blocked not in recovered
+    assert h.store.get_run(blocked).status == "interrupted", "恢复不起来的 Run 留给人手动恢复"
+    for rid in (holder.id, other):
+        await h.cancel(rid)
+        await h.wait(rid)
+
+
+async def test_a_paused_run_that_cannot_resume_is_not_reported_as_recovered(ws):
+    h = make_harness(ws, list(SLOW), stale_after_seconds=0)
+    s = h.create_session("甲")
+    blocked = _running(h, s.id)
+    h.state.transition(blocked, "paused")
+    h.store.update_run(blocked, checkpoint={"paused_by": "shutdown"})
+    holder = await h.start_run(s.id, "占住会话")
+
+    assert blocked not in await h.recover()
+
+    await h.cancel(holder.id)
+    await h.wait(holder.id)
+
+
+async def test_a_queued_orphan_waits_until_its_session_is_free(ws):
+    h = make_harness(ws, list(SLOW), stale_after_seconds=0)
+    s = h.create_session("甲")
+    holder = await h.start_run(s.id, "占住会话")
+    orphan = h.store.create_run(s.id, "孤儿")
+    h.state.transition(orphan.id, "queued")
+    await asyncio.sleep(0.01)
+
+    assert orphan.id not in await h.recover()
+    assert h.store.get_run(orphan.id).status == "queued" and orphan.id not in h._active
+
+    await h.cancel(holder.id)
+    await h.wait(holder.id)
+    assert orphan.id in await h.recover()
+    await h.wait(orphan.id)
+
+
+@pytest.mark.parametrize("kind", ["cancelling", "child"])
+async def test_takeover_expires_approvals_of_runs_it_will_not_resume(ws, kind):
+    h = make_harness(ws, ["不应被调用"], stale_after_seconds=0)
+    s = h.create_session("甲")
+    parent = _running(h, s.id) if kind == "child" else None
+    run_id = _running(h, s.id, parent=parent)
+    if kind == "cancelling":
+        h.state.transition(run_id, "cancelling")
+    h.store.create_approval(ApprovalRecord("ap", run_id, s.id, "call_1", "write", {"path": "a.txt"}, "写文件", "medium", "要确认", "pending"))
+
+    await h.recover(auto_resume=False)
+
+    [ap] = h.store.list_approvals(None, run_id)
+    assert ap.status == "expired" and ap.decided_by == "system:recover"
+
+
+# ---------------------------------------------------------------- 收尾
+def _holding_tool():
+    gate = asyncio.Event()
+    entered: list[bool] = []
+
+    @tool(name="hold", effect=Effect.READ)
+    async def hold(ctx) -> str:
+        """等用例放行：这段时间里 Worker 的心跳不会醒。"""
+        entered.append(True)
+        await gate.wait()
+        return "完成"
+
+    return hold, gate, entered
+
+
+@pytest.mark.parametrize(("path", "final"), [(["interrupted"], "interrupted"),
+                                             (["interrupted", "queued", "running"], "running")])
+async def test_a_worker_that_lost_the_run_does_not_finish_it(ws, path, final):
+    hold, gate, entered = _holding_tool()
+    h = make_harness(ws, [{"tool_calls": [{"name": "hold", "args": {}}]}, "旧 Worker 的结论"], heartbeat_seconds=60)
+    h.tools.register(hold)
+    s = h.create_session("甲")
+    run = await h.start_run(s.id, "x")
+    await _until(lambda: entered)
+
+    for to in path:     # 别的 Worker 接管：心跳下一次醒来才会发现
+        h.state.transition(run.id, to, worker_id="w-new")
+    gate.set()
+    await _until(lambda: run.id not in h._active)
+
+    rec = h.store.get_run(run.id)
+    assert (rec.status, rec.worker_id, rec.result) == (final, "w-new", None)
+
+
+async def test_cancel_beating_completion_is_recorded_as_cancel(ws):
+    h = make_harness(ws, ["答复"])
+
+    @h.hooks.on(HookEvent.STOP)
+    async def late_cancel(inp):
+        assert await h.cancel(inp.run_id, reason="来不及了", by="alice")
+
+    res = await h.run("甲")
+    rec = h.store.get_run(res.run_id)
+    assert rec.status == "cancelled" and "发起人：alice" in rec.status_reason
+    assert "取消请求先于完成到达" in rec.result["reason"] and rec.result["by"] == "alice"
+
+
+async def test_run_and_aclose_wait_for_the_run_end_hook(ws):
+    h = make_harness(ws, ["完成", "完成"])
+    seen: list[str] = []
+
+    @h.hooks.on(HookEvent.RUN_END)
+    async def notify(inp):
+        await asyncio.sleep(0.05)
+        seen.append(inp.run_id)
+
+    res = await h.run("甲")
+    assert seen == [res.run_id], "CLI 跑完就退出：run() 返回时 hook 不能还在半路"
+
+    s = h.create_session("乙")
+    run = await h.start_run(s.id, "乙")
+    await _until(lambda: run.id not in h._active)
+    await h.aclose()
+    assert seen == [res.run_id, run.id]
