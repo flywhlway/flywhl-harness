@@ -62,6 +62,20 @@
 | 不在 git 仓库里时，上层目录的 `AGENTS.md`、`CLAUDE.md` 不再加载，没有告警 | 上层目录不是这个项目的 | 把文件放进工作区。靠 `~/AGENTS.md` 写全局约定的要改掉 |
 | 项目配置写 `load_agents_md = true`、`load_skills = true` 不再顶掉用户配置的 `false` | 用户关掉的加载，仓库不能自己打开 | 要打开就改用户配置，或用 `-c` |
 
+### 安全
+
+命令分析不是安全边界，系统沙箱才是。下面这些判定偏松的问题已修：
+
+- 判成只读的：here-document 结束符里的续行（`EO\⏎F` 就是 `EOF`，后面的行是真命令）、`ps` 的值紧贴在字母后面、`printf -vPATH`、`awk` 的 `|&` 和 `getline <` 读工作区外文件。
+- 脚本经标准输入进 shell：here-string、here-document 正文、管道前 `echo` 的文本现在递归分析。
+- 包装命令：`env -S`、`env -vS`、`env -C/` 接着解包；`mapfile -C`、`less +!` 的命令递归分析；shell 名单补上 ash、mksh、fish、csh、tcsh。
+- 灾难性命令的写法：`$'rm\x00junk'`、`find -f ~ -delete`、`-exec` 的全部起点、`{r..r..1}m`、未赋值的 `A+=/usr`、`export -n`、`tee`/`cp`/`mv` 写块设备、改了名字的 fork 炸弹。
+- `sed`、`awk`：程序来源取全（`-e`、`--expression`、`--source`、长选项缩写），`sed` 的程序按语法解析，地址和 `s` 的分隔符不再被误认成命令；`e` 的内容递归分析，认不出的程序判 `external`。
+- `sh -c 脚本 名字 参数`：脚本后面的词代入 `$0`、`$1` 再分析，`--command=` 的脚本也能取到。
+- 只读命令的短选项紧贴工作区外路径时过边界（`date -f/etc/passwd`）；`$'\x{72}m'`、前置的 `D+=/` 按 bash 的语义解开。
+- `git clean` 的选项簇和缩写（`-dfx`、`--force`）判高危，`-n` 空跑不算。
+- `require_pinned`：40 位提交号只有写在 git 地址上才算锁住版本，普通 URL 的 `#片段`、npm dist-tag 不算。
+
 ## [0.2.0] - 2026-11-05
 
 第一个发布到 PyPI 的版本。v0.1.0 之后的主线是安全边界：系统沙箱从可选原型变成默认开启，命令分析、凭证保护、供应链检查都重做了一轮。
