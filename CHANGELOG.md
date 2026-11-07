@@ -6,6 +6,8 @@
 
 ### 行为变化
 
+**人批准过的沙箱外命令保留 `SSH_AUTH_SOCK`。** 这个变量名含 AUTH，以前和密钥一起剥离，靠它找 ssh-agent 的 `git push` 用 `outside_sandbox` 也 push 不了。只改这一条路径：沙箱里的 bash、关掉沙箱时的 bash、hook、MCP 服务器都不变，`GH_TOKEN`、`*_API_KEY` 在沙箱外也继续剥离。
+
 **`flywhl serve` 收紧了网络暴露。** 以前监听 `0.0.0.0`、`::` 时 Host 白名单被关掉，DNS 重绑定的防线随之消失，只剩共享令牌。现在白名单始终生效，监听非回环地址也要明确声明。
 
 | 你会看到 | 原因 | 怎么处理 |

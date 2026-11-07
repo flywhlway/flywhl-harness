@@ -28,7 +28,7 @@ import os
 import re
 import signal
 import time
-from typing import Any
+from typing import Any, Iterable
 
 from .._utils import truncate_tail
 from ..policy.bash_analyzer import analyze
@@ -48,13 +48,17 @@ OUT_BYTES = 30 * 1024
 _GIT_HARDENING = (("core.fsmonitor", "false"), ("safe.bareRepository", "explicit"))
 # 名字撞上密钥规则的普通变量：GIT_CONFIG_KEY_<n> 是配置键名，GIT_AUTHOR_* 是提交身份（撞的是 AUTH）
 _NOT_SECRET_ENV = re.compile(r"GIT_CONFIG_KEY_\d+|GIT_AUTHOR_(NAME|EMAIL|DATE)")
+# 人批准过的沙箱外命令要用 ssh-agent 才 push 得了。它是能力不是秘密：命令能用私钥签名，读不到私钥。
+# GH_TOKEN、*_API_KEY 这类值本身就是凭证，沙箱外照样剥离
+OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
 
 
-def _clean_env(strip: bool) -> dict[str, str]:
+def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
+    """``keep`` 是剥离之后要留下的变量名，只给人批准过的沙箱外命令用。"""
     env = dict(os.environ)
     if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
-               if not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+               if k in keep or not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
@@ -190,13 +194,14 @@ class BashTool(Tool):
             return ToolResult(content="这条命令要在沙箱外执行，必须由人当场确认，这次调用没有经过确认：命令未执行", is_error=True,
                               details={"command": command, "outside_sandbox": True})
         box = Confinement() if outside else self.confinement
+        env = _clean_env(self.strip_secret_env, keep=OUTSIDE_KEEP_ENV if outside else ())
         shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
         chunks: list[bytes] = []
         timed_out = False
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         proxy = None
         try:
-            async with box.enter([shell, "-c", command], ctx.workspace.root, _clean_env(self.strip_secret_env)) as run:
+            async with box.enter([shell, "-c", command], ctx.workspace.root, env) as run:
                 proxy = run.proxy
                 # sandbox-exec 设置好沙箱后 exec 成 bash，进程号不变；bwrap 是 bash 的父进程，--die-with-parent 保证它退出时
                 # 沙箱里的进程一起退出。两种情况取消、超时都能整组终止
