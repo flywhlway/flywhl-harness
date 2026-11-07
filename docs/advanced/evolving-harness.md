@@ -104,7 +104,7 @@ harness 里的每个组件都隐含着一个判断：“模型自己做不到这
 | 循环守卫 | `loop_guard.warn_repeats` / `stop_repeats` / `max_consecutive_errors` / `same_file_edit_warn` | 3 / 5 / 6 / 6 | 调大即近似关闭；没有单独的启用开关 |
 | 预算软提醒 | `budget.soft_ratio` | `0.8` | 设为 `1.0` 时软阈值与硬阈值重合，软提醒不再出现 |
 | 预算收尾 | `budget.wrap_up_on_exhaust` | `True` | 耗尽时直接结束，不做总结 |
-| AGENTS.md / 技能清单 | `load_agents_md` / `load_skills` | `True` | 系统提示不再包含对应段落 |
+| AGENTS.md / 技能清单 | `load_agents_md` / `load_skills` | `True` | 项目指令通道不再包含对应段落 |
 | 子代理 | `subagent_max_depth` | `2` | 见下方注意事项 |
 | 并行工具 | `parallel_tool_limit` | `8` | 设为 `1` 即串行 |
 

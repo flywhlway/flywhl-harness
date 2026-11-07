@@ -210,7 +210,8 @@ async def replay_trajectory(
     h = Harness(cfg, provider=provider, model=model, tools=registry, store=Store(":memory:", durability=cfg.durability))
     seeded = sum(1 for e in traj.get("history") or [] if e["kind"] == "message")
     try:
-        s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass")
+        s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass",
+                             project_context=traj["session"].get("project_context"))   # 模型当时看到的，从轨迹里取
         for e in traj.get("history") or []:
             h.store.append_entry(s.id, e["kind"], e["payload"], entry_id=e["id"])
         if settings.get("clear_watermark"):

@@ -5,7 +5,7 @@
 | 来源 | 典型攻击 | 主要防线 |
 |---|---|---|
 | 模型读到的内容 | 网页、文件、MCP 结果里的提示注入，诱导外传凭证或搞破坏 | 污点升级、凭证位置硬拒绝、人工审批 |
-| 不可信仓库 | `flywhl.toml` 或 `.env` 改写 `base_url` 引走密钥、挂恶意 Hook、放宽权限 | 项目配置信任、`.env` 白名单 |
+| 不可信仓库 | `flywhl.toml` 或 `.env` 改写 `base_url` 引走密钥、挂恶意 Hook、放宽权限；`AGENTS.md`、README 里藏指令 | 项目配置信任、`.env` 白名单、工作区信任 |
 | 本机端口 | 恶意网页借 DNS 重绑定或跨站请求驱动 Agent | 访问令牌、Host 白名单、Origin 校验 |
 | 命令本身 | 看似只读的命令暗藏执行或写入 | bash 风险分析、运行环境加固、沙箱、快照 |
 
@@ -68,9 +68,15 @@ bash 子进程的环境同步加固：剥离密钥类环境变量（`strip_secre
 
 ## 污点与 Hooks
 
-- 会话读入外部世界的内容后（`curl`、`git pull` 等联网命令，以及默认视为开放世界的 MCP 工具）被标记污点，此后所有副作用至少需要审批。污点记在会话上，暂停恢复、崩溃接管后依然有效。
+- 会话读入外部世界的内容后（`curl`、`git pull` 等联网命令、默认视为开放世界的 MCP 工具，以及没信任过的工作区里的文件）被标记污点，此后所有副作用至少需要审批。污点记在会话上，暂停恢复、崩溃接管后依然有效。
 - Hooks 只能收紧：按优先级串行执行，任一拒绝立即短路。`pre_tool_use` 的命令 Hook 未写 `fail_closed` 时默认失败即拒绝，脚本崩溃或超时都按拒绝处理；其余事件默认失败放行。
 - MCP 服务器启动时同样剥离密钥环境变量。
+
+## 工作区信任
+
+工作区默认没有信任过。没信任过时，`AGENTS.md`、技能清单带“不可信”标注进入上下文，会话开局就带污点；没有这些文件时，第一次读到工作区内容才带污点。污点之后 allow 规则、会话授权、`accept_edits` 不再自动放行写操作，bypass 不受影响。
+
+信任按仓库根记录在 `~/.flywhl/trusted.json`，终端运行时问一次，`--trust` 直接信任，非交互运行不信任。只跑自己代码的 CI 可以在用户配置或 `-c` 文件里写 `trust_workspace = true`；项目配置写的会被丢弃。
 
 ## 配置信任
 
@@ -95,7 +101,7 @@ hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了�
 - 系统沙箱默认开启（macOS 用 sandbox-exec，Linux 用 bubblewrap），bash、命令 hook、MCP 服务器和 `verify_command` 都在里面：凭证位置由内核拒绝，写入限于工作区与临时目录，docker.sock、ssh-agent、钥匙串、`open` 这类能让沙箱外的进程代劳的通道也被拒绝（本机数据库的套接字可以在 `unix_sockets` 里放行）。
 - 网络默认只放行 `network_allow` 里的主机，默认一个都没有，被拦时结果里写明主机和放行办法。`sandbox_network = "deny"` 整体断网。
 - 用不了沙箱时命令拒绝执行，不退回沙箱外。Linux 上 `apt install bubblewrap`；确实要在没有沙箱的环境里运行，在用户配置里写 `sandbox = "off"` 或加 `--sandbox off`，项目配置写的不算。
-- 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。
+- 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。例外只有 `flywhl run` 命令行上的 `--approve-outside '模式'`：必须写具体的命令，污点、高危、重定向到文件的命令照样拒绝，每次放行都记入审计。
 - 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`，以及决定 git 去哪读配置的 `commondir` 这类文件。所以 `git config`、`git remote add` 在沙箱里会失败，`git add`、`git commit` 不受影响。
 - 系统沙箱挡的是误操作和注入驱动的越界，和宿主共用内核。跑不可信代码、多租户时请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。

@@ -91,6 +91,7 @@ def _resolve(ctx: ToolContext, path: str, *, allow_outside: bool = False) -> Pat
 
 class ReadTool(Tool):
     name = "read"
+    reads_workspace = True
     description = (
         "读取文本文件内容，输出带行号。默认最多 2000 行或 50KB；文件更长时用 offset/limit 分段读取。"
         "路径可以是相对工作区的路径或绝对路径。修改文件前应先读取。"
@@ -216,6 +217,7 @@ class WriteTool(_GatedWrite):
 
 class EditTool(_GatedWrite):
     name = "edit"
+    reads_workspace = True
     description = (
         "精确字符串替换：把文件中的 old_string 替换为 new_string。old_string 必须与文件内容完全一致"
         "（含缩进与空白）且唯一；若需替换所有出现位置，设置 replace_all=true。"
@@ -290,6 +292,7 @@ class EditTool(_GatedWrite):
 
 class LsTool(Tool):
     name = "ls"
+    reads_workspace = True
     description = "列出目录内容（目录以 / 结尾，附文件大小）。自动跳过 .git、node_modules 等目录。"
     parameters = {
         "type": "object",
@@ -342,6 +345,7 @@ class LsTool(Tool):
 
 class GrepTool(Tool):
     name = "grep"
+    reads_workspace = True
     description = (
         "在文件中按正则表达式搜索，返回 路径:行号: 内容。可用 glob 过滤文件（如 *.py）。"
         "先用 grep 定位，再用 read 查看上下文，比整文件读取省得多。"
