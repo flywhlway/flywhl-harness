@@ -25,7 +25,7 @@ import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterable
 
 from .._utils import clip, now
 from ..agent.budget import Budget, LoopGuard
@@ -42,7 +42,7 @@ from ..llm import create_provider
 from ..llm.base import Provider
 from ..policy.approvals import ApprovalBroker, ApprovalDecision, Resolver
 from ..policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput
-from ..policy.permissions import PermissionPolicy, Rule
+from ..policy.permissions import PermissionPolicy, Rule, outside_rule
 from ..policy.supply_chain import unpinned_in
 from ..prompts import SUBAGENT_PROMPT, build_project_context, build_system_prompt
 from ..tools import default_tools
@@ -169,8 +169,10 @@ class Harness:
         self, config: HarnessConfig | None = None, *, provider: Provider | None = None, model: str | None = None,
         tools: ToolRegistry | None = None, store: Store | None = None, hooks: HookBus | None = None,
         approval_resolver: Resolver | None = None, worker_id: str | None = None,
+        approve_outside: Iterable[str] = (),
     ):
         self.config = config or HarnessConfig.load()
+        self.approve_outside = [outside_rule(p) for p in approve_outside]   # 不进配置：配置文件写不了，见 cmd_run
         self.workspace_root = Path(self.config.workspace).expanduser().resolve()
         self.data_dir = self.config.data_path()
         self.store = store or Store(self.data_dir / "harness.db", durability=self.config.durability)
@@ -339,7 +341,7 @@ class Harness:
         cfg = self.config
         ws = self.workspace(s)
         policy = PermissionPolicy(s.meta.get("mode", cfg.permissions.mode), cfg.permissions.rules, workspace=ws,
-                                  auto_approve=cfg.permissions.auto_approve)
+                                  auto_approve=cfg.permissions.auto_approve, approve_outside=self.approve_outside)
         grants = [Rule.parse(g, "session") for g in s.meta.get("grants", [])]
         ctxm = ContextManager(cfg.context, self.model_info)
         if tools is None:

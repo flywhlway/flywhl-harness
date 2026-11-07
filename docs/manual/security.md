@@ -101,7 +101,7 @@ hook 与 MCP 服务器默认跑在系统沙箱里，读不到凭证、写不了�
 - 系统沙箱默认开启（macOS 用 sandbox-exec，Linux 用 bubblewrap），bash、命令 hook、MCP 服务器和 `verify_command` 都在里面：凭证位置由内核拒绝，写入限于工作区与临时目录，docker.sock、ssh-agent、钥匙串、`open` 这类能让沙箱外的进程代劳的通道也被拒绝（本机数据库的套接字可以在 `unix_sockets` 里放行）。
 - 网络默认只放行 `network_allow` 里的主机，默认一个都没有，被拦时结果里写明主机和放行办法。`sandbox_network = "deny"` 整体断网。
 - 用不了沙箱时命令拒绝执行，不退回沙箱外。Linux 上 `apt install bubblewrap`；确实要在没有沙箱的环境里运行，在用户配置里写 `sandbox = "off"` 或加 `--sandbox off`，项目配置写的不算。
-- 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。
+- 要在沙箱外跑一条命令（`git push`、`gh`），模型要带 `outside_sandbox`，任何模式都要人确认，`auto_approve` 和规则放行不了，无人值守时拒绝。例外只有 `flywhl run` 命令行上的 `--approve-outside '模式'`：必须写具体的命令，污点、高危、重定向到文件的命令照样拒绝，每次放行都记入审计。
 - 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。所以 `git config`、`git remote add` 在沙箱里会失败，`git add`、`git commit` 不受影响。
 - 系统沙箱挡的是误操作和注入驱动的越界，和宿主共用内核。跑不可信代码、多租户时请用容器或 microVM。
 - CLI 显示工具输出前过滤终端控制字符，防止输出篡改终端。
