@@ -340,7 +340,7 @@ AGENTS.md 是跨工具的项目指令约定。各家实现的共同点是“分�
 
 | 维度 | flywhl（`find_project_context`） | pi | Codex |
 |---|---|---|---|
-| 查找方向 | 从工作区向上，直到 git 根（无 git 则到文件系统根） | 从全局配置到 cwd 逐级加载 | 全局文件 + 从项目根到 cwd |
+| 查找方向 | 从工作区向上，直到 git 根（无 git 则只看工作区本身） | 从全局配置到 cwd 逐级加载 | 全局文件 + 从项目根到 cwd |
 | 每个目录的文件优先级 | `AGENTS.md` > `CLAUDE.md`（只取一个） | `AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` | 支持 override 文件与可配置的后备文件名（以官方文档为准） |
 | 拼接顺序 | 祖先在前，工作区最后 | 全局在前，cwd 最后 | 根在前，越具体越靠后 |
 | 体积上限 | 总计 32 KiB（按 UTF-8 字节计） | 以 pi 仓库为准 | 默认 32 KiB |
@@ -351,14 +351,14 @@ AGENTS.md 是跨工具的项目指令约定。各家实现的共同点是“分�
 for d in [cur, *cur.parents]:
     for name in ("AGENTS.md", "CLAUDE.md"):
         f = d / name
-        if f.is_file():
+        if f.is_file() and _may_load(f, root):
             text = f.read_text(encoding="utf-8", errors="replace")
             size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
             if total + size <= max_bytes:
                 found.append((f, text))
                 total += size
             break
-    if (d / ".git").exists():
+    if d == root:
         break
 return list(reversed(found))
 ```
@@ -367,7 +367,7 @@ return list(reversed(found))
 
 1. **超限时保留近的、丢弃远的。** 遍历从工作区开始向上，预算先分给最近的目录；超出上限的祖先文件被跳过（但更远的小文件仍可能被收入）。最后 `reversed` 只是调整拼接顺序。
 2. **上限按 UTF-8 字节计。** 比较的是 `len(text.encode("utf-8"))`，与参数名 `max_bytes` 一致。若按字符数计，中文为主的文件（一个汉字 3 字节）实际能放进约 3 倍的体积；按字节计，32 KiB 大约是一万字的中文。
-3. **不在 git 仓库里时会一直走到文件系统根。** 工作区不是 git 仓库时，用户主目录下的 AGENTS.md 也会被加载——这有时符合预期（相当于全局指令），有时是意外。
+3. **边界是项目本身。** 工作区不在 git 仓库里时只看工作区这一层，上层目录不是这个项目的。符号链接只认项目之内：这些文件不经过权限层，指向项目之外或密钥位置的链接直接跳过，并给出警告。
 
 每个文件以 `<file path="...">` 包裹，整体放进 `<project-context trust="...">` 消息，模型可以知道指令来自哪一层、工作区有没有被信任过。OpenAI 在《Harness engineering》中的建议值得借鉴：AGENTS.md 只做目录，指向 `docs/` 里的权威文档，而不是把所有规则堆进去——这与 32K 上限是一致的约束。
 

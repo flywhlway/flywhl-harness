@@ -36,7 +36,7 @@ An MCP tool still reaches the model as an ordinary tool schema. The model cannot
 
 **Skills** use progressive disclosure. `find_skills()` scans `.flywhl/skills/*/SKILL.md` and `skills/*/SKILL.md` in the workspace, reads the first 2000 characters and parses single-line `key: value` frontmatter. The list goes into the system prompt as `<available_skills>`, and the model reads the full `SKILL.md` on demand. Multi-line YAML values are not parsed. The list is frozen with the session. Skill scripts run through `bash`, so permissions still apply.
 
-**AGENTS.md** is gathered by `find_project_context()`. It walks up from the workspace to the git root, takes one of `AGENTS.md` or `CLAUDE.md` per directory, and enforces a 32 KiB limit counted in UTF-8 bytes. Nearer files win when the budget runs out, and the output order puts ancestors first. Outside a git repo the walk goes to the filesystem root, which can pull in a home-directory file.
+**AGENTS.md** is gathered by `find_project_context()`. It walks up from the workspace to the git root, takes one of `AGENTS.md` or `CLAUDE.md` per directory, and enforces a 32 KiB limit counted in UTF-8 bytes. Nearer files win when the budget runs out, and the output order puts ancestors first. Outside a git repo only the workspace itself is read. These files bypass the permission layer, so a symlink pointing outside the project or at a secret is skipped with a warning.
 
 **A2A** is covered as a design. A Run maps closely onto an A2A task: `waiting_human` is input-required, `running` is working, `Harness.subscribe(run_id, after_seq)` gives resubscription. As a client, a remote agent would be an `EXTERNAL`, untrusted-output tool whose `reconcile()` finds the remote task again by idempotency key.
 

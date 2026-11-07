@@ -388,7 +388,7 @@ asyncio.create_task(watch(h, run.id))
 `permissions.rules` 追加合并，其余字段后者覆盖前者。
 
 启动目录的配置文件可能来自刚克隆的仓库，其中下列设置要先信任这份文件的当前内容才生效：`hooks`、`mcp_servers`、`verify_command`、
-`base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`、`durability`，以及 `permissions` 中放宽审批的取值
+`base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`、`durability`、`system_prompt`、`append_system_prompt`，以及 `permissions` 中放宽审批的取值
 （`allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`）。其余字段直接生效（白名单见 `config.py::_SAFE_KEYS`）。
 信任按“绝对路径 + 内容 SHA-256”记在 `~/.flywhl/trusted.json`，内容变化后重新确认；用户配置与 `-c` 指定的文件视为可信。
 库代码默认忽略未信任的设置并发出 `UntrustedConfigWarning`，要自己做确认时传回调：
@@ -411,8 +411,8 @@ cfg = HarnessConfig.load(trust=ask)
 | `thinking` / `reasoning_effort` | `None` / `None` | 思考开关（`enabled` / `disabled`）与强度，按供应商翻译成各自的字段 |
 | `extra_body` | `{}` | 原样并入 OpenAI 兼容请求体的厂商私有参数 |
 | `request_timeout` / `max_retries` | `300.0` / `4` | 模型请求超时；`RetryPolicy.max_attempts`（含首次） |
-| `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示 |
-| `load_agents_md` / `load_skills` | `True` / `True` | 加载 AGENTS.md（或 CLAUDE.md）/ 技能清单 |
+| `system_prompt` / `append_system_prompt` | `None` / `None` | 完全替换 / 追加系统提示。写在项目配置里要先信任才生效 |
+| `load_agents_md` / `load_skills` | `True` / `True` | 加载 AGENTS.md（或 CLAUDE.md）/ 技能清单。项目配置只能关，不能开 |
 | `trust_workspace` | `False` | 信任所有工作区。项目配置写的会被丢弃，只用于只跑自己代码的 CI 或一次性容器 |
 | `workspace` / `data_dir` | `"."` / `".flywhl"` | 工作区；数据目录（相对工作区） |
 | `tool_timeout` / `parallel_tool_limit` | `120.0` / `8` | 工具默认超时；只读并行批的并发上限 |
