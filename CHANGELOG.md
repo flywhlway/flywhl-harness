@@ -4,19 +4,6 @@
 
 ## Unreleased
 
-### 新增
-
-**`flywhl run --approve-outside '模式'`：无人值守时放行写明的沙箱外命令。** 只有命令行能写，只在无人值守时生效，只管 bash。必须写具体的命令，`*`、路径、解释器都拒绝；复合命令每段都要匹配，有污点、高危、重定向到文件、实际程序不在命令文本里的照样拒绝。每次放行在 `approvals` 表和事件流里各留一条记录。
-
-### 修复
-
-**`git push --receive-pack`、`--upload-pack`、`--exec`、`ext::` 这类地址不再被 allow 规则覆盖。** 它们指定了要运行的程序，`allow:bash(git push*)` 按文本匹配时看不见，现在按“实际程序不在命令文本里”处理，要人确认。
-长选项的缩写（`--rece=x`）、`--repo=ext::x`、`git clone` 的 `-c`、`--config`、`--template`，`git pull` 的 `-s`、`--strategy` 同样处理。
-
-**解析不了的 bash 命令不再被 allow 规则和 `auto_approve` 覆盖，要人确认。** 比如结尾一个反斜杠：解析器放弃，bash 照样执行分号后面的命令。这类命令按读到外部内容算，灾难性命令的判定也会逐段再查一遍。
-
-**`git push` 的合写和缩写不再绕过高危判定。** `-qf`、`--mirror`、`--delete`、`-d`、`--prune`、`:分支` 都算高危，要人确认。
-
 ### 行为变化
 
 **工作区默认不信任，项目指令文件不再是系统提示词的一部分。** `AGENTS.md`、`CLAUDE.md`、技能清单放进一条带来源和信任标注的独立消息。
@@ -59,8 +46,18 @@
 
 ### 新增
 
+**`flywhl run --approve-outside '模式'`：无人值守时放行写明的沙箱外命令。** 只有命令行能写，只在无人值守时生效，只管 bash。必须写具体的命令，`*`、路径、解释器都拒绝；复合命令每段都要匹配，有污点、高危、重定向到文件、实际程序不在命令文本里的照样拒绝。每次放行在 `approvals` 表和事件流里各留一条记录。
+
 - `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
+
 ### 修复
+
+**`git push --receive-pack`、`--upload-pack`、`--exec`、`ext::` 这类地址不再被 allow 规则覆盖。** 它们指定了要运行的程序，`allow:bash(git push*)` 按文本匹配时看不见，现在按“实际程序不在命令文本里”处理，要人确认。
+长选项的缩写（`--rece=x`）、`--repo=ext::x`、`git clone` 的 `-c`、`--config`、`--template`，`git pull` 的 `-s`、`--strategy` 同样处理。
+
+**解析不了的 bash 命令不再被 allow 规则和 `auto_approve` 覆盖，要人确认。** 比如结尾一个反斜杠：解析器放弃，bash 照样执行分号后面的命令。这类命令按读到外部内容算，灾难性命令的判定也会逐段再查一遍。
+
+**`git push` 的合写和缩写不再绕过高危判定。** `-qf`、`--mirror`、`--delete`、`-d`、`--prune`、`:分支` 都算高危，要人确认。
 
 - `AGENTS.md`、`CLAUDE.md`、`SKILL.md` 是符号链接，目标又在进不去的目录里时，会话起不来。现在和其他读不了的项目文件一样跳过。
 
