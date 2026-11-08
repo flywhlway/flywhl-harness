@@ -3,7 +3,7 @@ import { api } from "../lib/api.js";
 import { $, $$, copyText, debounce, esc, fmt, h, store } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { RUN_STATUS, TERMINAL, eventGroup, statusBadge } from "../lib/meta.js";
-import { confirmDialog, toast } from "../lib/ui.js";
+import { confirmDialog, dialog, toast } from "../lib/ui.js";
 
 const TABS = [
   { id: "overview", label: "概览", icon: "activity" },
@@ -178,11 +178,82 @@ function renderOverview(p, V, app) {
     b.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>回放中`;
     try {
       const rep = await api.post(`/api/runs/${b.dataset.replay}/replay`, {}, { timeout: 120000 });
-      if (rep.same_tool_sequence && rep.same_final_text) toast("工具调用序列与最终答案都与原始运行一致；回放过程中没有执行任何副作用。", { tone: "success", title: "回放一致" });
-      else toast(rep.divergence ? `第 ${rep.divergence.step} 次模型调用时上下文与录制不一致，说明 harness 的行为发生了变化。` : "回放结果与原始运行不同。", { tone: "warning", title: "回放出现差异", timeout: 7000 });
+      showReplayReport(rep, runs.find((x) => x.id === b.dataset.replay));
     } catch (e) { toast(e.message, { tone: "danger", title: "回放失败" }); }
     b.disabled = false; b.innerHTML = html;
   }));
+}
+
+// ====================================================================== 回放报告
+// 结论只看后端的 deterministic。回放时模型输出取自录制，工具序列和最终答案几乎总是相同，
+// 真正的信号是上下文指纹有没有分叉；只比那两项，harness 行为变了也会报“一致”。
+// 录制时走到了结局的 Run，结局与最终答案也要一致；取消、崩溃这类结局回放走不到，不比较（与 ReplayReport.deterministic 同口径）
+const REACHES_END = new Set(["completed", "budget_exhausted"]);
+const statusLabel = (s) => RUN_STATUS[s]?.label || s || "—";
+
+function firstDiff(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) return i;
+  return -1;
+}
+
+function replayChecks(rep) {
+  const at = firstDiff(rep.original_tools, rep.replay_tools);
+  const reached = REACHES_END.has(rep.original_status);
+  return [
+    { ok: !rep.divergence, label: "模型看到的上下文",
+      detail: rep.divergence ? `第 ${rep.divergence.step + 1} 次模型调用前就与录制不同` : "每次模型调用前的上下文指纹都与录制一致" },
+    { ok: rep.same_tool_sequence, label: "工具调用序列",
+      detail: rep.same_tool_sequence ? `${rep.original_tools.length} 次调用，名称与顺序一致`
+        : `录制 ${rep.original_tools.length} 次、回放 ${rep.replay_tools.length} 次，从第 ${at + 1} 次开始不同` },
+    { ok: reached ? rep.status === rep.original_status : null, label: "结局",
+      detail: reached ? `录制「${statusLabel(rep.original_status)}」，回放「${statusLabel(rep.status)}」`
+        : `录制时以「${statusLabel(rep.original_status)}」结束，回放走不到同样的结局，不比较` },
+    { ok: reached ? rep.same_final_text : null, label: "最终答案",
+      detail: reached ? (rep.same_final_text ? "逐字相同" : "与录制不同") : "同上，不比较" },
+  ];
+}
+
+function replayVerdict(rep) {
+  if (rep.deterministic) return { title: "回放一致", tone: "success", iconName: "checkCircle", desc: "harness 当前的行为与录制时一致。" };
+  const why = rep.divergence
+    ? `第 ${rep.divergence.step + 1} 次模型调用前，模型看到的上下文就与录制不同：系统提示词、工具定义、截断或压缩规则等 harness 行为发生了变化。`
+    : !rep.same_tool_sequence ? "工具调用序列与录制不同。" : "回放的结局或最终答案与录制不同。";
+  return { title: "回放出现差异", tone: "warning", iconName: "alert", desc: why };
+}
+
+function replayBody(rep, run) {
+  const at = firstDiff(rep.original_tools, rep.replay_tools);
+  const rows = Math.max(rep.original_tools.length, rep.replay_tools.length);
+  const mark = (ok) => ok === null ? `<span class="rc-ic skip" title="不比较">${icon("info", "sm")}</span>`
+    : `<span class="rc-ic ${ok ? "ok" : "bad"}">${icon(ok ? "check" : "x", "sm")}</span><span class="sr-only">${ok ? "一致" : "不一致"}</span>`;
+  const seq = rows ? `<div class="replay-seq" role="table" aria-label="工具调用序列对照">
+      <div class="rs-row rs-head" role="row"><span role="columnheader">#</span><span role="columnheader">录制</span><span role="columnheader">回放</span></div>
+      ${Array.from({ length: rows }, (_, i) => `<div class="rs-row${at >= 0 && i >= at ? " differs" : ""}${i === at ? " first" : ""}" role="row"><span role="cell" class="tnum">${i + 1}</span>
+        <span role="cell" class="mono">${esc(rep.original_tools[i] ?? "—")}</span><span role="cell" class="mono">${esc(rep.replay_tools[i] ?? "—")}</span></div>`).join("")}</div>`
+    : `<p class="muted" style="font-size:var(--fs-sm)">两边都没有工具调用。</p>`;
+  const finalDiff = REACHES_END.has(rep.original_status) && !rep.same_final_text;
+  const el = h("div", { class: "replay-report" });
+  el.innerHTML = `
+    <ul class="replay-checks">${replayChecks(rep).map((c) => `<li>${mark(c.ok)}<span class="lb">${esc(c.label)}</span><span class="dt">${esc(c.detail)}</span></li>`).join("")}</ul>
+    <div class="replay-status">录制 ${statusBadge(rep.original_status, { still: true })}${icon("chevronRight", "sm")}回放 ${statusBadge(rep.status, { still: true })}</div>
+    <details class="disclosure"${rep.same_tool_sequence ? "" : " open"}><summary>${icon("chevronRight", "sm chev")}<span>工具调用序列</span><span class="aside tnum">录制 ${rep.original_tools.length} · 回放 ${rep.replay_tools.length}</span></summary>
+      <div class="content">${seq}</div></details>
+    ${rep.divergence ? `<details class="disclosure"><summary>${icon("chevronRight", "sm chev")}<span>上下文指纹</span><span class="aside">第 ${rep.divergence.step + 1} 次模型调用</span></summary>
+      <div class="content"><dl class="kv"><dt>录制</dt><dd><span class="mono">${esc(rep.divergence.expected)}</span></dd><dt>回放</dt><dd><span class="mono">${esc(rep.divergence.actual)}</span></dd></dl>
+      <p class="muted" style="font-size:var(--fs-xs);margin-top:6px">指纹覆盖系统提示词、每个工具的名称/描述/参数 schema 和全部消息，任何一项变了都会不同。</p></div></details>` : ""}
+    ${finalDiff ? `<details class="disclosure"><summary>${icon("chevronRight", "sm chev")}<span>最终答案对照</span></summary>
+      <div class="content replay-final"><span class="muted">录制</span><pre class="plain">${esc(run?.result?.text || "（页面上没有录制的最终答案）")}</pre>
+      <span class="muted">回放</span><pre class="plain">${esc(rep.final_text || "（空）")}</pre></div></details>` : ""}
+    <div class="replay-foot"><span>回放没有调用模型，工具结果取自录制；${rep.workspace ? `临时工作区副本保留在 <span class="mono">${esc(rep.workspace)}</span>` : "临时工作区副本已删除"}。</span>
+      <button class="btn sm ghost" type="button" data-copy-report>${icon("copy", "sm")}复制报告 JSON</button></div>`;
+  $("[data-copy-report]", el).onclick = async () => {
+    if (await copyText(JSON.stringify(rep, null, 2))) toast("回放报告已复制", { tone: "success", timeout: 1800 });
+  };
+  return el;
+}
+
+function showReplayReport(rep, run) {
+  dialog({ ...replayVerdict(rep), body: replayBody(rep, run), wide: true, hideCancel: true, confirmText: "关闭" });
 }
 
 // ====================================================================== 上下文

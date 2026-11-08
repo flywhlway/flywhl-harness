@@ -24,6 +24,7 @@ EXTERNAL 级工具一律切换为 dry-run——**分叉评测绝不能真的去�
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from dataclasses import dataclass, field, fields, replace
@@ -160,17 +161,41 @@ def _external_inputs(msgs: list[Message], kinds: frozenset[str]) -> dict[int, li
 async def replay_run(
     store: Store, run_id: str, *, config: HarnessConfig | None = None, live: Provider | None = None,
     live_model: str | None = None, fork_at: int | None = None, base_tools: ToolRegistry | None = None,
+    keep_workspace: bool = True,
 ) -> ReplayReport:
     """回放一次 Run。``fork_at=None`` 为确定性回放；否则从第 fork_at 次模型调用起切换到 live provider。"""
     return await replay_trajectory(export_trajectory(store, run_id, include_children=False), config=config, live=live,
-                                   live_model=live_model, fork_at=fork_at, base_tools=base_tools)
+                                   live_model=live_model, fork_at=fork_at, base_tools=base_tools,
+                                   keep_workspace=keep_workspace)
 
 
 async def replay_trajectory(
     traj: dict[str, Any], *, config: HarnessConfig | None = None, live: Provider | None = None,
     live_model: str | None = None, fork_at: int | None = None, base_tools: ToolRegistry | None = None,
+    keep_workspace: bool = True,
 ) -> ReplayReport:
-    """从导出的轨迹回放，不需要原来的数据库。不给 ``config`` 时用轨迹里记下的设置；给了就以它为准，用来看改设置会不会分叉。"""
+    """从导出的轨迹回放，不需要原来的数据库。不给 ``config`` 时用轨迹里记下的设置；给了就以它为准，用来看改设置会不会分叉。
+
+    回放在工作区的临时副本里进行。``keep_workspace=True`` 时留下副本、路径写在报告里，供分叉回放后检查文件；
+    ``False`` 时回放完就删掉，报告里的 ``workspace`` 为空。回放出错时调用方拿不到路径，副本总是当场删掉。
+    """
+    ws = await asyncio.to_thread(_copy_workspace, traj["session"]["workspace"])   # 大工作区复制很慢，不能卡住事件循环
+    try:
+        rep = await _replay_in(ws, traj, config=config, live=live, live_model=live_model, fork_at=fork_at,
+                               base_tools=base_tools)
+    except BaseException:
+        shutil.rmtree(ws, ignore_errors=True)
+        raise
+    if not keep_workspace:
+        await asyncio.to_thread(shutil.rmtree, ws, True)
+        rep.workspace = ""
+    return rep
+
+
+async def _replay_in(
+    ws: str, traj: dict[str, Any], *, config: HarnessConfig | None, live: Provider | None,
+    live_model: str | None, fork_at: int | None, base_tools: ToolRegistry | None,
+) -> ReplayReport:
     from ..runtime.manager import Harness
 
     run_id = traj["run"]["id"]
@@ -182,7 +207,6 @@ async def replay_trajectory(
     assistant = [m for m in msgs if m.role == "assistant" and m.stop_reason not in ("error", "aborted")]
     fps = traj["fingerprints"] if fork_at is None else traj["fingerprints"][:fork_at]
 
-    ws = _copy_workspace(traj["session"]["workspace"])
     base_cfg = config or _recorded_config(settings)
     cfg = replace(base_cfg, workspace=ws, data_dir=str(Path(ws) / ".flywhl"))
     cfg.context = replace(cfg.context, context_window=cfg.context.context_window or settings.get("context_window"))
@@ -235,7 +259,8 @@ async def replay_trajectory(
     final = (rec.result or {}).get("text") or ""
     notes = []
     if rp.divergence:
-        notes.append(f"第 {rp.divergence['step']} 次模型调用的上下文与录制时不一致：harness 行为发生了变化")
+        # divergence.step 从 0 计数，给人看的文字从 1 计数
+        notes.append(f"第 {rp.divergence['step'] + 1} 次模型调用的上下文与录制时不一致：harness 行为发生了变化")
     return ReplayReport(run_id, rec.id, "deterministic" if fork_at is None else f"fork@{fork_at}", rec.status,
                         orig_seq, new_seq, orig_seq == new_seq, final == (orig_final or ""),
                         rp.divergence, final, ws, notes, traj["run"].get("status", ""))

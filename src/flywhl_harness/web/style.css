@@ -399,6 +399,30 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .dialog-body { padding: var(--sp-4) var(--sp-5) 0; display: grid; gap: var(--sp-3); }
 .dialog-foot { padding: var(--sp-5); display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .dialog.wide { width: min(640px, 100%); }
+.dialog-head .ic.success { background: var(--success-soft); color: var(--success); }
+
+/* 回放报告 */
+/* 限高后由整体滚动；子项不许收缩：.disclosure 带 overflow:hidden，被压缩时内容会被直接裁掉 */
+.replay-report { display: flex; flex-direction: column; gap: var(--sp-3); max-height: min(60vh, 560px); overflow-y: auto; }
+.replay-report > * { flex-shrink: 0; }
+.replay-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.replay-checks li { display: grid; grid-template-columns: 20px 9em 1fr; gap: 8px; align-items: start; font-size: var(--fs-sm); line-height: 20px; }
+.replay-checks .lb { color: var(--text); font-weight: 500; }
+.replay-checks .dt { color: var(--text-2); }
+.rc-ic { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
+.rc-ic.ok { background: var(--success-soft); color: var(--success); }
+.rc-ic.bad { background: var(--warning-soft); color: var(--warning); }
+.rc-ic.skip { background: var(--surface-2); color: var(--text-3); }
+.replay-status { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-sm); color: var(--text-2); }
+.replay-seq { display: grid; max-height: 240px; overflow-y: auto; font-size: var(--fs-xs); }
+.replay-seq .rs-row { display: grid; grid-template-columns: 2.5em 1fr 1fr; gap: 8px; padding: 3px 6px; border-radius: var(--r-sm); }
+.replay-seq .rs-row > span { overflow-wrap: anywhere; }
+.replay-seq .rs-head { position: sticky; top: 0; background: var(--surface); color: var(--text-3); }
+.replay-seq .rs-row.differs { background: var(--warning-soft); }
+.replay-seq .rs-row.first { box-shadow: inset 2px 0 0 var(--warning); }
+.replay-final { display: grid; gap: 6px; font-size: var(--fs-xs); }
+.disclosure .replay-final pre.plain { max-height: 200px; }
+.replay-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-3); }
 
 .palette { width: min(620px, 100%); padding: 0; }
 .palette-input { display: flex; align-items: center; gap: 10px; padding: 0 var(--sp-4); border-bottom: 1px solid var(--border); height: 52px; color: var(--text-3); }

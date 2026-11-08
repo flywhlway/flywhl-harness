@@ -539,7 +539,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
     async def replay(rid: str) -> dict[str, Any]:
         from ..observe.replay import replay_run
 
-        rep = await replay_run(h.store, rid, config=h.config, base_tools=h.tools)
+        # 页面上的回放只看报告，用完就删临时副本；要检查副本用 CLI 的 flywhl replay
+        rep = await replay_run(h.store, rid, config=h.config, base_tools=h.tools, keep_workspace=False)
         return rep.to_dict()
 
     @app.get("/api/runs/{rid}/events")
