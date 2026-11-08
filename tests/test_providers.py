@@ -88,7 +88,8 @@ async def test_recorded_final_answers_and_usage():
 
 async def test_served_model_is_recorded():
     body = (FIX / "deepseek_final.sse").read_text()
-    _, msg = await collect(provider_on("deepseek", body), "deepseek-chat")    # 旧模型名
+    # 请求名与服务名不同的情形。旧名 deepseek-chat 已于 2026-07-24 停用，这里用录好的响应，只验证记录哪个名字
+    _, msg = await collect(provider_on("deepseek", body), "deepseek-chat")
     assert msg.model == "deepseek-flash"                                         # 记录实际服务的模型
 
 
