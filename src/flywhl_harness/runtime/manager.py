@@ -433,7 +433,9 @@ class Harness:
             else:  # 不能静默丢弃用户的输入：明确告知哪些排队消息没有被处理
                 a.hub.publish(Event(E.NOTICE, {"level": "warn", "code": "inbox_dropped",
                                                "text": "以下排队消息未被处理：" + "；".join(pending["steer"] + pending["follow_up"])}))
-        result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns, "by": out.by}
+        # 预算计数和轮次一起落进 result：页面在运行结束后才打开时收不到实时 usage 事件，只能读这里
+        result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns,
+                  "tool_calls": rc.budget.tool_calls, "by": out.by}
         self._checkpoint(a, paused=out.status == "paused")
         self.store.update_run(a.run_id, usage=rc.run_usage.to_dict(), result=result, error=out.error)
         cur = RunStatus(self.store.get_run(a.run_id).status)  # type: ignore[union-attr]

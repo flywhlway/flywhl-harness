@@ -118,8 +118,12 @@ function renderOverview(p, V, app) {
   const r = V.run;
   if (!V.sid) { p.innerHTML = emptyHint("尚未开始", "发送第一条任务后，这里会实时显示运行状态、预算与状态流转。"); return; }
   if (r && V.trailFor !== r.id && !V.running) loadTrail(V).then((ok) => ok && renderOverview(p, V, app));
+  // 实时 usage 事件只有页面开着时才收得到。运行结束后才打开、或运行中途打开时，退回到落盘的数据：
+  // result（结束时写入）→ checkpoint.budget（每轮结束写入，运行中也有，旧版本留下的 Run 只有它记了工具次数）
   const u = V.usage || {};
-  const usage = u.usage || r?.usage || {};
+  const res = r?.result || {};
+  const ck = r?.checkpoint?.budget || {};
+  const usage = u.usage || (fmt.tokTotal(r?.usage) ? r.usage : ck.usage) || {};
   const budget = app.info?.budget || {};
   const visited = new Set(V.trail.flatMap((x) => [x.from, x.to]));
   const last = V.trail[V.trail.length - 1];
@@ -141,8 +145,8 @@ function renderOverview(p, V, app) {
     </div>
     <div class="panel-section">
       <div class="panel-title">预算</div>
-      ${meter("轮次", u.turns ?? r?.result?.turns ?? 0, u.max_turns ?? budget.max_turns)}
-      ${meter("工具调用", u.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
+      ${meter("轮次", u.turns ?? res.turns ?? ck.turns ?? 0, u.max_turns ?? budget.max_turns)}
+      ${meter("工具调用", u.tool_calls ?? res.tool_calls ?? ck.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
       ${meter("Token", tokens, maxTok, { text: `${fmt.k(fmt.tokIn(usage))} 入${usage.cache_read_tokens ? `（缓存 ${fmt.k(usage.cache_read_tokens)}）` : ""} · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
       ${meter("费用", usage.cost_usd || 0, maxCost, { text: `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}` })}
     </div>
