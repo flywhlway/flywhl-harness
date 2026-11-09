@@ -8,6 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from pathlib import Path
+
+import pytest
 
 from flywhl_harness import ScriptedProvider, Store
 from flywhl_harness.llm.base import StreamEvent
@@ -168,3 +171,65 @@ async def test_recording_keeps_only_what_replay_needs(ws):
     settings = h.store.get_run(res.run_id).config["replay"]
     assert settings["verify"] is True and settings["context_window"] == h.model_info.context_window
     assert "不该出现在轨迹里" not in json.dumps(settings, ensure_ascii=False)
+
+
+async def test_changed_context_with_the_same_tool_sequence_is_reported_as_divergence(ws):
+    """回归：模型输出取自录制，工具序列和最终答案几乎总相同，分叉只能靠上下文指纹发现。
+
+    页面曾经只看 same_tool_sequence 和 same_final_text，这种情况会报“回放一致”。
+    """
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    traj = json.loads(dumps(export_trajectory(h.store, res.run_id)))
+    traj["session"]["system_prompt"] += "\n（改过的系统提示词）"
+    rep = await replay_trajectory(traj, keep_workspace=False)
+    assert rep.same_tool_sequence and rep.same_final_text
+    assert rep.divergence["step"] == 0 and not rep.deterministic
+    assert rep.notes == ["第 1 次模型调用的上下文与录制时不一致：harness 行为发生了变化"]
+
+
+async def test_workspace_copy_is_removed_when_not_kept_or_when_replay_fails(ws, tmp_path, monkeypatch):
+    """回放在工作区的临时副本里进行。页面上的回放不需要副本；出错时调用方拿不到路径，也必须当场删掉。"""
+    import tempfile
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    (ws / "a.txt").write_text("1\n")
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    traj = json.loads(dumps(export_trajectory(h.store, res.run_id)))
+
+    kept = await replay_trajectory(traj)
+    assert kept.workspace and (Path(kept.workspace) / "a.txt").is_file(), "默认保留副本，CLI 与基准据此检查文件"
+    shutil.rmtree(kept.workspace)
+
+    rep = await replay_trajectory(traj, keep_workspace=False)
+    assert rep.deterministic and rep.workspace == ""
+    assert not list(scratch.iterdir())
+
+    broken = {**traj, "session": {**traj["session"], "tools": 5}}   # 复制完工作区之后才会出错
+    with pytest.raises(TypeError):
+        await replay_trajectory(broken)
+    assert not list(scratch.iterdir())
+
+
+async def test_replay_endpoint_returns_the_report_and_leaves_no_copy(ws, tmp_path, monkeypatch):
+    import tempfile
+
+    import httpx
+
+    from flywhl_harness.server.app import create_app
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    app = create_app(h, auto_recover=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as c:
+        r = await c.post(f"/api/runs/{res.run_id}/replay", json={})
+    assert r.status_code == 200
+    rep = r.json()
+    assert rep["deterministic"] is True and rep["original_tools"] == rep["replay_tools"] == ["ls"]
+    assert rep["workspace"] == "" and not list(scratch.iterdir())

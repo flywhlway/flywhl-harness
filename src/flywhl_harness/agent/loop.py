@@ -234,6 +234,8 @@ class AgentLoop:
             async for ev in self.executor.run_batch(calls):
                 yield ev
             rc.budget.charge_tool(len(calls))
+            # 工具次数在这里才记账：不补发快照，界面要等下一次模型调用结束才更新，长回合里会一直显示旧值
+            yield self._ev(E.USAGE, **rc.budget.snapshot())
             stop_msg = None
             for c in calls:
                 res = self.executor.last_results.get(c.id)
