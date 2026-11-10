@@ -8,13 +8,13 @@
     solution/      参考答案：覆盖到工作区上的文件
     solution.sh    参考答案里文件覆盖做不到的步骤（git 操作、写工作区外的文件），在工作区里用 bash 执行
 
-检查脚本放在工作区之外，模型看不到。``validate`` 证明两件事：夹具原样时检查不通过（题目不是白送的），参考答案能通过（题目是做得到的）。
+检查脚本和参考答案放在工作区之外，模型运行期间 ``answers_hidden`` 收走任务目录的权限：沙箱不限制读，只放在别处模型搜全盘还是找得到。
+``validate`` 证明两件事：夹具原样时检查不通过（题目不是白送的），参考答案能通过（题目是做得到的）。
 提示词里的 ``{port}`` 换成 ``serve`` 目录的本机 HTTP 服务端口，``{home}`` 换成这次试验的家目录。
 """
 
 from __future__ import annotations
 
-import functools
 import os
 import shutil
 import subprocess
@@ -24,7 +24,7 @@ import threading
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterator
 
@@ -88,18 +88,46 @@ def prepare(task: Task, ws: Path) -> None:
                            text=True, stdin=subprocess.DEVNULL)
 
 
-class _Quiet(SimpleHTTPRequestHandler):
-    def log_message(self, *args) -> None:
-        pass
+@contextmanager
+def answers_hidden(root: Path = TASKS) -> Iterator[None]:
+    """模型运行期间收走任务目录的权限。拦得住搜全盘，拦不住关沙箱时有意 chmod 回来。
+
+    只在一次性容器里生效：在宿主上跑到一半被杀，目录会留成 000。
+    """
+    if not os.environ.get("FLYWHL_BENCH_DISPOSABLE"):
+        yield
+        return
+    mode = root.stat().st_mode & 0o777
+    root.chmod(0)
+    try:
+        yield
+    finally:
+        root.chmod(mode)
+
+
+def _handler(files: dict[str, bytes]) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = files.get(self.path.split("?")[0])
+            self.send_response(404 if body is None else 200)
+            self.send_header("Content-Length", str(len(body or b"")))
+            self.end_headers()
+            self.wfile.write(body or b"")
+
+        def log_message(self, *args) -> None:
+            pass
+
+    return Handler
 
 
 @contextmanager
 def served(task: Task) -> Iterator[int | None]:
-    """需要本机服务的任务：在回环地址上开一个只读文件服务，代表开发时常连的本地服务。"""
+    """需要本机服务的任务：在回环地址上开一个只读服务，代表开发时常连的本地服务。内容先读进内存，答案隐藏时也能响应。"""
     if not task.serve:
         yield None
         return
-    handler = functools.partial(_Quiet, directory=str(task.dir / task.serve))
+    root = task.dir / task.serve
+    handler = _handler({f"/{p.relative_to(root).as_posix()}": p.read_bytes() for p in root.rglob("*") if p.is_file()})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()

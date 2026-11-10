@@ -224,7 +224,7 @@ class CommandHook:
     def __init__(self, command: str, cwd: str | None = None, *, env: dict[str, str] | None = None,
                  pass_env: list[str] | None = None, confinement: Any = None):
         self.command = command
-        self.confinement = confinement   # tools/confine.py 的 Confinement；None = 不进沙箱（直接构造时）
+        self.confinement = confinement   # tools/confine.py 的 Confinement；None（直接构造时）按默认配置解析，同样进沙箱
         self.cwd = cwd
         self.env = dict(env or {})
         self.pass_env = list(pass_env or [])

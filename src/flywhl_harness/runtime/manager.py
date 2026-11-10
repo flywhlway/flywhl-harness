@@ -25,7 +25,7 @@ import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterable
 
 from .._utils import clip, now
 from ..agent.budget import Budget, LoopGuard
@@ -36,15 +36,15 @@ from ..agent.loop import AgentLoop
 from ..agent.run_context import RunContext
 from ..agent.subagent import check_contract
 from ..cancel import CancelToken
-from ..config import BudgetConfig, HarnessConfig
+from ..config import BudgetConfig, HarnessConfig, is_workspace_trusted
 from ..events import E, EPHEMERAL_EVENTS, Event
 from ..llm import create_provider
 from ..llm.base import Provider
 from ..policy.approvals import ApprovalBroker, ApprovalDecision, Resolver
 from ..policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput
-from ..policy.permissions import PermissionPolicy, Rule
+from ..policy.permissions import PermissionPolicy, Rule, outside_rule
 from ..policy.supply_chain import unpinned_in
-from ..prompts import SUBAGENT_PROMPT, build_system_prompt
+from ..prompts import SUBAGENT_PROMPT, build_project_context, build_system_prompt
 from ..tools import default_tools
 from ..tools.confine import Confinement
 from ..tools.registry import ToolRegistry
@@ -171,8 +171,10 @@ class Harness:
         self, config: HarnessConfig | None = None, *, provider: Provider | None = None, model: str | None = None,
         tools: ToolRegistry | None = None, store: Store | None = None, hooks: HookBus | None = None,
         approval_resolver: Resolver | None = None, worker_id: str | None = None,
+        approve_outside: Iterable[str] = (),
     ):
         self.config = config or HarnessConfig.load()
+        self.approve_outside = [outside_rule(p) for p in approve_outside]   # 不进配置：配置文件写不了，见 cmd_run
         self.workspace_root = Path(self.config.workspace).expanduser().resolve()
         self.data_dir = self.config.data_path()
         self.store = store or Store(self.data_dir / "harness.db", durability=self.config.durability)
@@ -247,18 +249,27 @@ class Harness:
 
     # ================================================================== 会话
     def create_session(self, title: str = "新会话", *, workspace: str | None = None, mode: str | None = None,
-                       parent_session_id: str | None = None, system_prompt: str | None = None) -> SessionRecord:
+                       parent_session_id: str | None = None, system_prompt: str | None = None,
+                       project_context: str | None = None) -> SessionRecord:
+        """显式给 ``system_prompt`` 的（子代理、回放）用自己带来的内容，不再读工作区。"""
         ws = Path(workspace).expanduser().resolve() if workspace else self.workspace_root
         cfg = self.config
-        sp = system_prompt or build_system_prompt(ws, override=cfg.system_prompt, append=cfg.append_system_prompt,
-                                                  agents_md=cfg.load_agents_md, skills=cfg.load_skills)
+        sp = system_prompt or build_system_prompt(ws, override=cfg.system_prompt, append=cfg.append_system_prompt)
+        trusted = self.workspace_trusted(ws)
+        pc = project_context if system_prompt else build_project_context(ws, trusted=trusted, agents_md=cfg.load_agents_md,
+                                                                         skills=cfg.load_skills)
         meta = {
             # 钉住：系统提示与工具集在会话创建时冻结（版本钉住 + 前缀稳定）；
             # 模型以当前 Harness 为准（这里记录创建时的模型，实际服务的模型记录在每条 assistant 消息上）
             "system_prompt": sp, "model": self.model, "provider": self.provider.name, "tools": self.tools.names(),
-            "mode": mode or cfg.permissions.mode, "grants": [], "clear_watermark": 0,
+            "project_context": pc, "mode": mode or cfg.permissions.mode, "grants": [], "clear_watermark": 0,
         }
+        if pc and not trusted:   # 没信任过的仓库的话已经进了上下文，开局就是污点
+            meta["tainted"] = True
         return self.store.create_session(title, str(ws), parent_session_id=parent_session_id, meta=meta)
+
+    def workspace_trusted(self, workspace: str | Path) -> bool:
+        return self.config.trust_workspace or is_workspace_trusted(workspace)
 
     def workspace(self, session: SessionRecord) -> Workspace:
         if session.workspace not in self._workspaces:
@@ -333,7 +344,7 @@ class Harness:
         cfg = self.config
         ws = self.workspace(s)
         policy = PermissionPolicy(s.meta.get("mode", cfg.permissions.mode), cfg.permissions.rules, workspace=ws,
-                                  auto_approve=cfg.permissions.auto_approve)
+                                  auto_approve=cfg.permissions.auto_approve, approve_outside=self.approve_outside)
         grants = [Rule.parse(g, "session") for g in s.meta.get("grants", [])]
         ctxm = ContextManager(cfg.context, self.model_info)
         if tools is None:
@@ -352,6 +363,7 @@ class Harness:
             compactor=Compactor(self.provider, self.model, cfg.context), budget=budget,
             loop_guard=LoopGuard(cfg.loop_guard), cancel=cancel, inbox=inbox,
             system_prompt=s.meta.get("system_prompt") or build_system_prompt(ws.root), grants=grants,
+            project_context=s.meta.get("project_context"), workspace_trusted=self.workspace_trusted(ws.root),
             harness=self, role=role, depth=depth, resume=resume, resume_note=resume_note,
             clear_watermark=int(s.meta.get("clear_watermark", 0)), blob_scope=blob_scope,
             tainted=bool(s.meta.get("tainted")),
@@ -436,7 +448,9 @@ class Harness:
             else:  # 不能静默丢弃用户的输入：明确告知哪些排队消息没有被处理
                 a.hub.publish(Event(E.NOTICE, {"level": "warn", "code": "inbox_dropped",
                                                "text": "以下排队消息未被处理：" + "；".join(pending["steer"] + pending["follow_up"])}))
-        result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns, "by": out.by}
+        # 预算计数和轮次一起落进 result：页面在运行结束后才打开时收不到实时 usage 事件，只能读这里
+        result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns,
+                  "tool_calls": rc.budget.tool_calls, "by": out.by}
         self._checkpoint(a, paused=out.status == "paused")
         self.store.update_run(a.run_id, usage=rc.run_usage.to_dict(), result=result, error=out.error)
         if target == RunStatus.CANCELLED:
@@ -787,6 +801,9 @@ class Harness:
         sp = SUBAGENT_PROMPT.replace("{workspace}", str(parent.workspace.root))
         child_s = self.create_session(f"子代理：{description}", workspace=str(parent.workspace.root),
                                       mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp)
+        if parent.tainted:   # 任务简报是父代理写的：污点不往下传，提示注入就能靠 task 绕开升级
+            self.store.update_session(child_s.id, meta={**child_s.meta, "tainted": True})
+            child_s = self._session(child_s.id)
         child_tools = parent.tools.subset(tools, exclude=["task"] if parent.depth + 1 >= self.config.subagent_max_depth else [])
         budget = parent.budget.child(BudgetConfig(max_turns=max_turns, max_tool_calls=max_turns * 4))
         cancel = parent.cancel.child()  # 父取消 → 子取消

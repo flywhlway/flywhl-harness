@@ -228,7 +228,7 @@ Manus 团队在分享上下文工程经验时把 KV-cache 命中率称为生产�
 
 | 措施 | 代码位置 | 防止的破坏 |
 |---|---|---|
-| 系统提示在会话创建时冻结 | `Harness.create_session()` 写入 `meta["system_prompt"]`，`_build_rc()` 从 `meta` 读回 | 配置文件、AGENTS.md、技能清单在会话中途变化导致系统提示变化 |
+| 系统提示和项目指令在会话创建时冻结 | `Harness.create_session()` 写入 `meta["system_prompt"]`、`meta["project_context"]`，`_build_rc()` 从 `meta` 读回 | 配置文件、AGENTS.md、技能清单在会话中途变化导致系统提示变化 |
 | 工具集与顺序稳定 | `ToolRegistry` 按注册顺序保存，`specs()` 每次输出相同顺序；`register(replace=True)` 替换同名工具时不改变位置 | 工具列表顺序抖动 |
 | reminder 落盘、只追加 | `AgentLoop._inject_reminders()` 把提醒作为一条用户消息追加并持久化 | 每次请求临时拼接的提醒插在不同位置，打碎后续前缀 |
 | 清理水位线只前进 | `ContextManager.apply_clearing()`：水位线只在水位超过清理阈值时前移，`max(watermark, …)` 保证不后退 | 每轮重新决定“清理哪些结果”导致前缀每轮都变 |

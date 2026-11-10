@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator
 from .._utils import clip, now, short_hash
 from ..cancel import RunCancelled
 from ..events import E, Event
+from ..policy.approvals import OUTSIDE_BY
 from ..policy.hooks import HookEvent, HookInput
 from ..policy.permissions import Decision, grant_for, strictest
 from ..runtime.workspace import CredentialPath, PathEscape
@@ -225,9 +226,15 @@ class ToolExecutor:
         if decision == Decision.DENY:
             return done(ToolResult.error(f"权限拒绝：{reason}。请换一种不需要该权限的方式完成，或向用户说明需要什么权限。"), "denied")
         if decision == Decision.ASK:
-            if perm.human_only and getattr(rc.approvals, "on_ask", "wait") != "wait":
-                return done(ToolResult.error(f"权限拒绝：{reason}。这类操作必须由人当场确认，无人值守时一律拒绝。"
-                                             "请换一种在沙箱里能完成的方式，或向用户说明需要什么权限。"), "denied")
+            on_ask = getattr(rc.approvals, "on_ask", "wait")
+            outside_rule, outside_why = None, ""
+            if perm.human_only and on_ask != "wait":
+                if on_ask == "deny" and not hook_asked:   # --yes 放行不了人工门；守卫要人确认时也不按模式放行
+                    outside_rule, outside_why = rc.permissions.outside_approval(tool, args, perm, tainted=rc.tainted)
+                if outside_rule is None:
+                    why = f"（{outside_why}）" if outside_why else ""
+                    return done(ToolResult.error(f"权限拒绝：{reason}。这类操作必须由人当场确认，无人值守时一律拒绝{why}。"
+                                                 "请换一种在沙箱里能完成的方式，或向用户说明需要什么权限。"), "denied")
             preview = tool.preview(args, ctx)
             grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
             fatigue = getattr(rc.approvals, "fatigue", None)
@@ -242,10 +249,14 @@ class ToolExecutor:
                 on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview,
                                                                  None if perm.human_only else grant, fatigue),
                 auto_rule=str(auto_rule) if auto_rule else None, auto_why=auto_why,
+                outside_rule=outside_rule.pattern if outside_rule else None,
             )
             await self._set_status("running", "审批已处理")
             publish(E.APPROVAL_RESOLVED, {"call_id": call.id, "approved": dec.approved, "by": dec.by,
                                           "reason": dec.reason, "remember": dec.remember})
+            if dec.by == OUTSIDE_BY:
+                publish(E.NOTICE, {"level": "warn", "code": "approve_outside",
+                                   "text": f"沙箱外执行：{tool.describe_call(args)}（--approve-outside {outside_rule.pattern}）"})
             if fatigue is not None:
                 for text in fatigue.observe(rc.session_id, approved=dec.approved, by=dec.by, key=grant, risk=perm.risk,
                                             waited=time.monotonic() - asked, remembered=dec.remember):
@@ -284,7 +295,7 @@ class ToolExecutor:
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
                         if final.human_only:   # 人批准的是改写之前的那条命令
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数要过人工门，需要重新申请：{final.reason}"), "denied")
-            ctx.human_approved = perm.human_only
+            ctx.human_approved = perm.human_only   # 过了人工门：人当场确认的，或者人用 --approve-outside 提前写明的
             if dec.remember and not perm.human_only:   # 这一次的确认只管这一次
                 g = grant_for(tool, args)
                 rc.grants.append(g)
@@ -324,11 +335,13 @@ class ToolExecutor:
 
         # ---- 外置大结果 + 污点 ----
         result = rc.context.shape_tool_result(result, rc.store.blobs, rc.scope)
-        if (result.tainted or tool.untrusted_for(args)) and not rc.tainted:
+        foreign = tool.reads_workspace and not rc.workspace_trusted   # 没信任过的工作区：文件是仓库作者写的，不是用户写的
+        if (result.tainted or tool.untrusted_for(args) or foreign) and not rc.tainted:
             rc.tainted = True
             self._persist_session_meta(tainted=True)  # 污点属于会话：暂停恢复、崩溃接管之后依然有效
+            source = "没有信任过的工作区" if foreign else "不可信来源"
             publish(E.NOTICE, {"level": "info", "code": "tainted",
-                               "text": f"{call.name} 的输出来自不可信来源：之后的副作用操作将需要人工确认"})
+                               "text": f"{call.name} 的输出来自{source}：之后的副作用操作将需要人工确认"})
         msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
         if decision == Decision.ASK:
             msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]

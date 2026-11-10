@@ -18,6 +18,7 @@ def make_harness(ws: Path, script: list[Any] | Provider, *, store: Store | None 
     cfg.permissions.on_ask = on_ask
     cfg.snapshots = cfg_over.pop("snapshots", False)
     cfg.heartbeat_seconds = 0.2
+    cfg.trust_workspace = True      # 工作区是用例自己建的。测工作区信任的用例传 trust_workspace=False
     for k, v in cfg_over.items():
         target = cfg
         *path, last = k.split("__")
