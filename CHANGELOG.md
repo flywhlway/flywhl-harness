@@ -14,7 +14,7 @@
 | 沙箱里写不了 `.git/commondir`、`.git/config.worktree`、`.git/worktrees`，Linux 上新建的会被 harness 随时删掉；macOS 上改不了工作区和上级目录的名字 | 前者决定 git 去哪读配置，写得了就绕过了 `.git/config` 的只读；后者让写死路径的只读规则失效 | 这些操作放到沙箱外做 |
 | linked worktree 里沙箱内的命令改不了 `.git` 文件；`.git` 没有 `hooks` 时写不进去 | 这两处都会让内容之后在沙箱外执行 | 走 `outside_sandbox`，或者自己在终端里改 |
 
-**人批准过的沙箱外命令保留 `SSH_AUTH_SOCK`。** 这个变量名含 AUTH，以前和密钥一起剥离，靠它找 ssh-agent 的 `git push` 用 `outside_sandbox` 也 push 不了。只改这一条路径：沙箱里的 bash、关掉沙箱时的 bash、hook、MCP 服务器都不变，`GH_TOKEN`、`*_API_KEY` 在沙箱外也继续剥离。
+**人批准过的沙箱外命令保留 `SSH_AUTH_SOCK`。** 这个变量名含 AUTH，以前和密钥一起剥离，靠它找 ssh-agent 的 `git push` 用 `outside_sandbox` 也 push 不了。`--approve-outside` 提前放行的命令同样保留，无人值守的发布也能用 ssh-agent 推送。只改这一条路径：沙箱里的 bash、关掉沙箱时的 bash、hook、MCP 服务器都不变，`GH_TOKEN`、`*_API_KEY` 在沙箱外也继续剥离。
 
 **工作区默认不信任，项目指令文件不再是系统提示词的一部分。** `AGENTS.md`、`CLAUDE.md`、技能清单放进一条带来源和信任标注的独立消息。
 工作区没信任过时，这些文件标注为不可信，读到的工作区内容算污点，之后的写操作和外部操作要人确认。

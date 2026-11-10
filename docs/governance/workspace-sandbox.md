@@ -395,7 +395,7 @@ harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `e
 | 情况 | 是否被剥离 |
 |---|---|
 | `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`MYSQL_PWD` | 是 |
-| `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是沙箱里的 git 无法使用 ssh-agent。人批准过的 `outside_sandbox` 命令保留它 |
+| `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是沙箱里的 git 无法使用 ssh-agent。人批准过的 `outside_sandbox` 命令保留它，`--approve-outside` 放行的也算 |
 | `DATABASE_URL=postgres://user:pass@host/db` | 是，值是带密码的 URL |
 | `PGCONN="host=db password=…"`、JSON 配置里的密码 | **否**，名字和值的形态都认不出 |
 | `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但运行时才拼出来的路径等混淆写法认不出，要靠下文的沙箱档位由内核拒绝 |
@@ -601,7 +601,7 @@ plan 模式、`deny` 规则、凭证位置、灾难性命令在这之前已经�
 用户选择了让命令在外面跑，后果也在外面：它能读凭证、能写工作区之外，网络不受限。
 
 环境变量照样剥离，只留下 `SSH_AUTH_SOCK`：`git push` 是这个参数最常见的用途，靠这个变量找 ssh-agent 的用户没有它就 push 不了。
-它给的是一次签名的能力，读不到私钥，而且这条命令已经是人看过的。`GH_TOKEN`、`*_API_KEY` 的值本身就是凭证，继续剥离，
+它给的是一次签名的能力，读不到私钥，而且这条命令是人批准过的：当场确认，或者用 `--approve-outside` 提前写明了模式。`GH_TOKEN`、`*_API_KEY` 的值本身就是凭证，继续剥离，
 所以 `gh` 要靠 `gh auth login` 存下的凭据，靠环境变量登录的要自己在终端里跑。沙箱里的 bash 不受影响，看不到这个变量。
 
 ### 已有配置的迁移

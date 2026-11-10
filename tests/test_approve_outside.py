@@ -76,6 +76,16 @@ async def test_a_matching_command_runs_outside_when_unattended(ws):
     assert (ws / "ran.txt").exists() and end["details"]["outside_sandbox"] is True
 
 
+async def test_a_release_keeps_the_ssh_agent_but_no_secret(ws, monkeypatch):
+    """提前写明的放行和人当场确认一样保留 SSH_AUTH_SOCK，无人值守的发布要靠 ssh-agent 推送。凭证的值照样剥离。"""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    monkeypatch.setenv("GH_TOKEN", "canary-1")
+    h = harness(ws, [outside("printenv"), "好"], "printenv")
+    end = tool_ends((await h.run("跑")).events)[0]
+    assert end["details"]["outside_sandbox"] is True and not end.get("is_error")
+    assert "SSH_AUTH_SOCK=/tmp/agent.sock" in end["content"] and "canary" not in end["content"]
+
+
 async def test_each_release_is_listed_in_the_audit_trail(ws):
     h = harness(ws, [outside("touch ran.txt"), "好"], "touch ran*")
     res = await h.run("跑")
