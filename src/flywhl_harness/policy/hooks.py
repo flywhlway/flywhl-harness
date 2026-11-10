@@ -82,12 +82,13 @@ class HookOutput:
     updated_input: dict[str, Any] | None = None
     updated_result: str | None = None    # post_tool_use：替换给模型看的结果（例如脱敏）
     additional_context: str | None = None
-    stop_run: bool = False               # 立即终止整个 Run（Claude Code 的 continue:false）
+    stop_run: bool = False               # 下一回合开始时终止 Run，不打断当前调用（Claude Code 的 continue:false）
     warnings: list[str] = field(default_factory=list)
 
 
 HookFn = Callable[[HookInput], Awaitable[HookOutput | None]]
 
+WITHHELD_RESULT = "[工具输出已隐藏：PostToolUse hook 失败，按 fail-closed 处理]"
 _PRE_TOOL_DECISIONS = {"allow": "allow", "approve": "allow", "ask": "ask", "deny": "deny", "block": "deny"}
 
 
@@ -155,6 +156,17 @@ class HookBus:
     def has(self, event: str) -> bool:
         return any(h.event == event for h in self._hooks)
 
+    @staticmethod
+    def _closed(event: str, reason: str, agg: HookOutput) -> HookOutput:
+        """fail-closed 的阻断结果。工具执行之前是拒绝，执行之后结果已经有了，要决定模型看到什么。"""
+        if event == HookEvent.PRE_TOOL_USE:
+            return HookOutput(decision="deny", reason=reason, warnings=agg.warnings)
+        out = HookOutput(decision="block", reason=reason, warnings=agg.warnings)
+        if event == HookEvent.POST_TOOL_USE:
+            # block 只是把原因附到结果后面，不拦结果本身：前面 hook 的脱敏不能丢，没脱敏过的原文也不能交给模型
+            out.updated_result = agg.updated_result if agg.updated_result is not None else WITHHELD_RESULT
+        return out
+
     async def run(self, event: str, inp: HookInput) -> HookOutput:
         """按优先级串行执行匹配的 hook，并聚合结果。"""
         agg = HookOutput()
@@ -166,8 +178,7 @@ class HookBus:
             except Exception as e:  # 含超时
                 msg = f"hook {h.name} 失败：{type(e).__name__}: {e}"
                 if h.fail_closed:
-                    block = "deny" if event == HookEvent.PRE_TOOL_USE else "block"
-                    return HookOutput(decision=block, reason=msg + "（fail-closed，按阻断处理）")
+                    return self._closed(event, msg + "（fail-closed，按阻断处理）", agg)
                 agg.warnings.append(msg + "（fail-open，忽略）")
                 continue
             if out is None:

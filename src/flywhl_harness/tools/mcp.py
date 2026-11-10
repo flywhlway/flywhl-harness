@@ -88,7 +88,7 @@ class MCPClient:
         except BaseException as e:   # 取消也要收拾：服务器和它的出站代理不能留下
             await self.close()
             if isinstance(e, (MCPError, OSError, asyncio.TimeoutError)):   # OSError：命令不存在，或者服务器一启动就退出、写不进 stdin
-                raise MCPError(f"MCP 服务器 {self.name} 启动失败：{e or type(e).__name__}{self._start_hint()}") from e
+                raise MCPError(f"MCP 服务器 {self.name} 启动失败：{str(e) or type(e).__name__}{self._start_hint()}") from e
             raise
         return self
 
