@@ -45,7 +45,7 @@ pi-web-ui 已于 2026-05-20 从仓库中移除。分层的方式与 flywhl 相�
 | 保留量 | keepRecentTokens 20000 | `keep_recent_tokens` 12000（且不超过窗口的 30%；强制压缩时 2000） |
 | 切点 | 绝不在 toolResult 处切 | 相同：优先切在 user 消息，其次 assistant，绝不切在 tool 结果处（`find_cut_index`） |
 | 摘要结构 | Goal / Constraints & Preferences / Progress / Key Decisions / Next Steps / Critical Context + read-files / modified-files；增量更新；作为 `<summary>` user 消息回灌 | 目标 / 约束与偏好 / 进展（已完成、进行中、受阻）/ 关键决策 / 关键上下文 / 下一步；增量更新；另由代码确定性保留原始任务原文、当前 todo、读写文件清单；同样以 `<summary>` user 消息回灌 |
-| 系统提示 | 分节 preamble / `<tools>` / `<rules>` / `<project_context>` / `<skills>` / `<cwd>` | `<rules>` / `<environment>` + `<project_context path>` + `<available_skills>`；工具用法写在工具描述里；会话创建时冻结 |
+| 系统提示 | 分节 preamble / `<tools>` / `<rules>` / `<project_context>` / `<skills>` / `<cwd>` | `<rules>` / `<environment>`；`AGENTS.md`、技能清单放在独立的 `<project-context trust>` 消息里；工具用法写在工具描述里；都在会话创建时冻结 |
 | AGENTS.md | 每个目录 AGENTS.override.md > AGENTS.md > CLAUDE.md，从全局到 cwd 逐级加载 | 每个目录 AGENTS.md > CLAUDE.md，从工作区向上到 git 根，祖先在前，总量上限 32 KiB（UTF-8 字节）；无全局文件 |
 | skills | 只放 name / description / location 清单，模型用 read 读 SKILL.md | 相同（`find_skills`） |
 | 扩展机制 | extension 可订阅数十种事件：tool_call 可 block、context 可替换消息、before_provider_request 可改请求、session_before_compact 可自定义摘要 | 8 个 hook 挂载点；pre_tool_use 可 allow/deny/ask 与改写参数，post_tool_use 可改写结果，stop 可 block，pre_compact 只能追加指令；另有进程外命令 hook（兼容 Claude Code 协议） |

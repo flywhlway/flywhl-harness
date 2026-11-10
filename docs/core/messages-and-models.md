@@ -291,8 +291,8 @@ ProviderProfile("minimax", "MiniMax", base_url="https://api.minimaxi.com/v1", ke
   所以疑似标签前缀的尾巴先留在缓冲区里。正文中间讨论 `<think>` 标签的内容不受影响。
 - **流的完整性。** 没有收到 `finish_reason` 就结束的流按 `network` 错误抛出（交给重试层），绝不当作正常结束——否则一次被代理截断的回复
   会被当成完整答案；流中途下发的 `{"error": …}` 与 DeepSeek 的 `finish_reason: insufficient_system_resource` 同样转成可分类的错误。
-- **记录实际服务的模型。** `chunk.model` 写进消息的 `model` 字段：请求 `deepseek-chat`（旧名）实际由 `deepseek-flash` 服务，
-  OpenRouter 也会改写成路由到的模型，归因与回放都以它为准。
+- **记录实际服务的模型。** `chunk.model` 写进消息的 `model` 字段：请求的模型名和实际服务的可能不同，比如 DeepSeek 的旧名
+  `deepseek-chat` 停用（2026-07-24）前实际由 `deepseek-flash` 服务，OpenRouter 也会改写成路由到的模型，归因与回放都以它为准。
 
 `flywhl doctor` 用两步最小的真实调用验证一家供应商“按 harness 的方式接得通”：流式文本，以及一次完整的工具往返（覆盖 tool_calls 分片拼接、
 tool 消息格式和思考回传）。新增一家兼容服务，通常只需要加一行档案，再用 doctor 和 `tests/live` 验证。

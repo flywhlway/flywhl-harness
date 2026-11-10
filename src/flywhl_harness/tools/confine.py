@@ -33,9 +33,10 @@ from typing import Any, AsyncIterator, Iterable
 
 from ..config import flywhl_home
 from .egress import EgressProxy, local_ports, parse_rules
-from .sandbox import (EGRESS_PORT, SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, default_writable, detect, pin_sockets,
-                      require_bwrap, sandbox_argv)
+from .sandbox import (EGRESS_PORT, SANDBOX_LEVELS, SANDBOX_NETWORK, bwrap_argv, default_writable, detect, git_redirects_to_sweep,
+                      pin_sockets, require_bwrap, sandbox_argv, sweep_git_redirects)
 
+_SWEEP_SECONDS = 0.1
 OFF_HINT = ('确实要在没有沙箱的环境里运行，在用户配置 ~/.flywhl/config.toml 的 [permissions] 里写 sandbox = "off"，'
             "或者启动时加 --sandbox off")
 _TMP_PREFIXES = ("flywhl-sandbox-tmp-", "flywhl-egress-")
@@ -51,6 +52,27 @@ def _remove_tmp(path: str) -> None:
     if (os.path.dirname(target) == os.path.realpath(tempfile.gettempdir())
             and os.path.basename(target).startswith(_TMP_PREFIXES)):
         shutil.rmtree(target, ignore_errors=True)
+
+
+@contextlib.asynccontextmanager
+async def _git_redirect_watch(workspace: str | Path) -> AsyncIterator[None]:
+    """进沙箱前先清一次，运行期间反复清：命令可以放好文件后一直挂着，等用户在自己的终端里敲 git。"""
+    names = git_redirects_to_sweep(workspace)
+    sweep_git_redirects(workspace, names)
+
+    async def keep_sweeping() -> None:
+        while True:
+            await asyncio.sleep(_SWEEP_SECONDS)
+            sweep_git_redirects(workspace, names)
+
+    task = asyncio.create_task(keep_sweeping())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        sweep_git_redirects(workspace, names)
 
 
 @dataclass(frozen=True)
@@ -181,6 +203,7 @@ class Confinement:
                 if self.level == "linux":
                     require_bwrap()
                     self.private_tmp()
+                    await stack.enter_async_context(_git_redirect_watch(workspace))
                 proxy = await self._start_proxy(stack) if self.network == "allowlist" else None
                 wrapped = await asyncio.to_thread(self._wrap, argv, workspace, proxy, chdir)   # 大工作区要遍历一阵
             except (RuntimeError, OSError) as e:   # OSError：TMPDIR 太长，放不下 Unix 套接字的路径；状态目录建不出来

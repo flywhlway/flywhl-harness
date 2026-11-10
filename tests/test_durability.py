@@ -145,7 +145,10 @@ def test_project_config_needs_trust_to_relax_durability(tmp_path, monkeypatch):
 
 
 def load_bench():
-    spec = importlib.util.spec_from_file_location("durability_bench", ROOT / "scripts" / "durability_bench.py")
+    script = ROOT / "scripts" / "durability_bench.py"
+    if not script.is_file():
+        pytest.skip("scripts/durability_bench.py 不在 sdist 里")
+    spec = importlib.util.spec_from_file_location("durability_bench", script)
     bench = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bench
     spec.loader.exec_module(bench)

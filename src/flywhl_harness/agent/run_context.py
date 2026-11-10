@@ -52,6 +52,8 @@ class RunContext:
     cancel: "CancelToken"
     inbox: "Inbox"
     system_prompt: str
+    project_context: str | None = None                      # 项目指令通道的内容，会话创建时冻结
+    workspace_trusted: bool = False                         # 用户信任过这个工作区：没信任过时，读到的文件算不可信内容
     # 状态迁移回调（running ↔ waiting_human），由运行时注入
     set_status: Callable[[str, str], Awaitable[None]] = field(default=None)  # type: ignore[assignment]
     grants: list["Rule"] = field(default_factory=list)      # 会话级授权（“本会话总是允许”）

@@ -173,7 +173,7 @@ erDiagram
     EVENT { int seq string type json data }
 ```
 
-- **Session.meta** freezes the system prompt, the tool set and the model (version pinned), plus session-level grants and the clearing watermark.
+- **Session.meta** freezes the system prompt, the project context, the tool set and the model (version pinned), plus session-level grants and the clearing watermark.
 - **Entry** is the source of truth for context: a `message` or a `compaction`.
 - **Run** carries `version` (incremented on every transition, for optimistic locking), `attempt`, `heartbeat_at` (the lease) and `checkpoint` (the workspace manifest).
 - **Step** is a write-ahead log for a tool call: `started` is written before the side effect and the result after, so recovery can tell whether it happened.
@@ -190,7 +190,7 @@ src/flywhl_harness/
 +-- events.py            event types
 +-- cancel.py            CancelToken: cooperative cancellation
 +-- config.py            config dataclass tree (flywhl.toml + environment variables)
-+-- prompts.py           system prompt, AGENTS.md, skill list, compaction template
++-- prompts.py           system prompt, project channel (AGENTS.md, skill list), compaction template
 +-- agent/               loop, executor, context, compaction, budget, inbox, subagent, run_context
 +-- llm/                 base, models, openai_compat, anthropic, mock, replay, resilient
 +-- tools/               base, schema, registry, fs, shell, extra, demo, mcp

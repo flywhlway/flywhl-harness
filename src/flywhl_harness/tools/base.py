@@ -109,6 +109,7 @@ class Tool:
     idempotent: bool = False         # 用同一幂等键重复执行是否安全
     timeout: float | None = None     # None = 使用全局 tool_timeout
     untrusted_output: bool = False   # 输出是否天然不可信（污点来源）
+    reads_workspace: bool = False    # 输出里有工作区的内容：工作区没信任过时也是污点来源，见 config.is_workspace_trusted
     # 工具自己管理超时（如 bash：超时后要杀进程组并保留部分输出）。执行器只在其之外留一点余量兜底，
     # 否则执行器的计时器先触发，会把“部分输出 + 已终止进程组”这样有用的结果吞掉
     manages_timeout: bool = False

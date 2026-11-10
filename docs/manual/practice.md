@@ -120,6 +120,8 @@ flywhl run "修复失败的测试" --json --mode accept_edits
 
 `--json` 向 stdout 输出 JSONL 事件流；此时无人审批，需要审批的操作默认拒绝——在 CI 里卡住等审批比直接失败更糟。要放行确定安全的操作，用 `--approve 'bash(npm test*)' --approve 'write(src/**)'` 列出规则，只有命中的自动批准；高危命令和读过不可信内容后的外部操作照样拒绝。`--yes` 放行一切，只在一次性容器里用。进程退出码只在 Run 以 `completed` 结束时为 0，配合 `verify_command` 就是“测试不过即失败”。
 
+发布任务要 push 时，加 `--trust --approve-outside 'git push origin main'`。它只放行写明的命令，别的沙箱外操作照样拒绝。
+
 ## 8. 排障
 
 | 现象 | 处理 |

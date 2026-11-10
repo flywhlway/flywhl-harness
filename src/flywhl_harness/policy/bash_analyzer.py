@@ -170,6 +170,8 @@ class CommandAnalysis:
     # 命令里嵌着另一段要执行的代码（sh -c、eval、find -exec、解释器内联代码……）：前几个词说明不了实际执行什么，
     # “本会话总是允许”只能精确授权这一条，不能按前缀放行
     inline: bool = False
+    # 输出重定向到文件：写到哪里由重定向决定，命令模式按文本匹配时担保不了
+    writes_file: bool = False
     workspace: str | None = field(default=None, repr=False)
     depth: int = field(default=0, repr=False)   # sh -c / eval 的递归深度
     # 按段的先后跟踪的 shell 状态：赋过的值（None 是运行时才知道的值）、执行到当前这段时一定赋过值的变量、
@@ -254,8 +256,10 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0, _sco
         lex.whitespace_split = True
         lex.commenters = ""  # shlex 把词中间的 # 也当注释（echo a#b; rm -rf ~ 的后半句会被吞掉）；注释已由 _bash_lines 按 bash 规则去掉
         tokens = list(lex)
-    except ValueError as e:  # 引号不配对等
+    except ValueError as e:  # 引号不配对、结尾一个反斜杠等。bash 不一定这么严，分号后面的命令照样执行，所以这里看不清它在做什么
         a.bump("external", f"命令无法解析：{e}")
+        a.inline = a.opaque = a.network = True
+        _salvage(command, a)
         return a
 
     toks = _split_operators(tokens) + [";"]
@@ -1555,6 +1559,7 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
             target = words[j + 1]
             if target in ("/dev/null", "&1", "&2") or (w == ">&" and (target.isdigit() or target == "-")):
                 continue
+            a.writes_file = True
             if target.startswith("/dev/"):
                 if _BLOCK_DEV.match(target):
                     a.flag_catastrophic(f"写入块设备 {target}")
@@ -2235,6 +2240,14 @@ def _ps_shows_env(args: list[str]) -> bool:
     return False
 
 
+def _salvage(command: str, a: CommandAnalysis) -> None:
+    """解析不了也要看一眼每一段：灾难性命令的判定不能因为结尾一个反斜杠就跳过。这里只为多拦不为放行，
+    所以去掉引号和反斜杠后按分隔符硬切，错判的代价是拒绝一条本来就写坏了的命令。切完没有引号，不会再解析失败。"""
+    for part in re.split(r"[;&|\n]+", re.sub(r"[\"'\\]", "", command)):
+        if part.strip():
+            _recurse(part, a, "解析不了的命令片段", mode="sub", nest=False)
+
+
 def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child", nest: bool = True) -> None:
     """``sh -c`` / ``eval`` 的字符串本身就是一条命令：递归分析（限制深度，防止构造的深层嵌套拖慢判定）。
     内层看得到外层的变量与当前目录。mode 为 child（``sh -c`` 这类新进程）时，没导出的变量在里面可能是空的；
@@ -2267,6 +2280,7 @@ def _recurse(script: str, a: CommandAnalysis, via: str, *, mode: str = "child", 
 
 
 # 值是一条命令的配置键：git -c core.pager='rm -rf ~' log 执行的就是 rm -rf ~
+_GIT_HELPER_URL = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*::")
 _GIT_EXEC_KEYS = re.compile(r"core\.(pager|sshcommand|fsmonitor|editor|hookspath|gitproxy|askpass)|diff\.external"
                             r"|sequence\.editor|credential\.([^=]*\.)?helper|[^=]*\.(command|program|textconv|cmd|clean|smudge"
                             r"|process|driver)", re.I)
@@ -2424,8 +2438,12 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
             (sub == "reflog" and positional[:1] not in (["expire"], ["delete"])):
         read(f"git {sub} 只读查询")
     elif sub in GIT_EXTERNAL:
-        if "--force" in rest or "-f" in rest or any(x.startswith(("+", "--force")) for x in rest):
-            a.bump("dangerous", "强制推送会改写远端历史")
+        if _git_remote_program(sub, rest):
+            # 按远端地址或选项运行程序：allow:bash(git push*) 这类前缀规则看不见它
+            a.bump("external", f"git {sub} 的选项或远端地址指定了要运行的程序")
+            a.inline = a.opaque = True
+        if _git_rewrites_remote(sub, rest):
+            a.bump("dangerous", "强制、镜像或删除式推送会改写远端")
         else:
             a.bump("external", f"git {sub} 访问远端")
         a.network = True
@@ -2437,6 +2455,37 @@ def _git(args: list[str], a: CommandAnalysis) -> None:
         a.bump("external", f"git {sub} 可能配置命令执行或访问远端")
     else:
         a.bump("write", f"git {sub} 修改仓库")
+
+
+def _git_remote_program(sub: str, args: list[str]) -> bool:
+    """``--receive-pack`` 这类选项在远端（本地路径就是本机）运行指定的程序，``ext::cmd`` 这类地址调用 ``git-remote-ext``。
+    clone 的 ``-u`` 同理，``-c``、``--config`` 写进新仓库的配置，抓取时就生效，``--template`` 带进来的钩子检出时就执行。
+    pull 的 ``-s``、``--strategy`` 运行 ``git-merge-<名字>``。
+
+    长选项 git 接受无歧义的前缀，``--rece=x`` 就是 ``--receive-pack=x``，所以按前缀比。有歧义的前缀 git 自己会报错，
+    这里多判一次没有损失。短选项可以合写，值也可以紧贴，``-qu x``、``-ux`` 都算。"""
+    options = ("--receive-pack", "--upload-pack", "--exec", *{"clone": ("--config", "--template"), "pull": ("--strategy",)}.get(sub, ()))
+    short = {"clone": {"u", "c"}, "pull": {"s"}}.get(sub, set())
+    for x in args:
+        name, _, value = x.partition("=")
+        long = x.startswith("--")
+        if long and len(name) > 2 and any(o.startswith(name) for o in options):
+            return True
+        if _GIT_HELPER_URL.match(value if long else x):
+            return True
+        if not long and x.startswith("-") and short & set(x[1:]):
+            return True
+    return False
+
+
+def _git_rewrites_remote(sub: str, args: list[str]) -> bool:
+    """强制推送、镜像推送、删除远端引用。选项写法的规则见 ``_git_remote_program``。"""
+    push = sub == "push"
+    flags = set(_git_flags(args))
+    names = ("--force", *(("--mirror", "--delete", "--prune") if push else ()))
+    return ("-f" in flags or (push and "-d" in flags)
+            or any(len(f) > 2 and any(n.startswith(f) for n in names) for f in flags if f.startswith("--"))
+            or any(x.startswith(("+", "--force")) or (push and x.startswith(":")) for x in args))
 
 
 def _git_long(flags: set[str], name: str) -> bool:

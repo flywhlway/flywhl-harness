@@ -33,11 +33,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .config import HarnessConfig, TrustRequest, flywhl_home, load_dotenv, read_dotenv
+from .config import (HarnessConfig, TrustRequest, flywhl_home, is_workspace_trusted, load_dotenv, read_dotenv,
+                     record_workspace_trust, trust_root)
 from .events import E, Event
 from .llm.profiles import PROFILES
 from .policy.approvals import ApprovalDecision
-from .policy.permissions import auto_approve_rule
+from .policy.permissions import auto_approve_rule, outside_rule
 from .runtime.manager import Harness
 from .tools.confine import OFF_HINT, Confinement
 from .tools.mcp import MCPError
@@ -185,6 +186,27 @@ def confirm_trust(args: argparse.Namespace) -> Callable[[TrustRequest], bool]:
     return decide
 
 
+def confirm_workspace(args: argparse.Namespace, cfg: HarnessConfig) -> None:
+    """工作区信任：``--trust`` 直接信任；终端交互时问一次，确认后记下来；非交互（``--json``、管道）一律不信任，也不停下来问。"""
+    ws = Path(cfg.workspace).expanduser()
+    if cfg.trust_workspace or is_workspace_trusted(ws):
+        return
+    if getattr(args, "trust", False):
+        record_workspace_trust(ws)
+        return
+    if not sys.stdin.isatty() or getattr(args, "json", False):
+        return
+    print(_c("yellow", f"! 这个工作区还没有信任过：{trust_root(ws)}"), file=sys.stderr)
+    print("  不信任时，读到的文件算不可信内容，之后的写操作和外部操作都要人确认，allow 规则和会话授权不再自动放行。", file=sys.stderr)
+    print(f"  这些文件是你自己或你信得过的人写的吗？确认后记入 {flywhl_home() / 'trusted.json'} [y/N] > ",
+          end="", file=sys.stderr, flush=True)
+    try:
+        if input().strip().lower() in ("y", "yes", "是"):
+            record_workspace_trust(ws)
+    except EOFError:
+        pass
+
+
 def _config(args: argparse.Namespace) -> HarnessConfig:
     cfg = HarnessConfig.load(getattr(args, "config", None), trust=confirm_trust(args),
                              workspace=getattr(args, "workspace", None),
@@ -219,6 +241,8 @@ def _print_sandbox(h: Harness) -> None:
     print(_c("yellow", box.describe()) if box.problem or box.level == "off" else _c("dim", box.describe()))
     if box.problem:
         print(_c("yellow", OFF_HINT))
+    if not h.workspace_trusted(h.workspace_root):
+        print(_c("yellow", "工作区没有信任过：读到的文件算不可信内容，写操作和外部操作都要人确认。确认可信后加 --trust"))
 
 
 async def _stream_run(h: Harness, session_id: str, prompt: str, as_json: bool, show_thinking: bool) -> str:
@@ -265,9 +289,19 @@ class _sigint:
 # ====================================================================== 子命令
 async def cmd_run(args: argparse.Namespace) -> int:
     cfg = _config(args)
+    confirm_workspace(args, cfg)
     if args.json and cfg.permissions.on_ask == "wait":
         cfg.permissions.on_ask = "deny"  # 无人值守：需要审批的操作一律拒绝（可用 --yes 改为放行）
-    async with Harness(cfg, approval_resolver=None if args.json else terminal_approval) as h:
+    outside = args.approve_outside or []
+    if outside and cfg.permissions.on_ask == "allow":
+        raise SystemExit("--approve-outside 不能和 --yes（或配置里的 on_ask = \"allow\"）一起用：--yes 放行不了人工门")
+    try:
+        rules = [outside_rule(p) for p in outside]
+    except ValueError as e:
+        raise SystemExit(f"--approve-outside：{e}") from None
+    if rules and cfg.permissions.on_ask == "wait":
+        print(_c("yellow", "--approve-outside 只在无人值守时生效，这次有人在场，沙箱外命令照样问你"), file=sys.stderr)
+    async with Harness(cfg, approval_resolver=None if args.json else terminal_approval, approve_outside=outside) as h:
         s = h.create_session(args.prompt[:30])
         status = await _stream_run(h, s.id, args.prompt, args.json, args.thinking)
     return 0 if status == "completed" else 1
@@ -275,6 +309,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
 async def cmd_chat(args: argparse.Namespace) -> int:
     cfg = _config(args)
+    confirm_workspace(args, cfg)
     async with Harness(cfg, approval_resolver=terminal_approval) as h:
         s = h.create_session("终端会话")
         print(_c("bold", f"flywhl-harness {__version__}") + _c("dim", f"  {h.provider.name}/{h.model} · 模式 "
@@ -331,6 +366,7 @@ async def cmd_serve(args: argparse.Namespace) -> int:
         print(_c("red", refusal), file=sys.stderr)
         return 2
     cfg = _config(args)
+    confirm_workspace(args, cfg)
     h = Harness(cfg)
     reachers = console_reachers(h.confinement, args.port, cfg.hooks, cfg.mcp_servers) if args.no_token else []
     if reachers:
@@ -477,7 +513,7 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("-w", "--workspace", help="工作区目录（默认当前目录）")
     common.add_argument("-c", "--config", help="配置文件，视为可信（默认 ./flywhl.toml，其中的高危设置需要信任）")
     common.add_argument("--trust", action="store_true",
-                        help="信任当前目录 flywhl.toml 的这一版内容（含 hook、MCP、放宽审批等设置）并记录下来")
+                        help="信任这个工作区和当前目录 flywhl.toml 的这一版内容（含 hook、MCP、放宽审批等设置）并记录下来")
     common.add_argument("--provider", choices=["auto", *PROFILES])
     common.add_argument("--model", help="模型，写成 <供应商>:<模型>（如 deepseek:deepseek-flash）或只写模型名")
     common.add_argument("--env-file", help="启动前加载的 .env 文件（默认当前目录的 .env）")
@@ -508,6 +544,9 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--json", action="store_true", help="输出 JSONL 事件流")
     sp.add_argument("--approve", action="append", metavar="规则",
                     help="无人值守时自动批准的操作，如 'bash(npm test*)'、'write(src/**)'，可重复；其余需要审批的一律拒绝")
+    sp.add_argument("--approve-outside", action="append", metavar="模式",
+                    help="无人值守时放行命令模式匹配的 outside_sandbox 命令，如 'git push origin*'，可重复；只有命令行能写，"
+                         "只在 --json、--approve 这类无人值守运行中生效，有污点、高危、复合命令里有不匹配的段时照样拒绝")
     sp.set_defaults(fn=cmd_run)
     sub.add_parser("sessions", parents=[common], help="列出会话").set_defaults(fn=cmd_sessions)
     sp = sub.add_parser("runs", parents=[common], help="列出运行")
