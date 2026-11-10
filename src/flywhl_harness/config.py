@@ -165,6 +165,7 @@ class HarnessConfig:
     append_system_prompt: str | None = None
     load_agents_md: bool = True            # 加载工作区 AGENTS.md / CLAUDE.md
     load_skills: bool = True               # 渐进披露：只把技能清单放进提示词
+    trust_workspace: bool = False          # 信任所有工作区。项目配置写的丢弃，只在用户配置、-c 指定的文件里有效，见 is_workspace_trusted
     # ---- 运行时 ----
     workspace: str = "."
     data_dir: str = ".flywhl"
@@ -217,7 +218,7 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _keep_sandbox_on(data, project.resolve())
+                data = _no_self_trust(_only_turn_off(_keep_sandbox_on(data, project.resolve())), project.resolve())
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -320,10 +321,11 @@ PROJECT_CONFIG_FILES = ("flywhl.toml", ".flywhl/config.toml")
 
 # 和启动目录的 .env 一样用白名单：只影响“用哪家模型、花多少钱、何时收尾”的设置直接生效，最坏是效果差一点、多花一点钱。
 # 其余字段都要信任——hooks / mcp_servers / verify_command 会执行命令；base_url / api_key / api_key_env / extra_body
-# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写。新增字段默认落在需要信任的一侧。
+# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写；
+# system_prompt / append_system_prompt 是 harness 对模型说的话，不能由仓库作者来写。新增字段默认落在需要信任的一侧。
 _SAFE_KEYS = frozenset({
     "provider", "model", "fallback_models", "max_tokens", "temperature", "thinking", "reasoning_effort",
-    "request_timeout", "max_retries", "system_prompt", "append_system_prompt", "load_agents_md", "load_skills",
+    "request_timeout", "max_retries", "load_agents_md", "load_skills",
     "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
@@ -359,29 +361,49 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
+# 项目配置写了也丢弃的取值，信任过也一样：关沙箱、放开网络都是用户的决定，仓库只能收紧。具体主机的 network_allow 不在其中，走信任确认
+_NEVER_FROM_PROJECT = {"sandbox": "off", "sandbox_network": "allow"}
+
+
 def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
-    """项目配置关不掉沙箱，信任过也一样：关沙箱的决定属于用户，仓库只能收紧。``permissions.sandbox`` 与 hook、MCP 服务器
-    各自的 ``sandbox = "off"`` 都去掉。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
-    dropped = []
+    """项目配置关不掉沙箱，也放不开沙箱的网络：``permissions`` 与 hook、MCP 服务器各自的设置都去掉。
+    放开网络和关沙箱同等处理，否则工作区靠一次信任确认就能被传走。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
+    dropped: list[str] = []
+
+    def keep(spec: Any, where: str) -> Any:
+        if not isinstance(spec, dict):
+            return spec
+        bad = [k for k, v in _NEVER_FROM_PROJECT.items() if spec.get(k) == v]
+        dropped.extend(f"{where}.{k} = {spec[k]!r}" for k in bad)
+        return {k: v for k, v in spec.items() if k not in bad}
+
     out = dict(data)
-    perms = data.get("permissions")
-    if isinstance(perms, dict) and perms.get("sandbox") == "off":
-        out["permissions"] = {k: v for k, v in perms.items() if k != "sandbox"}
-        dropped.append("permissions.sandbox")
-    hooks = data.get("hooks")
-    if isinstance(hooks, list):
-        dropped += [f"hooks[{i}].sandbox" for i, h in enumerate(hooks) if isinstance(h, dict) and h.get("sandbox") == "off"]
-        out["hooks"] = [{k: v for k, v in h.items() if k != "sandbox"} if isinstance(h, dict) and h.get("sandbox") == "off" else h
-                        for h in hooks]
-    servers = data.get("mcp_servers")
-    if isinstance(servers, dict):
-        off = [n for n, s in servers.items() if isinstance(s, dict) and s.get("sandbox") == "off"]
-        dropped += [f"mcp_servers.{n}.sandbox" for n in off]
-        out["mcp_servers"] = {n: {k: v for k, v in s.items() if k != "sandbox"} if n in off else s for n, s in servers.items()}
+    if "permissions" in data:
+        out["permissions"] = keep(data["permissions"], "permissions")
+    if isinstance(data.get("hooks"), list):
+        out["hooks"] = [keep(h, f"hooks[{i}]") for i, h in enumerate(data["hooks"])]
+    if isinstance(data.get("mcp_servers"), dict):
+        out["mcp_servers"] = {n: keep(s, f"mcp_servers.{n}") for n, s in data["mcp_servers"].items()}
     if dropped:
-        warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
-                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} 不生效：项目配置不能关闭系统沙箱，也不能放开它的网络。确实要改，写在用户配置 "
+                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off、--network allow",
+                      UntrustedConfigWarning, stacklevel=3)
     return out
+
+
+def _no_self_trust(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    """仓库不能宣布自己可信，配置被信任过也一样：信任配置是同意它的 hook 和模型设置，不是同意把它的文件当成自己人写的。"""
+    if "trust_workspace" not in data:
+        return data
+    if data["trust_workspace"]:
+        warnings.warn(f"{path} 里的 trust_workspace 不生效：项目配置不能信任自己所在的工作区。确实要信任，启动时加 --trust，"
+                      f"或者写在用户配置 {flywhl_home() / 'config.toml'} 里", UntrustedConfigWarning, stacklevel=3)
+    return {k: v for k, v in data.items() if k != "trust_workspace"}
+
+
+def _only_turn_off(data: dict[str, Any]) -> dict[str, Any]:
+    """项目文件的加载，项目配置只能关不能开：用户为了看陌生仓库关掉的，仓库不能自己打开。"""
+    return {k: v for k, v in data.items() if k not in ("load_agents_md", "load_skills") or v is False}
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None,
@@ -528,6 +550,36 @@ def record_trust(req: TrustRequest) -> None:
     """记下“这个位置的这份内容可信”。同一路径只保留最近一次确认的内容。"""
     records = _trust_records()
     records[str(req.path)] = {"sha256": req.digest, "trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    _save_trust(records)
+
+
+def trust_root(path: str | Path) -> Path:
+    """工作区信任的单位：所在的 git 仓库根，不在仓库里时是这个目录本身。子目录跟着仓库走；vendor/ 里的嵌套仓库是另一个作者写的，
+    单独算。解析到真实路径：软链接换个名字还是同一个工作区。"""
+    cur = Path(path).expanduser().resolve()
+    return next((d for d in [cur, *cur.parents] if (d / ".git").exists()), cur)
+
+
+def is_workspace_trusted(path: str | Path) -> bool:
+    """用户说过这个工作区里的文件是自己人写的吗。没说过的工作区，文件内容算不可信（污点来源），项目指令文件标注为不可信。
+    只认 ``trusted.json`` 里用户亲自确认的记录：这个文件在工作区之外，沙箱里写不到，文件工具对 ``.flywhl/`` 一律拒绝。
+    记录绑定路径，不绑定内容：工作区每天都在变。删掉仓库再在同一路径克隆一个别的，信任还在。"""
+    rec = _workspace_records().get(str(trust_root(path)))
+    return isinstance(rec, dict)
+
+
+def record_workspace_trust(path: str | Path) -> None:
+    records = _trust_records()
+    records["workspaces"] = {**_workspace_records(records), str(trust_root(path)): {"trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}}
+    _save_trust(records)
+
+
+def _workspace_records(records: dict[str, Any] | None = None) -> dict[str, Any]:
+    found = (_trust_records() if records is None else records).get("workspaces")
+    return found if isinstance(found, dict) else {}
+
+
+def _save_trust(records: dict[str, Any]) -> None:
     f = _trust_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")

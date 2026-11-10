@@ -184,6 +184,8 @@ args = ["examples/mcp_echo_server.py"]
 
 `verify_command`, allow rules, `[[hooks]]` and `[mcp_servers]` run commands or loosen approval. When they come from the `flywhl.toml` in the launch directory, you must trust that file first: the terminal asks item by item, or pass `--trust`. The reason is in [19 Security](/en/governance/security).
 
+The workspace needs trusting once too: the terminal asks on the first run in a repository, `--trust` records it, and `--json` or piped runs neither ask nor trust. In an untrusted workspace, what the agent reads counts as untrusted content and later writes need a person, so a CI run on your own code should pass `--trust`.
+
 Load order: defaults, then the user config `~/.flywhl/config.toml`, then `flywhl.toml`, then environment variables (`FLYWHL_PROVIDER`, `FLYWHL_MODEL`, `FLYWHL_BASE_URL`, `FLYWHL_PERMISSION_MODE`, and others), then command-line arguments. The full field list is in `config.py`.
 
 ## Use it as a library

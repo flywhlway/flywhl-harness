@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..tools.base import Effect, Tool
-from .bash_analyzer import _ASSIGN, RESERVED, WRAPPERS, analyze
+from .bash_analyzer import _ASSIGN, INTERPRETERS, RESERVED, SHELLS, WRAPPERS, analyze
 from .sensitive import CREDENTIAL_GLOBS, SECRET_HINT_GLOBS
 
 
@@ -157,6 +157,23 @@ class PermissionResult:
     human_only: bool = False        # 过了人工门：只有人当场确认才能执行
 
 
+# 这些命令放行之后等于什么都能跑，写它们的模式就是全放开
+_RUNS_ANYTHING = frozenset({*INTERPRETERS, *SHELLS, *WRAPPERS, "eval", "exec", "source", "xargs", "sudo", "doas", "npx", "uvx", "pipx"})
+_COMMAND_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*")
+
+
+def outside_rule(text: str) -> Rule:
+    """``--approve-outside`` 的命令模式，如 ``git push origin*``。第一个词必须是具体的命令名：没有通配符，不是路径
+    （工作区里的脚本沙箱里的命令能改），也不是解释器。"""
+    pattern = text.strip()
+    head = pattern.split(maxsplit=1)[0] if pattern else ""
+    if not _COMMAND_NAME.fullmatch(head):
+        raise ValueError(f"命令模式的第一个词要是具体的命令名：{text!r}（格式：git push origin*）")
+    if head in _RUNS_ANYTHING:
+        raise ValueError(f"{head} 什么都能运行，不能写进命令模式：{text!r}")
+    return Rule(Decision.ALLOW, "bash", pattern, "approve_outside")
+
+
 def auto_approve_rule(text: str) -> Rule:
     """无人值守时自动批准的规则：写成 ``工具(模式)``（如 ``bash(npm test*)``、``write(src/**)``），可以带 ``allow:`` 前缀。"""
     t = text.strip()
@@ -168,13 +185,14 @@ def auto_approve_rule(text: str) -> Rule:
 
 class PermissionPolicy:
     def __init__(self, mode: str | Mode = Mode.DEFAULT, rules: Iterable[str | Rule] = (), *, workspace: Any = None,
-                 baseline: bool = True, auto_approve: Iterable[str | Rule] = ()):
+                 baseline: bool = True, auto_approve: Iterable[str | Rule] = (), approve_outside: Iterable[Rule] = ()):
         self.mode = Mode(mode)
         self.workspace = workspace
         self.baseline = baseline
         parsed = [r if isinstance(r, Rule) else Rule.parse(r) for r in rules]
         self.rules: list[Rule] = ([Rule.parse(r, "managed") for r in MANAGED_BASELINE] if baseline else []) + parsed
         self.auto_rules = [r if isinstance(r, Rule) else auto_approve_rule(r) for r in auto_approve]
+        self.outside_rules = list(approve_outside)
 
     # ------------------------------------------------------------------ 目标串
     def _targets(self, tool: Tool, args: dict[str, Any]) -> list[str]:
@@ -249,7 +267,7 @@ class PermissionPolicy:
         if analysis and analysis.opaque and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             # allow 规则（含“本会话总是允许”的授权）按命令前缀匹配：git status "$(rm -rf ~)" 会命中 git status*，
             # 但替换里的命令不受规则约束；仓库配置给 git diff 挂的 textconv 同理——这类命令一律交给人确认
-            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换或仓库配置），不受 allow 规则约束，需要人工确认"
+            decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换、仓库配置或解析不了的命令），不受 allow 规则约束，需要人工确认"
         if tainted and effect != Effect.READ and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
             decision, reason = Decision.ASK, "会话读取过不可信内容，副作用操作升级为人工确认（防提示注入）"
         if decision == Decision.ASK and analysis and analysis.reasons and analysis.reasons[0] not in reason:
@@ -315,6 +333,35 @@ class PermissionPolicy:
             return None, "会话读取过不可信内容，外部副作用操作不自动批准"
         r = self._allowed_by(tool, self._targets(tool, args), self.auto_rules)
         return (r, "") if r else (None, "没有匹配的 auto_approve 规则")
+
+    def outside_approval(self, tool: Tool, args: dict[str, Any], perm: PermissionResult, *,
+                         tainted: bool = False) -> tuple[Rule | None, str]:
+        """无人值守时，这条过人工门的 bash 命令能否按 ``--approve-outside`` 放行：返回 (命中的规则, "")，或者
+        (None, 不放行的原因)。命令要离开沙箱，没有东西兜底，所以比 ``auto_approval`` 严：
+
+        - 只管 bash。write、edit 写 ``.git/hooks`` 的人工门不走这里；
+        - 会话读取过不可信内容就拒绝，没信任过的工作区里读过文件也算；
+        - 实际执行的程序不在命令文本里、嵌着另一段代码、分析为高危的，都拒绝。人工门把 ``perm.risk`` 一律标成 critical，
+          这里只能看命令分析；
+        - 重定向到文件的拒绝：``git push > ~/.zshrc`` 能匹配 ``git push*``；
+        - 托管基线要求确认的拒绝；
+        - 复合命令每一段都要匹配，见 ``_allowed_by``。
+        """
+        if not self.outside_rules or tool.name != "bash" or not perm.human_only:
+            return None, ""
+        if tainted:
+            return None, "会话读取过不可信内容，沙箱外命令不自动放行"
+        a = analyze(tool.permission_target(args), self._root())
+        if a.opaque or a.inline:
+            return None, "命令实际执行的程序不在命令文本里，不自动放行"
+        if a.level == "dangerous":
+            return None, "高危命令不自动放行"
+        if a.writes_file:
+            return None, "重定向到文件的命令不自动放行"
+        if perm.source == "managed":
+            return None, f"托管基线要求确认（{perm.rule}），不自动放行"
+        r = self._allowed_by(tool, self._targets(tool, args), self.outside_rules)
+        return (r, "") if r else (None, "没有匹配的 --approve-outside 模式")
 
     def _mode_default(self, tool: Tool, args: dict[str, Any], effect: Effect) -> tuple[Decision, str]:
         if self.mode == Mode.BYPASS:
