@@ -36,7 +36,7 @@ from flywhl_harness.tools.egress import _DENIED_LIMIT, EgressProxy, parse_rules
 from flywhl_harness.tools.fs import EditTool, WriteTool
 from flywhl_harness.tools.mcp import MCPClient, MCPError, load_mcp_tools
 from flywhl_harness.tools.sandbox import _RELAY, EGRESS_PORT, Detected, git_redirects_to_sweep, sweep_git_redirects
-from flywhl_harness.tools.shell import BashTool, _sandbox_hint
+from flywhl_harness.tools.shell import OUTSIDE_KEEP_ENV, BashTool, _clean_env, _sandbox_hint
 
 from .conftest import make_harness, tool_ends
 
@@ -1140,6 +1140,40 @@ def test_plan_mode_still_denies_frozen_writes(repo):
 def _ctx(root, *, approved=False):
     return ToolContext(run_id="r", session_id="s", call_id="c", workspace=Workspace(root), cancel=CancelToken(), blobs=None,
                        idempotency_key="k", human_approved=approved)
+
+
+def _agent_and_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    for name, value in (("GH_TOKEN", "canary-1"), ("GITHUB_TOKEN", "canary-2"), ("OPENAI_API_KEY", "canary-3"),
+                        ("AWS_SECRET_ACCESS_KEY", "canary-4"), ("DATABASE_URL", "postgres://u:canary-5@db/x")):
+        monkeypatch.setenv(name, value)
+
+
+async def test_approved_outside_command_keeps_the_ssh_agent_but_no_secret(ws, monkeypatch):
+    """push 要用 ssh-agent。它给的是签名能力，读不到私钥；GH_TOKEN 这类值本身就是凭证，沙箱外也不留。"""
+    _agent_and_secrets(monkeypatch)
+    res = await boxed_bash().execute({"command": "env", "outside_sandbox": True}, _ctx(ws, approved=True))
+    assert "SSH_AUTH_SOCK=/tmp/agent.sock" in res.content
+    assert "canary" not in res.content and "GIT_CONFIG_COUNT" in res.content
+
+
+async def test_ssh_agent_is_stripped_everywhere_else(ws, monkeypatch):
+    """沙箱关着时 outside_sandbox 不是人工门，没有人批准过，不算这条路径。"""
+    _agent_and_secrets(monkeypatch)
+    off = await BashTool(sandbox="off").execute({"command": "env", "outside_sandbox": True}, _ctx(ws, approved=True))
+    assert "SSH_AUTH_SOCK" not in off.content and "canary" not in off.content
+    assert "SSH_AUTH_SOCK" not in _clean_env(True)
+    assert _clean_env(True, keep=OUTSIDE_KEEP_ENV)["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+    assert "GH_TOKEN" not in _clean_env(True, keep=OUTSIDE_KEEP_ENV)
+
+
+@real_sandbox
+async def test_bash_in_the_sandbox_has_no_ssh_agent(ws, monkeypatch):
+    _agent_and_secrets(monkeypatch)
+    tool = boxed_bash()
+    tool.confinement = Confinement(LEVEL, "deny")
+    res = await tool.execute({"command": "env"}, _ctx(ws))
+    assert not res.is_error and "SSH_AUTH_SOCK" not in res.content and "canary" not in res.content
 
 
 async def test_execution_checks_again_after_the_decision(repo):
