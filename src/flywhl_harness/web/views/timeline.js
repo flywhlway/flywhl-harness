@@ -404,11 +404,15 @@ export function runSummary(r) {
   const u = r.usage || {};
   const secs = Math.max(0, (r.updated_at || 0) - (r.created_at || 0));
   const reason = r.result?.reason || r.status_reason || "";
+  // 联网工具按次计费，计入费用上限但不在模型 usage 里：有这笔钱时和检查器一样单列
+  const webCost = Number(r.result?.tool_cost_usd || 0);
+  const cost = webCost ? `<span title="模型费用 + 联网工具按次计费">${icon("coins", "sm")}${fmt.money(u.cost_usd)} + 联网 ${fmt.money(webCost)}</span>`
+    : `<span title="费用">${icon("coins", "sm")}${fmt.money(u.cost_usd)}</span>`;
   return h("div", { class: "run-summary", html: `${statusBadge(r.status)}<span class="reason">${esc(reason)}</span>
     <span class="stats tnum"><span title="轮次">${icon("repeat", "sm")}${esc(r.result?.turns ?? "—")} 轮</span>
     <span title="输入（含缓存命中）/ 输出 token，各轮累计">${icon("arrowUp", "sm")}${fmt.k(fmt.tokIn(u))} ${icon("arrowDown", "sm")}${fmt.k(u.output_tokens)}</span>
     ${u.cache_read_tokens ? `<span title="缓存命中的输入 token（按缓存价计费）">缓存命中 ${fmt.k(u.cache_read_tokens)}</span>` : ""}
-    <span title="费用">${icon("coins", "sm")}${fmt.money(u.cost_usd)}</span><span title="耗时">${icon("clock", "sm")}${fmt.dur(secs)}</span></span>` });
+    ${cost}<span title="耗时">${icon("clock", "sm")}${fmt.dur(secs)}</span></span>` });
 }
 
 export function noticeItem(d) {
