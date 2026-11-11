@@ -27,6 +27,7 @@ CRITICAL = tuple(f"src/flywhl_harness/{m}" for m in (
     "policy/permissions.py", "policy/approvals.py", "policy/hooks.py",
     "tools/sandbox.py", "tools/egress.py", "tools/confine.py", "tools/shell.py", "tools/fs.py",
     "agent/executor.py", "runtime/manager.py",
+    "net/client.py", "net/exfil.py", "tools/web.py", "runtime/capabilities.py",   # 联网工具的出口核验、外传检查、能力位
 ))
 OVERALL = "整体"
 

@@ -100,6 +100,23 @@ async def _getaddrinfo(host: str, port: int) -> list[IPAddress]:
     return [ipaddress.ip_address(str(i[4][0]).split("%")[0]) for i in infos]
 
 
+def address_scope(ip: IPAddress) -> str:
+    """地址的类别：public | private | loopback | local（链路本地、保留、云元数据）。代理与联网工具共用这一份判定。"""
+    return _scope(ip)
+
+
+async def vet_host(host: str, port: int, reaches: Callable[[IPAddress], bool],
+                   resolve: Callable[[str, int], Awaitable[list[IPAddress]]] = _getaddrinfo, why: str = "") -> list[str]:
+    """解析主机名，按顺序返回 ``reaches`` 放行的 IP（去重）；一个都没有时抛 ``EgressDenied``。
+    连接必须用返回的 IP，不再按名字解析一次：两次解析之间 DNS 可以换成内网地址（DNS 重绑定）。"""
+    addrs = await resolve(host, port)
+    ok = [str(ip) for ip in addrs if reaches(ip)]
+    if ok:
+        return list(dict.fromkeys(ok))
+    seen = "、".join(dict.fromkeys(f"{ip}（{_SCOPES[_scope(ip)]}）" for ip in addrs)) or "空"
+    raise EgressDenied(f"{host} 解析到 {seen}，{why or '不放行这类地址'}")
+
+
 def parse_rules(entries: Iterable[str]) -> list[AllowRule]:
     """解析白名单，写法不对抛 ``ValueError``：宁可启动时报错，也不要悄悄放宽或悄悄失效。"""
     rules = []
@@ -190,13 +207,8 @@ class EgressProxy:
     async def vet(self, host: str, port: int) -> list[str]:
         """主机名过了白名单，再核对解析出的地址，按顺序返回可以连的 IP；一个都没有时抛 ``EgressDenied``。"""
         rules = self._matching(host, port)
-        addrs = await self.resolve(host, port)
-        ok = [str(ip) for ip in addrs if any(r.reaches(ip) for r in rules)]
-        if ok:
-            return list(dict.fromkeys(ok))
-        seen = "、".join(dict.fromkeys(f"{ip}（{_SCOPES[_scope(ip)]}）" for ip in addrs)) or "空"
-        raise EgressDenied(f"{host} 解析到 {seen}，白名单规则 {'、'.join(map(str, rules))} 不放行这类地址"
-                           "（回环地址要写 localhost:端口，内网地址要写主机全名）")
+        return await vet_host(host, port, lambda ip: any(r.reaches(ip) for r in rules), self.resolve,
+                              f"白名单规则 {'、'.join(map(str, rules))} 不放行这类地址（回环地址要写 localhost:端口，内网地址要写主机全名）")
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
@@ -275,4 +287,4 @@ async def _reply(writer: asyncio.StreamWriter, code: int, text: str) -> None:
         await writer.drain()
 
 
-__all__ = ["AllowRule", "EgressDenied", "EgressProxy", "local_ports", "parse_rules"]
+__all__ = ["AllowRule", "EgressDenied", "EgressProxy", "address_scope", "local_ports", "parse_rules", "vet_host"]

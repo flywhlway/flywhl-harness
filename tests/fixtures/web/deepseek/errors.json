@@ -1,0 +1,12 @@
+{
+  "400": {"error": {"message": "query too long", "type": "invalid_request_error"}},
+  "401": {"error": {"message": "Authentication Fails, Your api key is invalid", "type": "authentication_error"}},
+  "402": {"error": {"message": "Insufficient Balance", "type": "unknown_error"}},
+  "403": {"error": {"message": "The URL is blocked by security policy", "type": "forbidden"}},
+  "404": {"error": {"message": "No content could be extracted", "type": "not_found"}},
+  "408": {"error": {"message": "Request timeout", "type": "timeout"}},
+  "413": {"error": {"message": "Request entity too large", "type": "invalid_request_error"}},
+  "429": {"error": {"message": "Rate limit reached", "type": "rate_limit"}},
+  "500": {"error": {"message": "Internal server error", "type": "server_error"}},
+  "504": {"error": {"message": "Gateway timeout", "type": "server_error"}}
+}

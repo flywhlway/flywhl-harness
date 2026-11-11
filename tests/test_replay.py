@@ -233,3 +233,57 @@ async def test_replay_endpoint_returns_the_report_and_leaves_no_copy(ws, tmp_pat
     rep = r.json()
     assert rep["deterministic"] is True and rep["original_tools"] == rep["replay_tools"] == ["ls"]
     assert rep["workspace"] == "" and not list(scratch.iterdir())
+
+
+# ---------------------------------------------------------------------- 联网工具
+async def _web_run(ws):
+    import httpx
+
+    from .webkit import DS_FETCH, DS_SEARCH, Net, ds_search, fetch_call, fixture, make_web_harness, search_call
+
+    net = Net().on("POST", DS_SEARCH, ds_search()).on("POST", DS_FETCH, httpx.Response(200, json=fixture("deepseek", "fetch")))
+    h = make_web_harness(ws, [search_call("httpx"), fetch_call("https://pypi.org/project/httpx/"), "答案"], net,
+                         web__default="fetch")
+    res = await h.run("httpx 最新版本")
+    assert res.status == "completed"
+    return h, net, res, search_call
+
+
+async def test_web_runs_replay_deterministically_without_touching_the_network(ws):
+    from flywhl_harness import HarnessConfig
+
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    assert_same(await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools))
+    # 回放的机器没开联网：工具规格是静态的，从录制重建，指纹照样一致
+    assert_same(await replay_run(h.store, res.run_id, config=HarnessConfig.load(workspace=str(ws))))
+    assert len(net.requests) == sent
+    rec = export_trajectory(h.store, res.run_id)
+    assert rec["run"]["config"]["replay"]["web"] == {"capability": "fetch", "max_searches_per_run": 20,
+                                                     "max_fetches_per_run": 10}
+
+
+def _echo_last_tool(req):
+    return next(m.text for m in reversed(req.messages) if m.role == "tool")
+
+
+def _live_search(query: str) -> dict:
+    # 显式 id：脚本模型按请求序号编号，分叉后会和录制里的编号撞上（真实模型的编号不会）
+    return {"tool_calls": [{"id": "live_1", "name": "web_search", "args": {"query": query}}]}
+
+
+async def test_forked_web_calls_dry_run_unless_recorded_or_allowed(ws):
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    new = ScriptedProvider(["-", _live_search("别的查询"), _echo_last_tool])
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=new, fork_at=1)
+    assert rep.final_text.startswith("[dry-run] web_search") and "--allow-web" in rep.final_text
+    assert len(net.requests) == sent
+
+    same = ScriptedProvider(["-", _live_search("httpx"), _echo_last_tool])   # 与录制同参数：复用录制结果
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=same, fork_at=1)
+    assert rep.final_text.startswith("[联网搜索结果") and len(net.requests) == sent
+
+    allowed = ScriptedProvider(["-", _live_search("别的查询"), _echo_last_tool])
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=allowed, fork_at=1, allow_web=True)
+    assert rep.final_text.startswith("[联网搜索结果") and len(net.requests) == sent + 1

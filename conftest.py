@@ -150,3 +150,38 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_web(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """离线用例里联网工具发不出真实请求：本机环境里可能有真实密钥（``DEEPSEEK_API_KEY`` 与模型共用），
+    用例漏传假传输层时，请求停在这里，不会真的花钱。没给解析器的用假解析器，没给传输层的连接一律拒绝。"""
+    if request.node.get_closest_marker("live"):
+        return
+    try:
+        import httpcore
+
+        from flywhl_harness.net import client
+    except ImportError:   # 被测代码是旧版本
+        return
+
+    class _Refuse(httpcore.AsyncNetworkBackend):
+        async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            raise httpcore.ConnectError(f"离线测试不发真实请求（{host}:{port}）")
+
+        async def sleep(self, seconds):
+            pass
+
+    async def _resolve(host, port):
+        import ipaddress
+
+        return [ipaddress.ip_address("93.184.216.34")]
+
+    init = client.WebClient.__init__
+
+    def guarded(self, *a, transport=None, backend=None, resolve=None, **kw):
+        if transport is None and backend is None:
+            backend = _Refuse()
+        init(self, *a, transport=transport, backend=backend, resolve=resolve or _resolve, **kw)
+
+    monkeypatch.setattr(client.WebClient, "__init__", guarded)

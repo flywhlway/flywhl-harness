@@ -87,6 +87,17 @@ class AgentLoop:
             # 未登记价格的模型费用记为 0：费用预算形同虚设，必须明确告诉用户，而不是悄悄失效
             yield self._ev(E.NOTICE, level="warn", code="unpriced_model",
                            text=f"模型 {rc.model} 未登记价格，费用预算 max_cost_usd 不会生效；请改用 max_total_tokens 限额")
+        web = getattr(rc.harness, "web", None)
+        if rc.role == "main" and rc.budget.web is not None and rc.config.budget.max_cost_usd and web is not None \
+                and (free := web.unpriced()):
+            # 与未登记价格的模型同一口径：费用记 0 不是“免费”，是费用上限管不到它
+            yield self._ev(E.NOTICE, level="warn", code="unpriced_web",
+                           text=f"联网后端 {'、'.join(free)} 没有配置 price_per_call，搜索费用按 0 计，不受 max_cost_usd 约束")
+        native = getattr(rc.harness, "native_search", None)
+        if rc.role == "main" and native and not rc.resume:
+            yield self._ev(E.NOTICE, level="warn", code="native_web_search",
+                           text=f"模型侧联网已通过 extra_body 打开（{'、'.join(native)}）：搜索结果不经过 harness，不计数、不审计，"
+                                "会话按读过不可信内容处理；降级到备用模型时 extra_body 不随行，联网会消失")
         try:
             async for ev in self._body(prompt):
                 yield ev

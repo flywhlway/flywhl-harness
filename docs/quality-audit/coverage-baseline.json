@@ -9,5 +9,9 @@
   "src/flywhl_harness/tools/shell.py": 86.26,
   "src/flywhl_harness/tools/fs.py": 77.44,
   "src/flywhl_harness/agent/executor.py": 85.68,
-  "src/flywhl_harness/runtime/manager.py": 79.12
+  "src/flywhl_harness/runtime/manager.py": 79.12,
+  "src/flywhl_harness/net/client.py": 95.0,
+  "src/flywhl_harness/net/exfil.py": 95.0,
+  "src/flywhl_harness/tools/web.py": 87.0,
+  "src/flywhl_harness/runtime/capabilities.py": 99.0
 }

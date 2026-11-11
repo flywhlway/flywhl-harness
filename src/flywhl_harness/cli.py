@@ -448,7 +448,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     h = Harness(_config(args))
     live = h.provider if args.fork_at is not None else None
     rep = await replay_run(h.store, args.run_id, config=h.config, live=live, live_model=h.model,
-                           fork_at=args.fork_at, base_tools=h.tools)
+                           fork_at=args.fork_at, base_tools=h.tools, allow_web=bool(getattr(args, "allow_web", False)))
     print(json.dumps(rep.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
@@ -562,6 +562,8 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("replay", parents=[common], help="回放运行")
     sp.add_argument("run_id")
     sp.add_argument("--fork-at", type=int, help="从第 N 次模型调用起改用当前配置的模型")
+    sp.add_argument("--allow-web", action="store_true",
+                    help="分叉之后录制里没有同参数结果的联网调用真的去联网（默认返回 dry-run）")
     sp.set_defaults(fn=cmd_replay)
     sp = sub.add_parser("trace", parents=[common], help="导出轨迹")
     sp.add_argument("run_id")

@@ -578,6 +578,23 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .sub-log div { display: flex; gap: 6px; align-items: center; }
 .kv-inline { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: var(--fs-xs); color: var(--text-2); }
 .kv-inline b { color: var(--text-3); font-weight: 500; margin-right: 4px; }
+.kv-inline a { color: var(--brand-text); overflow-wrap: anywhere; }
+
+/* 联网：来源列表、composer 开关、工具页说明 */
+.web-sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: var(--fs-sm); }
+.web-sources li { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.web-sources .n { color: var(--text-3); font-size: var(--fs-xs); margin-top: 2px; flex: none; }
+.web-sources .src { display: grid; gap: 1px; min-width: 0; }
+.web-sources a { color: var(--brand-text); font-weight: 500; overflow-wrap: anywhere; }
+.web-sources .site { font-size: var(--fs-xs); color: var(--text-2); }
+.web-sources .url { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-chip .web-val { margin-left: 4px; color: var(--text-2); }
+.web-chip[data-web="search"] .web-val, .web-chip[data-web="fetch"] .web-val { color: var(--brand-text); font-weight: 500; }
+.web-chip[aria-disabled="true"] { opacity: .55; }
+.web-note { margin-bottom: 12px; }
+.web-note p { margin: 0 0 6px; }
+.web-note .plain-list { gap: 4px; }
+.web-note .plain-list li { display: flex; gap: 6px; align-items: center; font-size: var(--fs-sm); }
 
 /* 审批卡片 */
 .approval {

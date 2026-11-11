@@ -47,7 +47,34 @@ function posture(s) {
       value: loose.length ? `${loose.length} 个包没锁版本` : P.require_pinned ? "强制锁定版本" : bound ? `绑定 ${bound} 个文件` : "无临时拉取的包",
       why: loose.length ? `每次启动都可能拉到新发布的版本，包被接管就会投毒：${loose.join("；")}。锁到确切版本，或设置 permissions.require_pinned = true 拒绝启动`
         : `hook 与 MCP 引用的脚本按内容绑定：项目配置的信任哈希包含它们，命令 hook 每次执行前核对，改过就拒绝执行${P.require_pinned ? "；没锁版本的包拒绝启动" : ""}` },
+    ...webPosture(s),
   ];
+}
+
+const BACKEND = { deepseek: "DeepSeek", bocha: "博查", searxng: "SearXNG" };
+const SCOPE = { cited: "只读出现过的网址", ask: "出现过的网址直接读，其他的要确认", public: "任意公网网址" };
+const DEFAULT_WEB = { off: "新会话默认关闭", search: "新会话默认仅搜索", fetch: "新会话默认搜索并读取" };
+/** 联网一栏：只在启用了联网工具、或检测到模型侧联网参数时出现 */
+function webPosture(s) {
+  const w = s.web;
+  if (!w) return [];
+  const out = [];
+  if (w.enabled) {
+    const names = w.backends.map((b) => `${BACKEND[b.name] || b.name}${b.region ? `（${b.region}）` : ""}${b.available ? "" : "·不可用"}`).join("、");
+    const notes = [];
+    if (w.sandbox_network === "deny") notes.push("命令沙箱禁止联网，联网工具照常可用：两个开关管的是不同通道");
+    if (w.unpriced.length) notes.push(`${w.unpriced.join("、")} 没配 price_per_call，搜索费用按 0 计、不受费用上限约束`);
+    if (w.mcp_tools) notes.push(`另有 ${w.mcp_tools} 个 MCP 工具不受会话联网开关控制`);
+    out.push(w.level === "off"
+      ? { tone: "warn", icon: "globe", label: "联网工具", value: "已启用，但不可用", why: w.reason }
+      : { tone: w.fetch_scope === "public" ? "warn" : "ok", icon: "globe", label: "联网工具",
+          value: `${names}；读取范围 ${w.fetch_scope}；${DEFAULT_WEB[w.default] || w.default}`,
+          why: [`结果按不可信内容处理：会话进入污点态，之后的写入与外部操作要确认。读取范围：${SCOPE[w.fetch_scope] || w.fetch_scope}`
+            + (w.level === "search" ? `。${w.reason}` : ""), ...notes].join("。") });
+  }
+  if (w.native_via_extra_body) out.push({ tone: "warn", icon: "alert", label: "模型侧联网", value: `已通过 extra_body 打开（${w.native_keys.join("、")}）`,
+    why: "搜索在模型供应商那里发生，结果不经过 harness：不计数、不审计；新会话开局即按读过不可信内容处理；降级到备用模型时联网会消失" });
+  return out;
 }
 
 const NET = { allow: "网络不限", deny: "禁止联网", allowlist: "出站白名单" };

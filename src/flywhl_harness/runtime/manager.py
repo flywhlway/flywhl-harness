@@ -36,7 +36,7 @@ from ..agent.loop import AgentLoop
 from ..agent.run_context import RunContext
 from ..agent.subagent import check_contract
 from ..cancel import CancelToken
-from ..config import BudgetConfig, HarnessConfig, is_workspace_trusted
+from ..config import BudgetConfig, HarnessConfig, is_workspace_trusted, native_web_search, web_rank
 from ..events import E, EPHEMERAL_EVENTS, Event
 from ..llm import create_provider
 from ..llm.base import Provider
@@ -49,6 +49,7 @@ from ..tools import default_tools
 from ..tools.confine import Confinement
 from ..tools.registry import ToolRegistry
 from ..types import unpaired_tool_calls
+from .capabilities import clamp, current_web, session_web
 from .session import SessionLog
 from .state import ACTIVE, IllegalTransition, RunStateMachine, RunStatus, TERMINAL, TransitionConflict
 from .store import RunRecord, SessionRecord, Store
@@ -182,6 +183,15 @@ class Harness:
         self.model = model or self.config.model or "flywhl-demo"
         self.model_info = provider.model_info(self.model)
         self.tools = tools if tools is not None else default_tools(self.config, self.data_dir)
+        # 联网服务：注册了联网工具就用工具身上那一份（熔断、缓存只能有一份）；启用了但没有可用后端时也建一份，
+        # 只用来说明“为什么不可用”
+        self.web = next((t.service for t in self.tools if t.egress and getattr(t, "service", None) is not None), None)
+        if self.web is None and self.config.web.enabled:
+            from ..net.search import WebService
+
+            self.web = WebService(self.config.web)
+        # 模型侧联网（extra_body 打开的供应商搜索）：结果不经过 harness，新会话开局即置污点
+        self.native_search = native_web_search(self.config.extra_body)
         loose = unpinned_in([(hc.command, hc.env) for hc in self.config.hooks], self.config.mcp_servers,
                             self.workspace_root)
         if loose and self.config.permissions.require_pinned:
@@ -236,6 +246,9 @@ class Harness:
         for c in self._mcp:
             with contextlib.suppress(Exception):
                 await c.close()
+        if self.web is not None:
+            with contextlib.suppress(Exception):
+                await self.web.aclose()
         await self.provider.aclose()
 
     async def __aenter__(self) -> "Harness":
@@ -244,24 +257,68 @@ class Harness:
     async def __aexit__(self, *exc: Any) -> None:
         await self.aclose()
 
+    # ================================================================== 联网能力
+    def web_ceiling(self) -> tuple[str, str]:
+        """本进程能给会话的最高联网能力与原因：用户配置、可用后端、实际注册了哪些联网工具，取最严的。"""
+        if not self.config.web.enabled or self.web is None:
+            return "off", "联网工具没有启用（用户配置 [web] enabled = false）"
+        level, why = self.web.availability()
+        if level != "off" and "web_search" not in self.tools:
+            return "off", "web_search 没有注册"
+        if level == "fetch" and "web_fetch" not in self.tools:
+            return "search", "web_fetch 没有注册"
+        return level, why
+
+    def web_capability(self, requested: str | None = None) -> dict[str, Any] | None:
+        """建会话时的能力位：请求值（缺省取 ``[web].default``）clamp 到上限。没启用联网时返回 None：会话元数据与以前一样。"""
+        if not self.config.web.enabled:
+            return None
+        ceiling, why = self.web_ceiling()
+        want = requested if requested is not None else self.config.web.default
+        level, reason = clamp(want, ceiling, why)
+        return {"web": level, "requested": want, "reason": reason}
+
+    def set_capabilities(self, session_id: str, web: str) -> dict[str, Any]:
+        """开工后只能收紧。放宽抛 ``PermissionError``：工具名单在建会话时就定了，放宽意味着改写已经进过请求的前缀。"""
+        s = self._session(session_id)
+        cur = session_web(s.meta)
+        if web_rank(web) > web_rank(cur):
+            raise PermissionError(f"联网能力只能收紧（当前 {cur}，请求 {web}）：要放宽请新建会话，在开工前选择")
+        cap = {**(s.meta.get("capabilities") or {}), "web": web}
+        if web != cur:
+            cap["reason"] = f"开工后收紧为 {web}"
+        self.store.update_session(session_id, meta={**s.meta, "capabilities": cap})
+        return cap
+
     # ================================================================== 会话
     def create_session(self, title: str = "新会话", *, workspace: str | None = None, mode: str | None = None,
                        parent_session_id: str | None = None, system_prompt: str | None = None,
-                       project_context: str | None = None) -> SessionRecord:
-        """显式给 ``system_prompt`` 的（子代理、回放）用自己带来的内容，不再读工作区。"""
+                       project_context: str | None = None, capabilities: dict[str, Any] | None = None) -> SessionRecord:
+        """显式给 ``system_prompt`` 的（子代理、回放）用自己带来的内容，不再读工作区。
+
+        ``capabilities`` 由调用方算好（接口层用 ``web_capability`` clamp，子代理继承父会话，回放取录制值），这里照写；
+        不给时按 ``[web].default`` 算。联网工具只在能力允许时钉进工具名单。"""
         ws = Path(workspace).expanduser().resolve() if workspace else self.workspace_root
         cfg = self.config
         sp = system_prompt or build_system_prompt(ws, override=cfg.system_prompt, append=cfg.append_system_prompt)
         trusted = self.workspace_trusted(ws)
         pc = project_context if system_prompt else build_project_context(ws, trusted=trusted, agents_md=cfg.load_agents_md,
                                                                          skills=cfg.load_skills)
+        cap = capabilities if capabilities is not None else self.web_capability()
+        level = session_web({"capabilities": cap}) if cap is not None else "off"
+        names = [t.name for t in self.tools if not t.egress or web_rank(level) >= web_rank(getattr(t, "web_level", "search"))]
         meta = {
             # 钉住：系统提示与工具集在会话创建时冻结（版本钉住 + 前缀稳定）；
             # 模型以当前 Harness 为准（这里记录创建时的模型，实际服务的模型记录在每条 assistant 消息上）
-            "system_prompt": sp, "model": self.model, "provider": self.provider.name, "tools": self.tools.names(),
+            "system_prompt": sp, "model": self.model, "provider": self.provider.name, "tools": names,
             "project_context": pc, "mode": mode or cfg.permissions.mode, "grants": [], "clear_watermark": 0,
         }
+        if cap is not None:
+            meta["capabilities"] = cap
         if pc and not trusted:   # 没信任过的仓库的话已经进了上下文，开局就是污点
+            meta["tainted"] = True
+        if self.native_search and system_prompt is None:
+            # 模型侧联网看不到搜了什么，只能按最坏情况处理：写入与外部操作从第一步起就要审批
             meta["tainted"] = True
         return self.store.create_session(title, str(ws), parent_session_id=parent_session_id, meta=meta)
 
@@ -314,11 +371,16 @@ class Harness:
         """回放要用到的设置：水位、预算、循环守卫都会改变 harness 的行为，轨迹不记下来就重现不了。
         只放数字和开关。验收命令只记有没有，命令文本可能带内部信息，回放也不会再执行它。"""
         cfg = self.config
-        return {"context": asdict(cfg.context), "budget": asdict(cfg.budget), "loop_guard": asdict(cfg.loop_guard),
-                "context_window": self.model_info.context_window, "clear_watermark": int(s.meta.get("clear_watermark", 0)),
-                "max_stop_blocks": cfg.max_stop_blocks, "verify_todos": cfg.verify_todos, "verify": bool(cfg.verify_command),
-                "enable_demo_tools": cfg.enable_demo_tools, "sandbox": cfg.permissions.sandbox,
-                "sandbox_network": cfg.permissions.sandbox_network}
+        out = {"context": asdict(cfg.context), "budget": asdict(cfg.budget), "loop_guard": asdict(cfg.loop_guard),
+               "context_window": self.model_info.context_window, "clear_watermark": int(s.meta.get("clear_watermark", 0)),
+               "max_stop_blocks": cfg.max_stop_blocks, "verify_todos": cfg.verify_todos, "verify": bool(cfg.verify_command),
+               "enable_demo_tools": cfg.enable_demo_tools, "sandbox": cfg.permissions.sandbox,
+               "sandbox_network": cfg.permissions.sandbox_network}
+        if session_web(s.meta) != "off":   # 只有开了联网的会话才记：没开时轨迹与以前一样
+            w = cfg.web
+            out["web"] = {"capability": session_web(s.meta), "max_searches_per_run": w.max_searches_per_run,
+                          "max_fetches_per_run": w.max_fetches_per_run}
+        return out
 
     def _hook_warnings(self, run_id: str, warnings: list[str]) -> None:
         """没有活动事件枢纽时（Run 开始前、结束后）的 hook 警告：同样记成 notice，不能悄悄吞掉。"""
@@ -351,6 +413,8 @@ class Harness:
             tools = self.tools.subset(pinned) if pinned else self.tools
         if budget is None:
             budget = Budget(cfg.budget)
+            if session_web(s.meta) != "off":
+                budget.enable_web(cfg.web.max_searches_per_run, cfg.web.max_fetches_per_run)
             if resume:  # 预算跨暂停 / 崩溃延续：从检查点继续计数，而不是从零开始
                 budget.restore((run.checkpoint or {}).get("budget"))
         rc = RunContext(
@@ -436,6 +500,9 @@ class Harness:
         # 预算计数和轮次一起落进 result：页面在运行结束后才打开时收不到实时 usage 事件，只能读这里
         result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns,
                   "tool_calls": rc.budget.tool_calls, "by": out.by}
+        if rc.budget.web is not None:
+            result.update(web_searches=rc.budget.web_searches, web_fetches=rc.budget.web_fetches,
+                          tool_cost_usd=rc.budget.tool_cost_usd)
         self._checkpoint(a, paused=out.status == "paused")
         self.store.update_run(a.run_id, usage=rc.run_usage.to_dict(), result=result, error=out.error)
         cur = RunStatus(self.store.get_run(a.run_id).status)  # type: ignore[union-attr]
@@ -776,8 +843,13 @@ class Harness:
                            max_turns: int, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         ps = self._session(parent.session_id)
         sp = SUBAGENT_PROMPT.replace("{workspace}", str(parent.workspace.root))
+        # 子代理继承父会话当前的联网能力（已收紧的按收紧后的算）；派生时用 tools 参数去掉 web_* 就是再收紧一级
+        inherited = current_web(self.store, parent.session_id)
+        cap = {"web": inherited, "requested": inherited, "reason": "继承父会话"} \
+            if self.config.web.enabled or "capabilities" in ps.meta else None
         child_s = self.create_session(f"子代理：{description}", workspace=str(parent.workspace.root),
-                                      mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp)
+                                      mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp,
+                                      capabilities=cap)
         if parent.tainted:   # 任务简报是父代理写的：污点不往下传，提示注入就能靠 task 绕开升级
             self.store.update_session(child_s.id, meta={**child_s.meta, "tainted": True})
             child_s = self._session(child_s.id)

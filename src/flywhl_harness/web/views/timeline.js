@@ -3,7 +3,7 @@
 import { api } from "../lib/api.js";
 import { $, copyText, esc, fmt, h } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
-import { RISK, SYS_KINDS, TOOL_STATUS, USER_KINDS, callSummary, effectBadge, statusBadge, toolIcon } from "../lib/meta.js";
+import { RISK, SYS_KINDS, TOOL_STATUS, USER_KINDS, callSummary, effectBadge, shortUrl, statusBadge, toolIcon } from "../lib/meta.js";
 import { flashCopied, promptDialog, toast } from "../lib/ui.js";
 import { md } from "../md.js";
 
@@ -136,10 +136,14 @@ export function setToolResult(card, msg, ctx) {
   const st = d.status || (msg.is_error ? "error" : "ok");
   const meta = TOOL_STATUS[st] || { label: st, cls: msg.is_error ? "err" : "ok", icon: msg.is_error ? "x" : "check" };
   const dur = d.duration_ms != null ? `<span class="tnum muted">${fmt.dur(d.duration_ms / 1000)}</span>` : "";
-  setToolState(card, `${icon(meta.icon, "sm")}${esc(meta.label)}${dur ? " · " + dur : ""}`, meta.cls);
+  const hits = Array.isArray(d.hits) ? d.hits : null;
+  const srcs = hits && !msg.is_error ? ` · <span class="tnum">${hits.length} 条来源${d.cached ? "（缓存）" : ""}</span>` : "";
+  setToolState(card, `${icon(meta.icon, "sm")}${esc(meta.label)}${srcs}${dur ? " · " + dur : ""}`, meta.cls);
   card.classList.toggle("error", !!msg.is_error && !["cancelled", "skipped", "rejected"].includes(st));
 
   const parts = [];
+  if (hits) parts.push(webSources(d));
+  if (msg.tool_name === "web_fetch" && d.final_url) parts.push(webPage(d));
   const resultLabel = d.externalized_ref ? `结果 · 已外置为句柄 <code>${esc(d.externalized_ref)}</code>` : "结果";
   parts.push(`<div><div class="block-label">${resultLabel}</div><pre class="code-block">${esc(text)}</pre></div>`);
   if (d.diff) parts.push(`<div><div class="block-label">变更</div>${diffHtml(d.diff)}</div>`);
@@ -160,6 +164,35 @@ export function setToolResult(card, msg, ctx) {
     box.append(h("div", {}, b));
   }
   if (card.classList.contains("error") || st === "unknown") setOpen(card, true);
+}
+
+// 联网结果里的标题、摘要、网址全是外部数据：一律 esc()，链接只认 http(s)，新窗口打开且不带 Referer
+const httpUrl = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : null);
+const extLink = (u, text) => {
+  const href = httpUrl(u);
+  return href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>` : esc(text);
+};
+
+/** web_search 的来源卡片：编号与模型看到的 [n] 一致 */
+export function webSources(d) {
+  const filtered = (d.filtered?.deny || 0) + (d.filtered?.dup || 0);
+  const bits = [d.backend && `后端 ${esc(d.backend)}`, d.cached && "缓存", filtered && `过滤 ${filtered} 条`,
+    d.cost_usd ? `$${Number(d.cost_usd).toFixed(4)}` : ""].filter(Boolean).join(" · ");
+  const label = `<div class="block-label">${icon("globe", "sm")}来源${bits ? " · " + bits : ""}</div>`;
+  if (!d.hits.length) return `<div>${label}<p class="muted">没有结果</p></div>`;
+  const rows = d.hits.map((x) => `<li><span class="n tnum">[${esc(String(x.n ?? ""))}]</span><div class="src">${extLink(x.url, x.title || x.url)}
+    <span class="site">${esc([x.site, x.published].filter(Boolean).join(" · "))}</span><span class="url mono">${esc(shortUrl(x.url))}</span></div></li>`).join("");
+  return `<div>${label}<ol class="web-sources">${rows}</ol></div>`;
+}
+
+/** web_fetch 的读取摘要：最终网址、状态码、大小、是否截断；正文在下面的“结果”里按纯文本显示 */
+export function webPage(d) {
+  const kv = [`<span><b>网址</b>${extLink(d.final_url, shortUrl(d.final_url))}</span>`];
+  if (d.status) kv.push(`<span><b>状态</b><code>${esc(String(d.status))}</code></span>`);
+  if (d.bytes != null) kv.push(`<span><b>大小</b>${fmt.int(d.bytes)} 字节</span>`);
+  if (d.truncated) kv.push(`<span><b>截断</b>是</span>`);
+  if (d.backend) kv.push(`<span><b>后端</b>${esc(d.backend)}</span>`);
+  return `<div class="kv-inline">${kv.join("")}</div>`;
 }
 
 export function diffHtml(text) {

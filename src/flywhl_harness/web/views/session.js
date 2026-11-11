@@ -4,7 +4,7 @@
 import { api } from "../lib/api.js";
 import { $, $$, copyText, esc, fmt, h, isTyping, modKey, store } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
-import { ACTIVE, DEMO_TEMPLATES, EVENT_TYPES, MODES, REAL_TEMPLATES, RUN_STATUS, TERMINAL, modeOf, statusBadge } from "../lib/meta.js";
+import { ACTIVE, DEMO_TEMPLATES, EVENT_TYPES, MODES, REAL_TEMPLATES, RUN_STATUS, TERMINAL, WEB_LEVELS, modeOf, statusBadge, webLevel, webRank } from "../lib/meta.js";
 import { announce, confirmDialog, openMenu, setTitle, toast } from "../lib/ui.js";
 import { createInspector } from "./inspector.js";
 import { md } from "../md.js";
@@ -14,6 +14,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
   const V = {
     sid, detail: null, run: null, running: false, es: null, lastSeq: 0, events: [], trail: [], trailFor: null,
     usage: null, live: null, inject: "steer", conn: "idle", showDeltas: false, evFilter: "all", evQuery: "", disposed: false,
+    web: null,   // 草稿态选的联网能力（null = 取服务端默认值）
   };
   const ctx = {
     get sid() { return V.sid; },
@@ -141,6 +142,58 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       b.onclick = () => openMenu(b, list.map((t) => ({ label: t.title, desc: t.desc, icon: t.icon, onSelect: () => { input.value = t.prompt; composerWrap.autosize(); input.focus(); } })), { align: "start", label: "任务模板" });
       left.append(b);
     }
+    const chip = webChip();
+    if (chip) left.append(chip);
+  }
+
+  // ------------------------------------------------------------------ 联网能力：开工前选，开工后只能收紧
+  const webInfo = () => app.info.capabilities?.web || null;
+  const sessionWeb = () => V.detail?.session?.meta?.capabilities?.web || "off";
+  const draftWeb = () => { const wi = webInfo(); return V.web ?? (wi?.available ? wi.default || "off" : "off"); };
+  function webChip() {
+    const wi = webInfo();
+    if (!wi) return null;
+    const draft = !V.sid;
+    if (!draft && !wi.available && sessionWeb() === "off") return null;   // 服务端没开联网的老会话：不占位置
+    const cur = draft ? draftWeb() : sessionWeb();
+    const lv = webLevel(cur);
+    const b = h("button", { class: "btn ghost sm web-chip", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
+      "data-web": cur, "aria-label": `联网：${lv.label}`, html: `${icon("globe", "sm")}联网<span class="web-val">${esc(lv.short)}</span>` });
+    if (draft && !wi.available) {
+      b.setAttribute("aria-disabled", "true");
+      b.dataset.tip = wi.reason || "联网不可用";
+      b.onclick = () => toast(wi.reason || "联网工具没有启用。", { title: "联网不可用" });
+      return b;
+    }
+    b.dataset.tip = draft ? "这个会话能不能联网：开工前选择，开工后只能收紧" : `本会话联网：${lv.label}。开工后只能收紧`;
+    b.onclick = () => openMenu(b, draft ? draftWebItems(wi, cur) : tightenWebItems(cur), { align: "start", label: "联网能力" });
+    return b;
+  }
+  function draftWebItems(wi, cur) {
+    return [{ head: "联网能力（开工后只能收紧）" }, ...WEB_LEVELS.map((l) => {
+      const off = (l.id !== "off" && !wi.available) || (l.id === "fetch" && !wi.fetch_available);
+      return { label: l.label, icon: l.id === "off" ? "ban" : l.id === "search" ? "globe" : "external", checked: l.id === cur, disabled: off,
+        desc: off ? wi.reason || "当前配置不支持" : l.desc,
+        onSelect: () => { V.web = l.id; renderComposerLeft(); input.focus(); } };
+    })];
+  }
+  function tightenWebItems(cur) {
+    const items = [{ head: "开工后只能收紧" }];
+    for (const l of WEB_LEVELS) {
+      if (webRank(l.id) > webRank(cur)) continue;
+      items.push({ label: l.label, icon: l.id === "off" ? "ban" : l.id === "search" ? "globe" : "external", checked: l.id === cur,
+        disabled: l.id === cur, desc: l.desc, onSelect: () => tightenWeb(l.id) });
+    }
+    if (cur !== "fetch") items.push("sep", { label: "放宽需新建会话", icon: "plus", disabled: true, desc: "联网能力在开工前选定：工具名单已经发给模型，放宽要从新会话开始。" });
+    return items;
+  }
+  async function tightenWeb(level) {
+    try {
+      const cap = await api.patch(`/api/sessions/${V.sid}/capabilities`, { web: level });
+      V.detail.session.meta.capabilities = { ...(V.detail.session.meta.capabilities || {}), ...cap };
+      renderHeader(); renderComposerLeft();
+      toast(level === "off" ? "下一次联网调用起会被拒绝。" : "下一次读取网页的调用起会被拒绝。", { title: `联网已收紧为「${webLevel(level).label}」`, tone: "success" });
+    } catch (e) { toast(e.message, { tone: "danger", title: "无法收紧联网能力" }); }
   }
   function updateSendLabel() {
     $("#c-send-t", composerWrap).textContent = V.running ? (V.inject === "steer" ? "插话" : "排队") : "发送";
@@ -166,8 +219,10 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const title = s?.title || "新任务";
     $("#s-title", header).textContent = title;
     setTitle(`${title} · flywhl harness`);
+    const web = sessionWeb();
     $("#s-status", header).innerHTML = (V.run ? statusBadge(V.run.status) : "")
-      + (s?.meta?.archived ? `<span class="badge outline">${icon("archive")}已归档</span>` : "");
+      + (s?.meta?.archived ? `<span class="badge outline">${icon("archive")}已归档</span>` : "")
+      + (s && web !== "off" ? `<span class="badge outline web-badge" title="${esc(`本会话可以联网（${webLevel(web).label}）：结果按不可信内容处理，之后的写入与外部操作需要确认`)}">${icon("globe")}联网 · ${esc(webLevel(web).short)}</span>` : "");
     $("#s-meta", header).innerHTML = V.run ? `<span class="mono">${esc(fmt.shortId(V.run.id))}</span>${V.run.attempt > 1 ? `<span>· 第 ${V.run.attempt} 次尝试</span>` : ""}` : "";
     const mode = modeOf(s?.meta?.mode || app.info.mode);
     const mb = $("#s-mode", header);
@@ -237,7 +292,10 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     remember(text);
     try {
       if (!V.sid) {        // 草稿：第一条任务才真正创建会话，标题取自任务描述
-        const s = await api.post("/api/sessions", { title: text.slice(0, 40) });
+        const wi = webInfo(), want = draftWeb();
+        // 没启用联网时不带 capabilities：请求与以前一模一样
+        const s = await api.post("/api/sessions", { title: text.slice(0, 40), ...(wi?.available ? { capabilities: { web: want } } : {}) });
+        if (s.capabilities && s.capabilities.web !== want) toast(s.capabilities.reason || "已按配置上限调整。", { title: `联网已调整为「${webLevel(s.capabilities.web).label}」`, tone: "warning" });
         input.value = "";
         app.navigate("#/s/" + s.id, { pendingPrompt: text });
         return;
