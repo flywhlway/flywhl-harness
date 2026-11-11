@@ -32,6 +32,8 @@ URL = "https://news.example/a"
 @pytest.fixture(autouse=True)
 def _no_base_url(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    # 内置工具那条路径要有可用的搜索后端：固定一个假密钥，结果不随宿主机有没有真密钥变化
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-real")
 
 
 def _req(**kw) -> ModelRequest:
