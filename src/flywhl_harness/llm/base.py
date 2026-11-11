@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator
 
 from .._utils import safe_json_loads
 from ..cancel import CancelToken
-from ..types import Message, StopReason, TextBlock, ThinkingBlock, ToolCall, Usage
+from ..types import Message, ServerBlock, StopReason, TextBlock, ThinkingBlock, ToolCall, Usage
 from .models import ModelInfo, get_model_info
 
 
@@ -39,6 +39,9 @@ class ModelRequest:
     tool_choice: str = "auto"
     purpose: str = "turn"  # turn | wrap_up | compaction | subagent
     metadata: dict[str, Any] = field(default_factory=dict)
+    # 模型侧联网：llm/native.py 里声明的键。provider 核对声明与自己对得上才带上联网参数（降级到别家时不带）
+    native_search: str | None = None
+    native_opts: dict[str, Any] = field(default_factory=dict)   # max_uses（剩余搜索次数）、deny_domains
 
 
 @dataclass
@@ -141,9 +144,10 @@ class MessageBuilder:
     解析失败时保留原文与错误，交给执行层回给模型修正。
     """
 
-    def __init__(self, provider: str, model: str):
+    def __init__(self, provider: str, model: str, origin: str = ""):
         self.provider = provider
         self.model = model
+        self.origin = origin   # 端点主机：供应商侧工具块只回传给同一端点
         self._blocks: dict[int, dict[str, Any]] = {}
 
     def text(self, index: int, delta: str) -> None:
@@ -175,6 +179,28 @@ class MessageBuilder:
             err, args = "工具参数必须是 JSON 对象", None
         return ToolCall(b["id"], b["name"], args or {}, raw_arguments=b["json"] if err else None, parse_error=err)
 
+    def server(self, index: int, data: dict[str, Any]) -> None:
+        """供应商侧执行的工具块：原样保存。``server_tool_use`` 的 input 以 partial JSON 增量到达，见 ``server_delta``。"""
+        self._blocks[index] = {"type": "server", "data": dict(data), "json": ""}
+
+    def server_delta(self, index: int, partial: str) -> bool:
+        b = self._blocks.get(index)
+        if b is None or b["type"] != "server":
+            return False
+        b["json"] += partial
+        return True
+
+    def server_blocks(self) -> list[dict[str, Any]]:
+        return [self._server_data(b) for _, b in sorted(self._blocks.items()) if b["type"] == "server"]
+
+    @staticmethod
+    def _server_data(b: dict[str, Any]) -> dict[str, Any]:
+        data = dict(b["data"])
+        if b["json"]:
+            args, err = safe_json_loads(b["json"])
+            data["input"] = args if err is None and isinstance(args, dict) else {}
+        return data
+
     def drop_non_text(self) -> None:
         """丢弃非文本块（用于 server-side fallback 的边界：之前的 thinking/tool_use 不能回传）。"""
         self._blocks = {k: v for k, v in self._blocks.items() if v["type"] == "text"}
@@ -193,6 +219,8 @@ class MessageBuilder:
                 call = self.tool_call(idx)
                 if call:
                     content.append(call)
+            elif b["type"] == "server" and not partial:
+                content.append(ServerBlock(self._server_data(b), self.origin))
         return Message(
             role="assistant", content=content, stop_reason=stop_reason, usage=usage,
             model=self.model, provider=self.provider, error=error,

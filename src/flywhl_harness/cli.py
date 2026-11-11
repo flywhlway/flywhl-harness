@@ -151,6 +151,7 @@ async def terminal_approval(rec) -> ApprovalDecision:
 IMPLICIT_ENV_KEYS = frozenset({k for p in PROFILES.values() for k in p.key_env} | {
     "FLYWHL_MODEL", "FLYWHL_FALLBACK_MODELS", "LLM_PRIMARY_MODEL", "LLM_FALLBACK_MODEL",
     "FLYWHL_THINKING", "FLYWHL_REASONING_EFFORT", "FLYWHL_CNY_PER_USD",
+    "BOCHA_API_KEY",   # 联网搜索后端的密钥，与模型密钥同类；端点只认用户配置
 })
 
 
@@ -448,7 +449,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     h = Harness(_config(args))
     live = h.provider if args.fork_at is not None else None
     rep = await replay_run(h.store, args.run_id, config=h.config, live=live, live_model=h.model,
-                           fork_at=args.fork_at, base_tools=h.tools)
+                           fork_at=args.fork_at, base_tools=h.tools, allow_web=bool(getattr(args, "allow_web", False)))
     print(json.dumps(rep.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
@@ -562,6 +563,8 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("replay", parents=[common], help="回放运行")
     sp.add_argument("run_id")
     sp.add_argument("--fork-at", type=int, help="从第 N 次模型调用起改用当前配置的模型")
+    sp.add_argument("--allow-web", action="store_true",
+                    help="分叉之后录制里没有同参数结果的联网调用真的去联网（默认返回 dry-run）")
     sp.set_defaults(fn=cmd_replay)
     sp = sub.add_parser("trace", parents=[common], help="导出轨迹")
     sp.add_argument("run_id")

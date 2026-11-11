@@ -18,6 +18,7 @@ from ..cancel import CancelToken
 from ..runtime.retry import CircuitBreaker, RetryPolicy
 from .base import ErrorKind, ModelRequest, Provider, ProviderError, StreamEvent
 from .models import ModelInfo
+from .native import NATIVE_SPECS, matches
 
 # 这些错误换一个模型也许能成功；上下文超长/参数非法换模型也没用（上下文超长交给 Loop 去压缩）
 _FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK,
@@ -62,9 +63,13 @@ class ResilientProvider(Provider):
             if not breaker.allow():
                 last = ProviderError(ErrorKind.OVERLOADED, f"{provider.name}/{model} 熔断中", provider=provider.name)
                 continue
-            if i > 0:
-                yield StreamEvent("notice", info={"code": "fallback", "text": f"降级到 {provider.name}/{model}"})
             sub = req if i == 0 else replace(req, model=model)
+            if i > 0:
+                info = {"code": "fallback", "text": f"降级到 {provider.name}/{model}"}
+                if req.native_search:   # 备用的一家对得上同一份声明（同一端点上的另一个已确认模型）时，联网照常
+                    spec = NATIVE_SPECS.get(req.native_search)
+                    info["native_kept"] = spec is not None and matches(spec, provider, model)
+                yield StreamEvent("notice", info=info)
             attempt = 0
             while True:
                 emitted = False

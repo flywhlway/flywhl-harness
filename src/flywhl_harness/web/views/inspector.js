@@ -131,6 +131,18 @@ function renderOverview(p, V, app) {
   const tokens = fmt.tokTotal(usage);
   const maxTok = u.max_total_tokens || budget.max_total_tokens || 0;
   const maxCost = u.max_cost_usd || budget.max_cost_usd || 0;
+  // 联网计数：开了联网的会话才有。取值顺序同上：实时 usage → result → checkpoint.budget
+  const pick = (k) => u[k] ?? res[k] ?? ck[k];
+  const webCap = V.detail?.session?.meta?.capabilities?.web || "off";
+  const webOn = webCap !== "off" || pick("web_searches") != null;
+  const lim = app.info?.capabilities?.web?.limits || {};
+  const toolCost = Number(pick("tool_cost_usd") || 0);
+  const modelCost = Number(usage.cost_usd || 0);
+  const webMeters = webOn ? `
+      ${meter("联网搜索", pick("web_searches") || 0, u.max_web_searches ?? lim.searches)}
+      ${webCap === "fetch" || pick("web_fetches") ? meter("网页读取", pick("web_fetches") || 0, u.max_web_fetches ?? lim.fetches) : ""}` : "";
+  const costText = toolCost ? `模型 ${fmt.money(modelCost)} + 联网 ${fmt.money(toolCost)}${maxCost ? " / " + fmt.money(maxCost) : ""}`
+    : `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}`;
 
   p.innerHTML = `
     <div class="panel-section">
@@ -148,7 +160,7 @@ function renderOverview(p, V, app) {
       ${meter("轮次", u.turns ?? res.turns ?? ck.turns ?? 0, u.max_turns ?? budget.max_turns)}
       ${meter("工具调用", u.tool_calls ?? res.tool_calls ?? ck.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
       ${meter("Token", tokens, maxTok, { text: `${fmt.k(fmt.tokIn(usage))} 入${usage.cache_read_tokens ? `（缓存 ${fmt.k(usage.cache_read_tokens)}）` : ""} · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
-      ${meter("费用", usage.cost_usd || 0, maxCost, { text: `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}` })}
+      ${meter("费用", modelCost + toolCost, maxCost, { text: costText })}${webMeters}
     </div>
     <div class="panel-section">
       <div class="panel-title">状态流转<span class="aside">CAS 迁移，含原因</span></div>

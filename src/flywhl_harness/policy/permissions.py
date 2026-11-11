@@ -398,7 +398,8 @@ def grant_for(tool: Tool, args: dict[str, Any]) -> Rule:
             return Rule(Decision.ALLOW, "bash", _glob_literal(exact), "session")
         prefix = " ".join(words[:2]) if len(words) > 1 else (words[0] if words else "")
         return Rule(Decision.ALLOW, "bash", f"{prefix}*", "session")
-    if tool.name in _FILE_TOOLS and target:
+    if (tool.name in _FILE_TOOLS or tool.egress) and target:
+        # 联网工具同样按字面授权：批准读一个网址，不能变成放行之后所有网址（fetch_scope 就白设了）
         return Rule(Decision.ALLOW, tool.name, _glob_literal(target), "session")
     return Rule(Decision.ALLOW, tool.name, None, "session")
 

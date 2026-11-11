@@ -41,6 +41,13 @@ class Budget:
         self.turns = 0
         self.tool_calls = 0
         self.usage = Usage()
+        # 联网工具的次数与费用（模型费用之外的支出）。只有开了联网的会话才进 state / snapshot：没开时与以前逐字节相同
+        self.web: dict[str, int] | None = parent.web if parent is not None else None   # {"searches": 上限, "fetches": 上限}
+        self.web_searches = 0
+        self.web_fetches = 0
+        self.tool_cost_usd = 0.0
+        # 在途的联网调用（"run_id:call_id" → op），只用顶层预算上的这一份：并行批和并发子代理彼此看得到占位
+        self.web_inflight: dict[str, str] = {}
         self._soft_warned: set[str] = set()
 
     # ------------------------------------------------------------------ 记账
@@ -59,11 +66,38 @@ class Budget:
         if self.parent is not None:
             self.parent.charge_tool(n)
 
+    def charge_web(self, op: str, *, counted: bool = True, cost_usd: float = 0.0) -> None:
+        """联网工具一次调用的记账：``counted`` 计入次数（缓存命中、没发出去的不算），``cost_usd`` 计入费用上限。"""
+        if counted:
+            if op == "fetch":
+                self.web_fetches += 1
+            else:
+                self.web_searches += 1
+        self.tool_cost_usd = round(self.tool_cost_usd + cost_usd, 8)
+        if self.parent is not None:
+            self.parent.charge_web(op, counted=counted, cost_usd=cost_usd)
+
+    def enable_web(self, max_searches: int, max_fetches: int) -> "Budget":
+        self.web = {"searches": int(max_searches), "fetches": int(max_fetches)}
+        return self
+
+    def root(self) -> "Budget":
+        """顶层预算：联网次数上限按整次运行算，子代理的调用累计到这里，剩余次数也要从这里看。"""
+        b = self
+        while b.parent is not None:
+            b = b.parent
+        return b
+
+    @property
+    def cost_usd(self) -> float:
+        """模型 + 工具的总花费：费用上限管的是“这次最多花多少钱”。"""
+        return round(self.usage.cost_usd + self.tool_cost_usd, 8)
+
     def child(self, limits: BudgetConfig | None = None) -> "Budget":
         """为子代理切出预算：不超过父预算的剩余额度。"""
         lim = limits or BudgetConfig(max_turns=20, max_tool_calls=60)
         if self.limits.max_cost_usd is not None:
-            remain = max(0.0, self.limits.max_cost_usd - self.usage.cost_usd)
+            remain = max(0.0, self.limits.max_cost_usd - self.cost_usd)
             lim.max_cost_usd = min(lim.max_cost_usd or remain, remain)
         if self.limits.max_total_tokens is not None:
             remain_t = max(0, self.limits.max_total_tokens - self.usage.total_tokens)
@@ -85,7 +119,8 @@ class Budget:
         if lim.max_total_tokens:
             r["tokens"] = (self.usage.total_tokens / lim.max_total_tokens, f"token {self.usage.total_tokens}/{lim.max_total_tokens}")
         if lim.max_cost_usd:
-            r["cost"] = (self.usage.cost_usd / lim.max_cost_usd, f"费用 ${self.usage.cost_usd:.4f}/${lim.max_cost_usd}")
+            extra = f"（含联网 ${self.tool_cost_usd:.4f}）" if self.tool_cost_usd else ""
+            r["cost"] = (self.cost_usd / lim.max_cost_usd, f"费用 ${self.cost_usd:.4f}/${lim.max_cost_usd}{extra}")
         if lim.max_wall_seconds:
             r["wall"] = (self.elapsed / lim.max_wall_seconds, f"耗时 {self.elapsed:.0f}s/{lim.max_wall_seconds:.0f}s")
         return r
@@ -125,8 +160,17 @@ class Budget:
     # ------------------------------------------------------------------ 跨暂停 / 崩溃延续
     def state(self) -> dict:
         """可持久化的预算状态：暂停恢复、崩溃接管后从这里继续计数，而不是从零开始（否则反复暂停就能绕过限额）。"""
-        return {"turns": self.turns, "tool_calls": self.tool_calls, "usage": self.usage.to_dict(),
-                "elapsed": round(self.elapsed, 3)}
+        st = {"turns": self.turns, "tool_calls": self.tool_calls, "usage": self.usage.to_dict(),
+              "elapsed": round(self.elapsed, 3)}
+        st.update(self.web_counts())
+        return st
+
+    def web_counts(self) -> dict:
+        """联网计数。开着联网，或者已经有计数时才输出：暂停时把会话收紧到 off 再恢复，``web`` 没了但花过的钱还在，
+        丢掉就会在下一个检查点归零、少算费用上限。从没联网过的运行返回空，状态与以前一样。"""
+        if self.web is None and not (self.web_searches or self.web_fetches or self.tool_cost_usd):
+            return {}
+        return {"web_searches": self.web_searches, "web_fetches": self.web_fetches, "tool_cost_usd": self.tool_cost_usd}
 
     def restore(self, st: dict | None) -> "Budget":
         if st:
@@ -134,16 +178,23 @@ class Budget:
             self.tool_calls = int(st.get("tool_calls", 0))
             self.usage = Usage(**st["usage"]) if st.get("usage") else Usage()
             self.started = self.clock() - float(st.get("elapsed", 0))  # 暂停期间不计入墙钟
+            self.web_searches = int(st.get("web_searches", 0))
+            self.web_fetches = int(st.get("web_fetches", 0))
+            self.tool_cost_usd = float(st.get("tool_cost_usd", 0.0))
         return self
 
     def snapshot(self) -> dict:
         lim = self.limits
-        return {
+        snap = {
             "turns": self.turns, "max_turns": lim.max_turns,
             "tool_calls": self.tool_calls, "max_tool_calls": lim.max_tool_calls,
             "usage": self.usage.to_dict(), "max_total_tokens": lim.max_total_tokens,
             "max_cost_usd": lim.max_cost_usd, "elapsed": round(self.elapsed, 2), "max_wall_seconds": lim.max_wall_seconds,
         }
+        snap.update(self.web_counts())
+        if self.web is not None:
+            snap.update(max_web_searches=self.web["searches"], max_web_fetches=self.web["fetches"])
+        return snap
 
 
 @dataclass

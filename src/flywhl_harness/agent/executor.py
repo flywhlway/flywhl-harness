@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator
 
 from .._utils import clip, now, short_hash
@@ -26,7 +26,7 @@ from ..cancel import RunCancelled
 from ..events import E, Event
 from ..policy.approvals import OUTSIDE_BY
 from ..policy.hooks import HookEvent, HookInput
-from ..policy.permissions import Decision, grant_for, strictest
+from ..policy.permissions import Decision, PermissionResult, grant_for, strictest
 from ..runtime.workspace import CredentialPath, PathEscape
 from ..tools.base import Effect, Tool, ToolContext, ToolResult, TransientToolError
 from ..tools.schema import format_errors, validate
@@ -185,8 +185,12 @@ class ToolExecutor:
                 publish(E.NOTICE, {"level": "info", "code": "recover_reexecute",
                                    "text": f"{call.name} 结果未知，但它是只读/幂等操作，将用同一幂等键重新执行"})
 
+        # ---- 会话能力位：联网关掉了就是“不存在”，不是“要审批”，所以在权限判定之前拒绝 ----
+        if tool.egress and (denied := self._capability_denied(tool)) is not None:
+            return done(ToolResult.error(denied), "denied")
+
         # ---- 权限 + PreToolUse hooks ----
-        perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+        perm = self._evaluate(tool, args, publish)
         decision, reason = perm.decision, perm.reason
         hook_asked = False
         if rc.hooks.has(HookEvent.PRE_TOOL_USE):
@@ -198,7 +202,7 @@ class ToolExecutor:
                 if errs:
                     return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                 args = new_args
-                perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 改写后必须重新判定
+                perm = self._evaluate(tool, args)  # 改写后必须重新判定
                 decision, reason = perm.decision, perm.reason
             if out.decision in ("allow", "ask", "deny"):
                 hook_asked = out.decision == "ask"      # 守卫要人确认：无人值守时也不按规则自动批准
@@ -261,7 +265,7 @@ class ToolExecutor:
                 if errs:
                     return done(ToolResult.error("审批人修改后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                 args = new_args
-                recheck = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 防 TOCTOU
+                recheck = self._evaluate(tool, args)  # 防 TOCTOU
                 if recheck.decision == Decision.DENY:
                     return done(ToolResult.error(f"修改后的参数被权限策略拒绝：{recheck.reason}"), "denied")
                 if recheck.human_only and not perm.human_only:   # 审批卡上没写的事不算批准过
@@ -278,7 +282,7 @@ class ToolExecutor:
                         if errs:
                             return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                         # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略，命中拒绝（灾难性命令、凭证、deny 规则）就不执行
-                        final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+                        final = self._evaluate(tool, args)
                         if final.decision == Decision.DENY:
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
                         if final.human_only:   # 人批准的是改写之前的那条命令
@@ -306,6 +310,7 @@ class ToolExecutor:
         approval_wait_ms = int((t_exec - t0) * 1000)
         result, status = await self._invoke(tool, args, ctx)
         exec_ms = int((time.monotonic() - t_exec) * 1000)
+        self._settle_web(call, result)
 
         # ---- PostToolUse hooks ----
         if rc.hooks.has(HookEvent.POST_TOOL_USE):
@@ -334,6 +339,50 @@ class ToolExecutor:
         if decision == Decision.ASK:
             msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]
         return msg
+
+    # ================================================================== 联网工具
+    def _capability_denied(self, tool: Tool) -> str | None:
+        from ..config import web_rank
+        from ..runtime.capabilities import current_web
+
+        cap = current_web(self.rc.store, self.rc.session_id)
+        need = getattr(tool, "web_level", "search")
+        if web_rank(cap) >= web_rank(need):
+            return None
+        now_ = "已关闭联网" if cap == "off" else "只允许联网搜索、不能读取网页"
+        return (f"本会话{now_}，{tool.name} 不可用。联网能力要在开工前选择，开工后只能收紧：需要的话请告诉用户新建会话，"
+                "或者用已有信息继续。")
+
+    def _evaluate(self, tool: Tool, args: dict[str, Any], publish: Any = None) -> PermissionResult:
+        """权限判定，再叠加联网工具自己的范围与外传检查（只收紧：deny 直接拒绝，ask 把放行改成要确认）。"""
+        rc = self.rc
+        perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+        pre = getattr(tool, "precheck", None) if tool.egress else None
+        if pre is None or perm.decision == Decision.DENY:
+            return perm
+        verdict, why, code = pre(args, rc)
+        if verdict == "deny":
+            if code and publish is not None:   # 不带参数：被拦下的正是参数里疑似密钥的那段，通知不能再抄一遍
+                publish(E.NOTICE, {"level": "warn", "code": code, "text": f"{tool.name} 调用被拦截：{why}"})
+            return replace(perm, decision=Decision.DENY, reason=why)
+        if verdict == "ask" and rc.tainted and getattr(rc.approvals, "on_ask", "wait") == "allow":
+            # --yes 自动批准所有 ask。会话读过不可信内容后，没出现过的网址正是注入外传的通道，
+            # 自动批准就等于 fetch_scope = public；没读过不可信内容时照常按 --yes 放行
+            return replace(perm, decision=Decision.DENY,
+                           reason=f"{why}。会话读取过不可信内容，--yes 不自动批准这类读取：请先 web_search 找到它，或请用户把网址发过来")
+        if verdict == "ask" and perm.decision == Decision.ALLOW:
+            return replace(perm, decision=Decision.ASK, reason=why)
+        return perm
+
+    def _settle_web(self, call: ToolCall, result: ToolResult) -> None:
+        """联网工具的记账：按结果里的 ``details["web"]`` 计次数和费用，同时释放并行批里的占位。
+        回放时结果来自录制，按同样的数据记账，预算走向与录制时一致。"""
+        rc = self.rc
+        rc.budget.root().web_inflight.pop(f"{rc.run_id}:{call.id}", None)
+        web = (result.details or {}).get("web")
+        if isinstance(web, dict) and (web.get("counted") or web.get("cost_usd")):
+            rc.budget.charge_web(str(web.get("op") or "search"), counted=bool(web.get("counted")),
+                                 cost_usd=float(web.get("cost_usd") or 0.0))
 
     # ================================================================== 执行：超时 / 取消 / 瞬时重试
     async def _invoke(self, tool: Tool, args: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, str]:

@@ -578,6 +578,27 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .sub-log div { display: flex; gap: 6px; align-items: center; }
 .kv-inline { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: var(--fs-xs); color: var(--text-2); }
 .kv-inline b { color: var(--text-3); font-weight: 500; margin-right: 4px; }
+.kv-inline a { color: var(--brand-text); overflow-wrap: anywhere; }
+
+/* 联网：来源列表、composer 开关、工具页说明 */
+.web-sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: var(--fs-sm); }
+.web-sources li { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.web-sources .n { color: var(--text-3); font-size: var(--fs-xs); margin-top: 2px; flex: none; }
+.web-sources .src { display: grid; gap: 1px; min-width: 0; }
+.web-sources a { color: var(--brand-text); font-weight: 500; overflow-wrap: anywhere; }
+.web-sources .site { font-size: var(--fs-xs); color: var(--text-2); }
+.web-sources .url { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-web { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); }
+.native-web .queries { margin: 0 0 8px; font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.md a.cite { font-size: 0.85em; text-decoration: none; color: var(--brand-text); padding: 0 1px; }
+.md a.cite:hover { text-decoration: underline; }
+.web-chip .web-val { margin-left: 4px; color: var(--text-2); }
+.web-chip[data-web="search"] .web-val, .web-chip[data-web="fetch"] .web-val { color: var(--brand-text); font-weight: 500; }
+.web-chip[aria-disabled="true"] { opacity: .55; }
+.web-note { margin-bottom: 12px; }
+.web-note p { margin: 0 0 6px; }
+.web-note .plain-list { gap: 4px; }
+.web-note .plain-list li { display: flex; gap: 6px; align-items: center; font-size: var(--fs-sm); }
 
 /* 审批卡片 */
 .approval {
@@ -812,10 +833,10 @@ svg.i.xl { width: 28px; height: 28px; stroke-width: 1.5; }
 .plain-list .cmd { margin-top: 6px; padding: 6px 8px; border-radius: var(--r-md); background: var(--surface-2); font: var(--fs-xs)/1.5 var(--font-mono); color: var(--text-2); overflow-wrap: anywhere; }
 
 .posture { list-style: none; margin: -1px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); }
-.posture li { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 3px 10px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--border); }
+.posture li { display: grid; grid-template-columns: 20px auto minmax(0, 1fr); gap: 3px 10px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--border); }
 .posture .st { grid-row: span 2; align-self: start; margin-top: 1px; }
 .posture .st.success { color: var(--success); } .posture .st.warning { color: var(--warning); } .posture .st.danger { color: var(--danger); }
-.posture .lb { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 600; min-width: 0; }
+.posture .lb { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
 .posture .lb svg { color: var(--text-3); }
 .posture .v { font-size: var(--fs-sm); color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
 .posture li.warn .v { color: var(--warning); } .posture li.bad .v { color: var(--danger); font-weight: 600; }

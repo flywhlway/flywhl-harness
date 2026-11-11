@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from .._utils import canonical_json
 from ..cancel import CancelToken
 from ..config import BudgetConfig, ContextConfig, HarnessConfig, LoopGuardConfig
 from ..llm.base import ModelRequest, Provider, StreamEvent
@@ -40,6 +41,7 @@ from ..runtime.workspace import IGNORED_DIRS
 from ..tools import default_tools
 from ..tools.base import Effect, Tool, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
+from ..tools.schema import validate
 from ..types import Message, MsgKind
 from .trace import export_trajectory
 
@@ -51,7 +53,8 @@ SECTIONS = {"context": ContextConfig, "budget": BudgetConfig, "loop_guard": Loop
 class RecordedTool(Tool):
     """按 call_id 返回录制的工具结果；没有录制结果时（分叉之后）委托给 fallback 或 dry-run。"""
 
-    def __init__(self, spec: dict[str, Any], recorded: dict[str, Message], fallback: Tool | None, dry_run_external: bool):
+    def __init__(self, spec: dict[str, Any], recorded: dict[str, Message], fallback: Tool | None, dry_run_external: bool,
+                 *, egress: bool = False, by_args: dict[str, Message] | None = None, allow_web: bool = False):
         self.name = spec["name"]
         self.description = spec["description"]
         self.parameters = spec["parameters"]
@@ -60,14 +63,38 @@ class RecordedTool(Tool):
         self.dry_run_external = dry_run_external
         self.effect = fallback.effect if fallback else Effect.READ
         self.interruptible = True
+        # 联网工具：录制时联网的这里照样标出来（能力门、工具名单按它算），结果仍来自录制，不发请求
+        self.egress = egress or bool(fallback is not None and fallback.egress)
+        self.web_level = getattr(fallback, "web_level", "fetch" if self.name == "web_fetch" else "search")
+        self.untrusted_output = self.egress or bool(fallback is not None and fallback.untrusted_output)
+        self.by_args = by_args or {}
+        self.allow_web = allow_web
 
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         return self.fallback.effect_in(args, workspace) if self.fallback else Effect.READ
+
+    def precheck(self, args: dict[str, Any], rc: Any) -> tuple[str, str, str | None]:
+        """联网工具的范围与外传检查。用录制结果或 dry-run 的调用不出网，照常放行；``--allow-web`` 下真的要联网的，
+        交给真实工具判定，读取范围、外传检查一条不少。"""
+        if not self.egress or _args_key(self.name, args) in self.by_args or not self.allow_web:
+            return "allow", "", None
+        pre = getattr(self.fallback, "precheck", None)
+        if pre is None:
+            return "deny", f"没有可用的 {self.name}，分叉回放不能联网", None
+        return pre(args, rc)
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         rec = self.recorded.get(ctx.call_id)
         if rec is not None:
             return ToolResult(rec.text, rec.is_error, {**(rec.details or {}), "replayed": True})
+        if self.egress:
+            # 分叉之后：录制里有同参数的结果就复用；否则默认不联网，--allow-web 才真的去搜
+            same = self.by_args.get(_args_key(self.name, args))
+            if same is not None:
+                return ToolResult(same.text, same.is_error, {**(same.details or {}), "replayed": True, "reused": True})
+            if not self.allow_web or self.fallback is None:
+                return ToolResult(f"[dry-run] {self.name} —— 分叉回放默认不联网（加 --allow-web 才真的联网）",
+                                  details={"dry_run": True})
         if self.fallback is None:
             return ToolResult.error(f"[回放] 没有 {self.name} 的录制结果，且无可用的真实工具")
         if self.dry_run_external and self.fallback.effect_in(args, str(ctx.workspace.root)) == Effect.EXTERNAL:
@@ -143,7 +170,29 @@ def _recorded_config(settings: dict[str, Any]) -> HarnessConfig:
             setattr(cfg, name, settings[name])
     cfg.permissions = replace(cfg.permissions, sandbox=settings.get("sandbox", cfg.permissions.sandbox),
                               sandbox_network=settings.get("sandbox_network", cfg.permissions.sandbox_network))
+    web = settings.get("web") or {}
+    for name in ("max_searches_per_run", "max_fetches_per_run"):   # 只影响预算快照里的上限；联网本身仍然关着
+        if isinstance(web.get(name), int):
+            setattr(cfg.web, name, web[name])
     return cfg
+
+
+def _args_key(name: str, args: dict[str, Any]) -> str:
+    return name + canonical_json(args)
+
+
+def _recorded_web(settings: dict[str, Any], tools: list[str]) -> dict[str, Any] | None:
+    """回放会话的联网能力：录制时记了就用记的，老轨迹按工具名单推断。没有联网工具时返回 None，会话元数据与以前一样。"""
+    web = settings.get("web") or {}
+    level = web.get("capability")
+    if level not in ("search", "fetch"):
+        level = "fetch" if "web_fetch" in tools else "search" if "web_search" in tools else None
+    if level is None:
+        return None
+    cap = {"web": level, "requested": level, "reason": "回放：取录制时的能力"}
+    if isinstance(web.get("native"), str):   # 模型侧联网：请求指纹里有它，回放也要带上才对得上
+        cap.update(via="native", native=web["native"])
+    return cap
 
 
 def _external_inputs(msgs: list[Message], kinds: frozenset[str]) -> dict[int, list[str]]:
@@ -161,18 +210,19 @@ def _external_inputs(msgs: list[Message], kinds: frozenset[str]) -> dict[int, li
 async def replay_run(
     store: Store, run_id: str, *, config: HarnessConfig | None = None, live: Provider | None = None,
     live_model: str | None = None, fork_at: int | None = None, base_tools: ToolRegistry | None = None,
-    keep_workspace: bool = True,
+    keep_workspace: bool = True, allow_web: bool = False,
 ) -> ReplayReport:
-    """回放一次 Run。``fork_at=None`` 为确定性回放；否则从第 fork_at 次模型调用起切换到 live provider。"""
+    """回放一次 Run。``fork_at=None`` 为确定性回放；否则从第 fork_at 次模型调用起切换到 live provider。
+    ``allow_web`` 只对分叉之后、录制里没有同参数结果的联网调用生效。"""
     return await replay_trajectory(export_trajectory(store, run_id, include_children=False), config=config, live=live,
                                    live_model=live_model, fork_at=fork_at, base_tools=base_tools,
-                                   keep_workspace=keep_workspace)
+                                   keep_workspace=keep_workspace, allow_web=allow_web)
 
 
 async def replay_trajectory(
     traj: dict[str, Any], *, config: HarnessConfig | None = None, live: Provider | None = None,
     live_model: str | None = None, fork_at: int | None = None, base_tools: ToolRegistry | None = None,
-    keep_workspace: bool = True,
+    keep_workspace: bool = True, allow_web: bool = False,
 ) -> ReplayReport:
     """从导出的轨迹回放，不需要原来的数据库。不给 ``config`` 时用轨迹里记下的设置；给了就以它为准，用来看改设置会不会分叉。
 
@@ -182,7 +232,7 @@ async def replay_trajectory(
     ws = await asyncio.to_thread(_copy_workspace, traj["session"]["workspace"])   # 大工作区复制很慢，不能卡住事件循环
     try:
         rep = await _replay_in(ws, traj, config=config, live=live, live_model=live_model, fork_at=fork_at,
-                               base_tools=base_tools)
+                               base_tools=base_tools, allow_web=allow_web)
     except BaseException:
         shutil.rmtree(ws, ignore_errors=True)
         raise
@@ -194,9 +244,10 @@ async def replay_trajectory(
 
 async def _replay_in(
     ws: str, traj: dict[str, Any], *, config: HarnessConfig | None, live: Provider | None,
-    live_model: str | None, fork_at: int | None, base_tools: ToolRegistry | None,
+    live_model: str | None, fork_at: int | None, base_tools: ToolRegistry | None, allow_web: bool = False,
 ) -> ReplayReport:
     from ..runtime.manager import Harness
+    from ..tools.web import web_specs
 
     run_id = traj["run"]["id"]
     recorded = traj["run"].get("config") or {}
@@ -219,13 +270,23 @@ async def _replay_in(
             cfg.verify_todos = False
     base = base_tools if base_tools is not None else default_tools(cfg, Path(cfg.data_dir))
     specs = {t.name: t for t in base}
+    static = web_specs()   # 联网没启用时也能按录制时的规格重建，指纹不因此分叉
+    calls = {c.id: c for m in assistant for c in m.tool_calls}
+    kept = recorded_tools if fork_at is None else \
+        {k: v for k, v in recorded_tools.items() if _call_index(assistant, k) < (fork_at or 0)}
+    by_args: dict[str, Message] = {}
+    for k, v in kept.items():   # 执行器看到的是补过默认值的参数：比对前按同一份规格补齐
+        c = calls.get(k)
+        if c is not None and c.name in static:
+            params = (specs[c.name].parameters if c.name in specs else static[c.name]["parameters"])
+            by_args[_args_key(c.name, validate(params, c.arguments)[0])] = v
     registry = ToolRegistry()
-    for name in traj["session"]["tools"] or []:
+    session_tools = traj["session"]["tools"] or []
+    for name in session_tools:
         real = specs.get(name)
-        spec = real.spec() if real else {"name": name, "description": "", "parameters": {"type": "object"}}
-        registry.register(RecordedTool(spec, recorded_tools if fork_at is None else
-                                       {k: v for k, v in recorded_tools.items() if _call_index(assistant, k) < (fork_at or 0)},
-                                       real, dry_run_external=True))
+        spec = real.spec() if real else static.get(name) or {"name": name, "description": "", "parameters": {"type": "object"}}
+        registry.register(RecordedTool(spec, kept, real, dry_run_external=True, egress=name in static,
+                                       by_args=by_args, allow_web=allow_web))
     kinds = EXTERNAL_INPUTS | ({MsgKind.STOP_FEEDBACK} if verified and fork_at is None else frozenset())
     inputs = _external_inputs(msgs, kinds)
     rp = ReplayProvider(assistant, fps, summaries=[c["summary"] for c in traj.get("compactions") or []])
@@ -235,7 +296,13 @@ async def _replay_in(
     seeded = sum(1 for e in traj.get("history") or [] if e["kind"] == "message")
     try:
         s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass",
-                             project_context=traj["session"].get("project_context"))   # 模型当时看到的，从轨迹里取
+                             project_context=traj["session"].get("project_context"),   # 模型当时看到的，从轨迹里取
+                             capabilities=_recorded_web(settings, session_tools))
+        if s.meta.get("tools") != list(session_tools):
+            # 工具名单照录制的来：开工后收紧过的会话，录制时联网工具还在名单里（收紧只拦调用、不撤规格），
+            # 按收紧后的能力重新筛会少一个规格，第一步就分叉。执行门照样按收紧后的能力拒绝
+            h.store.update_session(s.id, meta={**s.meta, "tools": list(session_tools)})
+            s = h.store.get_session(s.id)
         for e in traj.get("history") or []:
             h.store.append_entry(s.id, e["kind"], e["payload"], entry_id=e["id"])
         if settings.get("clear_watermark"):

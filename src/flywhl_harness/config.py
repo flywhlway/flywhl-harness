@@ -106,6 +106,114 @@ class PermissionConfig:
             auto_approve_rule(r)    # 写错了在加载时就报出来，不要等到第一次审批
 
 
+WEB_LEVELS = ("off", "search", "fetch")         # 会话联网能力：fetch 包含 search
+FETCH_SCOPES = ("cited", "ask", "public")       # 由严到松
+WEB_BACKENDS = ("deepseek", "bocha", "searxng")
+FETCH_BACKENDS = ("deepseek", "direct")
+# 只能调低的数值项：项目配置写得比用户配置大就丢弃
+_WEB_LOWER_ONLY = ("max_searches_per_run", "max_fetches_per_run", "max_results", "result_chars", "fetch_chars",
+                   "fetch_max_bytes", "timeout", "cache_ttl")
+WEB_BACKEND_KEYS = ("api_key_env", "price_per_call", "send_question", "min_rerank_score", "endpoint", "allow_private")
+
+
+def web_rank(level: str) -> int:
+    return WEB_LEVELS.index(level) if level in WEB_LEVELS else 0
+
+
+# 打开供应商侧联网的 extra_body 键（百炼、OpenAI 兼容的 web_search_options 等）。搜索发生在模型供应商那里，
+# 结果直接进模型上下文：harness 看不到、不计数、不审计。识别出来只为告警和置污点，不阻止
+NATIVE_SEARCH_KEYS = ("enable_search", "search_options", "forced_search", "web_search_options", "enable_source",
+                      "enable_citation")
+
+
+def native_web_search(extra_body: dict[str, Any] | None) -> list[str]:
+    """``extra_body`` 里打开模型侧联网的字段名（只看值为真的；``tools`` 里 type 以 web_search 开头的也算）。"""
+    body = extra_body or {}
+    hits = [k for k in NATIVE_SEARCH_KEYS if body.get(k) not in (None, False, 0, "", {}, [])]
+    tools = body.get("tools")
+    if isinstance(tools, list) and any(isinstance(t, dict) and str(t.get("type", "")).startswith("web_search") for t in tools):
+        hits.append("tools[].type=web_search")
+    return hits
+
+
+@dataclass
+class WebConfig:
+    """内置联网工具 web_search / web_fetch。默认关闭；开启后每个会话在开工前选能力（off / search / fetch），开工后只能收紧。
+
+    后端按 ``backends`` 的顺序使用，鉴权、余额、服务故障时换下一家。密钥只写环境变量名（``[web.backend.<名字>]``
+    的 ``api_key_env``），不进 /api 接口、事件和日志。项目配置里的 ``[web]`` 只能收紧，见 ``_keep_web_tight``。
+    """
+
+    enabled: bool = False
+    default: str = "off"                       # 新会话默认能力
+    backends: list[str] = field(default_factory=lambda: ["deepseek"])
+    fetch_backend: str = "deepseek"            # deepseek（服务端抓取）| direct（本机直连）
+    max_searches_per_run: int = 20
+    max_fetches_per_run: int = 10
+    max_results: int = 8                       # 单次搜索返回条数上限
+    result_chars: int = 6000                   # 单次搜索交给模型的总字符上限
+    fetch_chars: int = 20000                   # 单页正文交给模型的字符上限
+    fetch_max_bytes: int = 2_000_000           # 响应体（解压后）字节上限
+    fetch_scope: str = "ask"                   # cited | ask | public
+    fetch_allow: list[str] = field(default_factory=list)    # 额外自动放行读取的主机，写法同 permissions.network_allow
+    deny_domains: list[str] = field(default_factory=list)   # 搜索结果过滤 + 禁止读取，含子域名
+    timeout: float = 15.0
+    cache_ttl: float = 600.0                   # 同会话同参数的搜索结果缓存秒数，0 关闭
+    backend: dict[str, dict[str, Any]] = field(default_factory=dict)   # [web.backend.<名字>]
+    # 改用模型供应商自带的搜索（llm/native.py 里已确认的那几家）：会话开“搜索”时不注册 web_search，
+    # 搜索在供应商那边发生；主模型不在声明里时照常用内置工具
+    native: bool = False
+
+    def __post_init__(self) -> None:
+        check_web(self)
+
+
+def check_web(w: "WebConfig") -> "WebConfig":
+    """``[web]`` 写错在加载时就报错。_merge 用 setattr 赋值，不经过 __post_init__，所以加载完再调一次。"""
+    from .tools.egress import parse_rules   # 延迟导入：tools 依赖本模块
+
+    for k in ("enabled", "native"):
+        if not isinstance(getattr(w, k), bool):
+            raise ValueError(f"web.{k} 必须是 true 或 false，实际是 {getattr(w, k)!r}")
+    if w.default not in WEB_LEVELS:
+        raise ValueError(f"web.default 只能是 {'、'.join(WEB_LEVELS)}，实际是 {w.default!r}")
+    if w.fetch_scope not in FETCH_SCOPES:
+        raise ValueError(f"web.fetch_scope 只能是 {'、'.join(FETCH_SCOPES)}，实际是 {w.fetch_scope!r}")
+    if w.fetch_backend not in FETCH_BACKENDS:
+        raise ValueError(f"web.fetch_backend 只能是 {'、'.join(FETCH_BACKENDS)}，实际是 {w.fetch_backend!r}")
+    for b in _check_str_list("web.backends", w.backends):
+        if b not in WEB_BACKENDS:
+            raise ValueError(f"web.backends 里的 {b!r} 不认识（可选：{'、'.join(WEB_BACKENDS)}）")
+    for k in _WEB_LOWER_ONLY:
+        v = getattr(w, k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or (v == 0 and k not in ("cache_ttl",)):
+            raise ValueError(f"web.{k} 必须是正数，实际是 {v!r}")
+    parse_rules(_check_str_list("web.fetch_allow", w.fetch_allow))
+    for d in _check_str_list("web.deny_domains", w.deny_domains):
+        if not d.strip() or "/" in d:
+            raise ValueError(f"web.deny_domains 写主机名或域名（如 example.com），实际是 {d!r}")
+    if not isinstance(w.backend, dict):
+        raise ValueError(f"web.backend 必须是表，实际是 {w.backend!r}")
+    for name, spec in w.backend.items():
+        if name not in WEB_BACKENDS:
+            raise ValueError(f"[web.backend.{name}] 不认识（可选：{'、'.join(WEB_BACKENDS)}）")
+        if not isinstance(spec, dict):
+            raise ValueError(f"[web.backend.{name}] 必须是表")
+        unknown = sorted(set(spec) - set(WEB_BACKEND_KEYS))
+        if unknown:
+            raise ValueError(f"[web.backend.{name}] 有未知配置项：{', '.join(unknown)}（可选：{', '.join(WEB_BACKEND_KEYS)}）")
+        price = spec.get("price_per_call", 0)
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0:
+            raise ValueError(f"[web.backend.{name}].price_per_call 必须是非负数，实际是 {price!r}")
+        for k in ("send_question", "allow_private"):
+            if not isinstance(spec.get(k, False), bool):
+                raise ValueError(f"[web.backend.{name}].{k} 必须是 true 或 false")
+        for k in ("api_key_env", "endpoint"):
+            if k in spec and not isinstance(spec[k], str):
+                raise ValueError(f"[web.backend.{name}].{k} 必须是字符串")
+    return w
+
+
 DURABILITY_LEVELS = ("full", "normal")
 
 
@@ -190,6 +298,7 @@ class HarnessConfig:
     permissions: PermissionConfig = field(default_factory=PermissionConfig)
     hooks: list[HookConfig] = field(default_factory=list)
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    web: WebConfig = field(default_factory=WebConfig)
 
     def __post_init__(self) -> None:
         check_durability(self.durability)
@@ -219,6 +328,7 @@ class HarnessConfig:
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
                 data = _no_self_trust(_only_turn_off(_keep_sandbox_on(data, project.resolve())), project.resolve())
+                data = _keep_web_tight(data, cfg.web, project.resolve())
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -250,6 +360,7 @@ class HarnessConfig:
             if pinned_provider(cfg.model) not in (None, explicit["provider"]):
                 cfg.model = None
         _merge(cfg, explicit)
+        check_web(cfg.web)
         return cfg
 
     def data_path(self) -> Path:
@@ -329,6 +440,7 @@ _SAFE_KEYS = frozenset({
     "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
+    "web",   # 先经过 _keep_web_tight：到这里只剩收紧的部分
 })
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任。
 # on_ask = deny 有一个例外：用户配置里写了 auto_approve 规则时，它会让这些规则替人批准，见 split_untrusted
@@ -389,6 +501,48 @@ def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
                       f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off、--network allow",
                       UntrustedConfigWarning, stacklevel=3)
     return out
+
+
+def _keep_web_tight(data: dict[str, Any], user: WebConfig, path: Path) -> dict[str, Any]:
+    """项目配置里的 ``[web]`` 只能收紧，信任过也一样：联网把工作区的内容送到第三方，开不开、送给谁是用户的决定。
+
+    - ``enabled``、``native`` 只能写 false；``default``、``fetch_scope`` 只能比用户配置更严；数值上限只能调低；
+    - ``backends``、``fetch_backend``、``[web.backend.*]``、``fetch_allow`` 一律丢弃：它们决定查询词和网址发给谁、
+      从哪台机器发出（``fetch_backend = "direct"`` 把抓取搬到本机）；
+    - ``deny_domains`` 与用户配置合并，只增不减。"""
+    spec = data.get("web")
+    if spec is None:
+        return data
+    if not isinstance(spec, dict):
+        return data   # 交给 _merge 报类型错误
+    dropped: list[str] = []
+    out: dict[str, Any] = {}
+    for k, v in spec.items():
+        if k in ("enabled", "native"):
+            ok = v is False   # native = true 会把查询词交给模型供应商：只认用户配置
+        elif k == "default":
+            ok = v in WEB_LEVELS and web_rank(v) <= web_rank(user.default)
+        elif k == "fetch_scope":
+            ok = v in FETCH_SCOPES and FETCH_SCOPES.index(v) <= FETCH_SCOPES.index(user.fetch_scope)
+        elif k in _WEB_LOWER_ONLY:
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v <= getattr(user, k)
+        elif k == "deny_domains":
+            ok = isinstance(v, list)
+            if ok:
+                v = list(dict.fromkeys([*user.deny_domains, *v]))
+        elif k in ("backends", "fetch_backend", "backend", "fetch_allow"):
+            ok = False
+        else:
+            ok = True   # 未知键交给 _merge 报错
+        if ok:
+            out[k] = v
+        else:
+            dropped.append(f"web.{k} = {v!r}")
+    if dropped:
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} 不生效：项目配置里的 [web] 只能收紧（关闭联网、调低上限、收窄读取范围、"
+                      f"增加禁止的域名），后端与密钥只认用户配置 {flywhl_home() / 'config.toml'} 或 -c 指定的文件",
+                      UntrustedConfigWarning, stacklevel=3)
+    return {**data, "web": out}
 
 
 def _no_self_trust(data: dict[str, Any], path: Path) -> dict[str, Any]:
