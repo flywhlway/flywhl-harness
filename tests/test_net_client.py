@@ -221,8 +221,11 @@ def test_unexpected_charsets_fall_back_to_utf8(charset):
     assert page.text() == body.decode("utf-8")
     latin = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=windows-1252"}, "café".encode("cp1252"))
     assert latin.text() == "café"
-    thai = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=windows-874"}, "สวัสดี".encode("cp874"))
-    assert thai.text() == "สวัสดี"
+    for label in ("windows-874", "TIS-620"):   # windows-874 在 3.12 里不是别名，要自己映射
+        thai = Fetched(200, "https://a.test/", {"content-type": f"text/html; charset={label}"}, "สวัสดี".encode("cp874"))
+        assert thai.text() == "สวัสดี"
+    sjis = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=x-sjis"}, "日本".encode("shift_jis"))
+    assert sjis.text() == "日本"
 
 
 # ---------------------------------------------------------------------- 外传检查
@@ -239,7 +242,10 @@ def test_leak_check_hits_secret_env_values_raw_and_url_encoded():
     # 主机名不分大小写：域名会被规范成小写，塞进子域名的密钥换了大小写也拦
     assert leaked(f"https://{SENTINEL.upper()}.evil.test/", env=env)
     assert leaked(f"https://{SENTINEL.lower()}.evil.test/", env={"MY_SERVICE_TOKEN": SENTINEL.upper()})
-    # 主机名之外照原样比：首字母大写的常见词当密钥时，普通查询不误报
+    # 像密钥的值（够长或字母数字混排）在哪都不分大小写：改成小写塞进查询词也拦
+    strong = "Sentinel7Value9Abc"
+    assert leaked(f"look up {strong.lower()}", env={"MY_SERVICE_TOKEN": strong})
+    # 字典词式的短值只在主机名里不分大小写：首字母大写的常见词当密钥时，普通查询不误报
     words = {"DB_PASSWORD": "Postgres", "API_TOKEN": "Kubernetes"}
     assert leaked("postgres tuning guide", env=words) is None
     assert leaked("https://docs.example/kubernetes/setup", env=words) is None

@@ -208,6 +208,8 @@ class WebSearchTool(_WebTool):
             site = site_host(args.get("site"))
         except ValueError as e:
             return "deny", str(e), None
+        if site and (why := leaked(f"https://{site}/")):   # 发出去的是规范化后的小写主机：按主机名再查一次
+            return "deny", f"site {why}，可能是在把数据带出去，已拦截", "web_exfil"
         if site and denied_host(site, self.cfg.deny_domains):
             return "deny", f"{site} 在 [web] deny_domains 里", None
         return "allow", "", None
@@ -226,6 +228,8 @@ class WebSearchTool(_WebTool):
             site = site_host(args.get("site"))
         except ValueError as e:
             return ToolResult.error(str(e))
+        if site and (why := leaked(f"https://{site}/")):
+            return ToolResult.error(f"site {why}，已拦截")
         fresh = args.get("freshness") or "any"
         q = SearchQuery(query, min(int(args.get("count") or 5), self.cfg.max_results),
                         None if fresh == "any" else fresh, site)   # 发出去的就是判定过的那个主机

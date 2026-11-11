@@ -81,9 +81,14 @@ _CHARSETS = {"utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32",
              "euc_kr", "cp949", "iso2022_kr", "koi8-r", "koi8-u", "cp866", "cp874", "tis-620", "mac-roman"}
 
 
+# 网页上常见、但 Python 3.12 不认或认成别的标签（WHATWG 编码表里的写法）
+_WEB_LABELS = {"windows-874": "cp874", "x-sjis": "shift_jis", "x-gbk": "gbk", "x-mac-roman": "mac-roman",
+               "x-euc-jp": "euc_jp", "x-cp1252": "cp1252", "iso-8859-11": "cp874"}
+
+
 def _text_charset(name: str) -> str:
     try:
-        canon = codecs.lookup(name).name
+        canon = codecs.lookup(_WEB_LABELS.get(name.lower(), name)).name
     except (LookupError, ValueError):
         return "utf-8"
     ok = canon in _CHARSETS or canon.startswith(("iso8859-", "cp125"))
