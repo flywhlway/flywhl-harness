@@ -132,12 +132,20 @@ async def test_site_on_the_deny_list_is_refused(ws):
     assert end["status"] == "denied" and "deny_domains" in end["content"] and net.requests == []
 
 
-@pytest.mark.parametrize("site", ["Mirror.SPAM.example.", "spam.example.", "bad site"])
+@pytest.mark.parametrize("site", ["Mirror.SPAM.example.", "spam.example.", "bad site", "https://spam.example",
+                                  "good.example?site:spam.example", "good.example/x", "good.example:8443"])
 async def test_site_is_canonicalized_before_the_deny_check(ws, site):
     net = web_net()
     h = make_web_harness(ws, [search_call("x", site=site), "好"], net, web__deny_domains=["spam.example"])
     end = tool_results((await h.run("x")).events, "web_search")[0]
     assert end["status"] == "denied" and net.requests == []
+
+
+async def test_search_sends_the_site_that_was_checked(ws):
+    net = web_net()
+    h = make_web_harness(ws, [search_call("httpx", site="Docs.Python.org."), "好"], net)
+    await h.run("x")
+    assert net.bodies(DS_SEARCH)[0]["query"].endswith("site:docs.python.org")
 
 
 # ---------------------------------------------------------------------- 读取范围

@@ -167,6 +167,23 @@ class _WebTool(Tool):
                                                            "web": {"op": self.op, "counted": False, "cost_usd": 0.0}})
 
 
+def site_host(raw: Any) -> str | None:
+    """``site`` 参数 → 规范化的主机名，判定和发送用同一个。只接受域名：带协议、路径、端口、查询串的都拒绝，
+    否则 ``good.com?site:evil.com`` 这类写法判定的是一个主机、发给搜索后端的是两个。"""
+    from ..net.client import WebError, canonical_url
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        canon, _, host, _ = canonical_url(f"https://{text}/")
+    except WebError:
+        raise ValueError("site 只能写域名，例如 docs.python.org") from None
+    if canon != f"https://{host}/":
+        raise ValueError("site 只能写域名，例如 docs.python.org")
+    return host
+
+
 class WebSearchTool(_WebTool):
     name = SEARCH_TOOL
     op = "search"
@@ -181,21 +198,18 @@ class WebSearchTool(_WebTool):
 
     def precheck(self, args: dict[str, Any], rc: "RunContext") -> tuple[str, str, str | None]:
         """(allow | deny, 原因, notice 代码)。查询词只做外传检查，范围由后端主机名单决定。"""
-        from ..net.client import WebError, canonical_url
         from ..net.exfil import leaked
         from ..net.search import denied_host
 
         text = f"{args.get('query', '')} {args.get('site') or ''}"
         if why := leaked(text):
             return "deny", f"查询词{why}，可能是在把数据带出去，已拦截", "web_exfil"
-        site = str(args.get("site") or "").strip().lower()
-        if site:
-            try:   # 与读取同一套规范化：evil.com.、全角写法都按 evil.com 判
-                site = canonical_url(f"https://{site}/")[2]
-            except WebError:
-                return "deny", "site 不是合法的域名", None
-            if denied_host(site, self.cfg.deny_domains):
-                return "deny", f"{site} 在 [web] deny_domains 里", None
+        try:
+            site = site_host(args.get("site"))
+        except ValueError as e:
+            return "deny", str(e), None
+        if site and denied_host(site, self.cfg.deny_domains):
+            return "deny", f"{site} 在 [web] deny_domains 里", None
         return "allow", "", None
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -208,9 +222,13 @@ class WebSearchTool(_WebTool):
             return ToolResult.error("查询词不能为空")
         if why := leaked(f"{query} {args.get('site') or ''}"):   # 兜底：执行层的 precheck 已经查过一次
             return ToolResult.error(f"查询词{why}，已拦截")
+        try:
+            site = site_host(args.get("site"))
+        except ValueError as e:
+            return ToolResult.error(str(e))
         fresh = args.get("freshness") or "any"
         q = SearchQuery(query, min(int(args.get("count") or 5), self.cfg.max_results),
-                        None if fresh == "any" else fresh, (str(args.get("site") or "").strip() or None))
+                        None if fresh == "any" else fresh, site)   # 发出去的就是判定过的那个主机
         cached = self.service.cached(ctx.session_id, q)
         if cached is None and (limit := self._reserve(ctx)) is not None:
             return ToolResult.error(limit, web={"op": "search", "counted": False, "cost_usd": 0.0}, limit=True)
@@ -394,4 +412,4 @@ def web_tools(service: "WebService", cfg: WebConfig) -> list[Tool]:
 
 
 __all__ = ["FETCH_SPEC", "FETCH_TOOL", "SEARCH_SPEC", "SEARCH_TOOL", "WEB_TOOLS", "WebFetchTool", "WebSearchTool",
-           "seen_urls", "urls_in_text", "web_specs", "web_tools"]
+           "seen_urls", "site_host", "urls_in_text", "web_specs", "web_tools"]

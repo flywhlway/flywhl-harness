@@ -76,14 +76,15 @@ class Fetched:
 
 # 网页实际会用的字符集。响应头里的 charset 由对方控制：punycode、idna 这类编码解 2MB 正文是平方级的，
 # unicode-escape、utf-7 会把转义序列还原成另一段文字，都不认，按 utf-8 解
-_CHARSETS = {"utf-8", "utf-16", "utf-16-le", "utf-16-be", "ascii", "gbk", "gb2312", "gb18030", "big5", "big5hkscs",
-             "shift_jis", "cp932", "euc_jp", "iso2022_jp", "euc_kr", "cp949", "koi8-r", "koi8-u"}
+_CHARSETS = {"utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be", "ascii",
+             "gbk", "gb2312", "gb18030", "hz", "big5", "big5hkscs", "cp950", "shift_jis", "cp932", "euc_jp", "iso2022_jp",
+             "euc_kr", "cp949", "iso2022_kr", "koi8-r", "koi8-u", "cp866", "cp874", "tis-620", "mac-roman"}
 
 
 def _text_charset(name: str) -> str:
     try:
         canon = codecs.lookup(name).name
-    except LookupError:
+    except (LookupError, ValueError):
         return "utf-8"
     ok = canon in _CHARSETS or canon.startswith(("iso8859-", "cp125"))
     return canon if ok else "utf-8"

@@ -221,6 +221,8 @@ def test_unexpected_charsets_fall_back_to_utf8(charset):
     assert page.text() == body.decode("utf-8")
     latin = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=windows-1252"}, "café".encode("cp1252"))
     assert latin.text() == "café"
+    thai = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=windows-874"}, "สวัสดี".encode("cp874"))
+    assert thai.text() == "สวัสดี"
 
 
 # ---------------------------------------------------------------------- 外传检查
@@ -234,9 +236,14 @@ def test_leak_check_hits_secret_env_values_raw_and_url_encoded():
     assert leaked("https://x.test/?d=" + SENTINEL.replace("-", "%2D"), env=env)
     assert leaked("search someone-long-name", env=env) is None   # 不算密钥的变量名
     assert leaked("abc def", env=env) is None                     # 太短的值不比对
-    # 不分大小写：域名会被规范成小写，大小写改写也不该绕过
+    # 主机名不分大小写：域名会被规范成小写，塞进子域名的密钥换了大小写也拦
     assert leaked(f"https://{SENTINEL.upper()}.evil.test/", env=env)
     assert leaked(f"https://{SENTINEL.lower()}.evil.test/", env={"MY_SERVICE_TOKEN": SENTINEL.upper()})
+    # 主机名之外照原样比：首字母大写的常见词当密钥时，普通查询不误报
+    words = {"DB_PASSWORD": "Postgres", "API_TOKEN": "Kubernetes"}
+    assert leaked("postgres tuning guide", env=words) is None
+    assert leaked("https://docs.example/kubernetes/setup", env=words) is None
+    assert leaked("https://kubernetes.io/docs/", env=words)   # 主机名里出现：宁可误报
 
 
 @pytest.mark.parametrize("text", ["sk-" + "a" * 24, "ghp_" + "b" * 30, "github_pat_" + "c" * 24,
