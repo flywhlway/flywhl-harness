@@ -73,9 +73,10 @@ async def openable(client: WebClient, url: str) -> bool:
     return r.status < 400
 
 
-def build(level: str, model: str, data: Path) -> Harness:
+def build(level: str, model: str, data: Path, max_cost: float = 0.05) -> Harness:
     cfg = HarnessConfig.load(path=data / "no-such-config.toml", workspace=str(data))
     cfg.model, cfg.fallback_models, cfg.snapshots = model, [], False
+    cfg.budget.max_cost_usd = max_cost   # 每题的上限，模型与联网费用合计；到了就收尾，一道题失控不会拖垮整次评测的花费
     cfg.permissions.on_ask = "allow"   # fetch_scope 的确认：评测里没人点，按放行处理（读取范围另有出站检查）
     cfg.web.enabled, cfg.web.default = True, level
     tools = default_tools(cfg, data)
@@ -118,11 +119,12 @@ async def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default="deepseek:deepseek-flash")
     ap.add_argument("--level", choices=["search", "fetch"], default="search")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题")
+    ap.add_argument("--max-cost", type=float, default=0.05, help="每题费用上限（美元，模型加联网）")
     a = ap.parse_args(argv)
     load_dotenv(ROOT / ".env")
     qs = load_questions()[: a.limit or None]
     a.out.mkdir(parents=True, exist_ok=True)
-    h = build(a.level, a.model, a.out)
+    h = build(a.level, a.model, a.out, a.max_cost)
     client = WebClient(timeout=15)
     rows = []
     try:

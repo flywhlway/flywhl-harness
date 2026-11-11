@@ -39,3 +39,5 @@ def test_only_web_tools_are_given(tmp_path, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-real")
     h = we.build("search", "deepseek:deepseek-flash", tmp_path)
     assert {t.name for t in h.tools} == we.WEB_TOOLS
+    assert h.config.budget.max_cost_usd == 0.05   # 每题有费用上限
+    assert we.build("search", "deepseek:deepseek-flash", tmp_path, 0.2).config.budget.max_cost_usd == 0.2
