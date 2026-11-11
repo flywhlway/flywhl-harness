@@ -1,0 +1,64 @@
+{
+  "results": [
+    {
+      "title": "Python Releases for Windows - Notice: This page displays a fallback because interactive scripts did not run",
+      "site_name": "Python.org",
+      "site_icon": "https://cdn.deepseek.com/site-icons/python.org",
+      "authority": 4,
+      "rerank_score": 2.351604461669922,
+      "date": null,
+      "url": "https://www.python.org/getit/windows/#1",
+      "summary": "# Python Releases for Windows\n\n## Stable Releases\n\n- Python 3.14.10 - Oct. 25, 2026",
+      "snippet": "Stable Releases - Python 3.14.10 - Oct. 25, 2026 Download using the Python install manager. - Python 3.15.2 - Oct. 25, 2026 ... - Python 3.13.17 - Oct.",
+      "content": ""
+    },
+    {
+      "title": "Python Source Releases for Source release - Notice: This page displays a fallback because interactive scripts did not run",
+      "site_name": "Python.org",
+      "site_icon": "https://cdn.deepseek.com/site-icons/python.org",
+      "authority": 4,
+      "rerank_score": 2.273479461669922,
+      "date": "2018-03-10T16:00:00+00:00",
+      "url": "https://www.python.org/downloads/source/?spm=5176.28103460.0.0.297c3da2IAw3wm#1",
+      "summary": "# Python Source Releases\n\n## Stable Releases\n\n- Python 3.11.18 - Oct. 25, 2026",
+      "snippet": "Stable Releases - Python 3.11.18 - Oct. 25, 2026 - Python 3.13.18 - Oct. 25, 2026 - Python 3.12.16 - Oct.",
+      "content": ""
+    },
+    {
+      "title": "Python Releases for macOS - Notice: This page displays a fallback because interactive scripts did not run",
+      "site_name": "Python.org",
+      "site_icon": "https://cdn.deepseek.com/site-icons/python.org",
+      "authority": 4,
+      "rerank_score": 2.210979461669922,
+      "date": "2010-03-13T16:00:00+00:00",
+      "url": "https://www.python.org/downloads/macos/#1",
+      "summary": "# Python Releases for macOS\n\n## Stable Releases\n\n- Python 3.14.10 - Oct. 25, 2026",
+      "snippet": "Stable Releases - Python 3.14.10 - Oct. 25, 2026 - Python 3.15.2 - Oct. 25, 2026 - Python 3.13.17 - Oct. 21...",
+      "content": ""
+    },
+    {
+      "title": "Installing Python | RMC Software Documentation",
+      "site_name": "usace-rmc.github.io",
+      "site_icon": "https://cdn.deepseek.com/site-icons/github.io",
+      "authority": 4,
+      "rerank_score": 2.040015935897827,
+      "date": "2026-10-25T16:00:00+00:00",
+      "url": "https://usace-rmc.github.io/RMC-Software-Documentation/docs/dev/python-quickstart-guide/installing-python/",
+      "summary": "## Choosing a Python Version\n\nPython releases follow amajor.minor.micro versioning scheme (e.g., Python 3.13.2).\n...\n- Use Python 3.10 or later for RMC development work.\n...\n- Avoid the very latest release. Some scientific packages take time to release compatible builds for brand-new Python versions. Choosing a version that has been out for at least several months gives the package ecosystem time to catch up.\n...\n### Python Release History\n\nEach Python version follows a roughly 5-year support lifecycle: approximately 2 years of active bug-fix support (with binary installers), followed by approximately 3 years of security-only patches (source-only releases), then end-of-life.\n\nVersion | Initial Release | Status | End-of-Life \n---|---|---|---\nPython 3.9 | October 2020 | End-of-life | October 2025 \nPython 3.10 | October 2021 | Security fixes only | October 2026 \nPython 3.11 | October 2022 | Security fixes only | October 2027 \nPython 3.12 | October 2023 | Security fixes only | October 2028 \nPython 3.13 | October 2024 | Active (bug fix) | October 2029 \nPython 3.14 | October 2025 | Active (bug fix) | October 2030 \n\nFor the most current release information, see the official Python Release Schedule.",
+      "snippet": "Version: Python 3.9; Initial Release: October 2020; Status: End-of-life; End-of-Life: October 2025 ... Version: Python 3.14; Initial Release: October 2025; Status: Active (bug fix); End-of-Life: October 2030",
+      "content": ""
+    },
+    {
+      "title": "Python 3.15 稳定版发布，默认采用 UTF-8 编码",
+      "site_name": "IT之家",
+      "site_icon": "https://cdn.deepseek.com/site-icons/ithome.com",
+      "authority": 3,
+      "rerank_score": 1.9640988111495972,
+      "date": "2026-10-09T16:00:00+00:00",
+      "url": "https://m.ithome.com/html/1011316.htm",
+      "summary": "# Python 3.15 稳定版发布，默认采用 UTF-8 编码\n\n2026-10-10 12:05 IT之家 - 沁沧（实习）\n...\nIT之家 10 月 10 日消息，当地时间 10 月 9 日，Python 3.15.0 稳定版正式发布，相较于 Python 3.14，该版本带来了大量新特性与性能优化，汇聚了来自 1,012 位贡献者完成的 5,643 次代码提交。\n\n相比 3.14，Python 3.15 的主要新特性包括：\n\n解释器层面的改进\n\nPEP 661：新增内置哨兵类型 (Sentinel Built-in Type)\n\nPEP 686：Python 现已默认采用 UTF-8 编码\n\nPEP 798：推导式 (Comprehensions) 支持解包操作\n\nPEP 810：支持显式延迟导入 (Lazy Imports)，缩短启动耗时\n\nPEP 814：新增不可变字典内置类型 (frozendict)\n\nPEP 829：支持包级别的启动配置文件\n\n实验性即时编译器 (JIT Compiler) 迎来重大升级：在 x86-64 Linux 平台上，相比标准解释器，几何平均性能提升了 7% 至 8%；在 AArch64 macOS 平台上，相比尾调用解释器 (Tail-calling Interpreter)，运行速度加快了 11% 至 12%\n\n优化了错误提示信息 (Error Messages)\n\n标准库重大更新\n\nPEP 799：新增专用的性能分析工具包，用于统一管理 Python 性能分析工具 (Profiling Tools)\n...\n终端输出与报错信息支持更多彩色高亮显示\n...\nPEP 728：支持为额外键值指定类型的 TypedDict (TypedDict with Typed Extra Items)\n\nPEP 747：支持使用 TypeForm 注解类型本身的形式 (Type Forms)\n\nPEP 800：类型系统中引入互斥基类 (Disjoint Bases) 机制\n...\nPEP 782：新增用于创建 Python 字节对象的 PyBytesWriter C API\n\nPEP 788：在 C API 中增加防止对象过早终结化 (Finalization) 的保护机制\n\nPEP 803、820、793：为无全局解释器锁的自由线程构建 (Free-threaded Builds) 提供稳定应用程序二进制接口 (Stable ABI) 及相关 C API\n...\nPEP 831：默认启用栈帧指针 (Frame Pointers)，增强系统级可观测性与性能诊断能力\n\n官方发布包变更\n\nWindows 64 位官方预编译二进制包现已默认采用尾调用解释器\n\nmacOS 官方预编译二进制包现已默认安装自由线程支持",
+      "snippet": "Python 3.15 稳定版发布，默认采用 UTF-8 编码 ... IT之家 10 月 10 日消息，当地时间 10 月 9 日，Python 3.15.0 稳定版正式发布，相较于 Python 3.14，该版本带来了大量新特性与性能优化，汇聚了来自 1,012 位贡献者完成的 5,643 次代码提交。",
+      "content": ""
+    }
+  ]
+}
