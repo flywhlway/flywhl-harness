@@ -296,3 +296,28 @@ def test_to_text_variants():
     assert to_text("  plain  ", "text/plain") == ("", "plain")
     title, body = html_to_text("<title> A  B </title><pre>code\n  indented</pre>")
     assert title == "A B" and "code" in body
+
+
+@pytest.mark.parametrize("backend,url", [("deepseek", DS_SEARCH), ("bocha", BOCHA)])
+async def test_recorded_web_fixtures_parse(backend, url):
+    """tests/live/record_web.py 录下的真实响应体：映射之后每条都有标题和 http(s) 网址。没录过就跳过。"""
+    from .webkit import FIXTURES
+
+    path = FIXTURES / backend / "recorded_search.json"
+    if not path.exists():
+        pytest.skip("还没录制真实响应")
+    net = Net().on("POST", url, httpx.Response(200, json=fixture(backend, "recorded_search")))
+    cls = DeepSeekSearch if backend == "deepseek" else BochaSearch
+    hits = await cls({}, ENV).search(SearchQuery("Python 最新稳定版本", 5), net.client())
+    assert hits and all(h.title and h.url.startswith(("https://", "http://")) for h in hits)
+
+
+async def test_recorded_deepseek_fetch_parses():
+    from .webkit import FIXTURES
+
+    if not (FIXTURES / "deepseek" / "recorded_fetch.json").exists():
+        pytest.skip("还没录制真实响应")
+    net = Net().on("POST", DS_FETCH, httpx.Response(200, json=fixture("deepseek", "recorded_fetch")))
+    page = await DeepSeekFetch({}, ENV).fetch("https://www.python.org/downloads/", net.client(), max_bytes=2_000_000,
+                                              in_scope=lambda h, u: False)
+    assert "Python" in page.content

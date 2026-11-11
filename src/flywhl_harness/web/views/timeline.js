@@ -49,7 +49,12 @@ export function assistantItem(m, results, ctx) {
   const thinking = blocks(m, "thinking").map((b) => b.thinking).join("");
   const text = textOf(m);
   if (thinking) w.append(thinkingBlock(thinking));
-  if (text) w.append(h("div", { class: "md", html: md(text) }));
+  if (text) {
+    const body = h("div", { class: "md", html: md(text) });
+    linkCites(body, citeMap(ctx));
+    w.append(body);
+  }
+  if (m.meta?.native_web) w.append(h("div", { class: "native-web", html: nativeSources(m.meta.native_web) }));
   if (m.stop_reason === "error") w.append(callout("danger", "模型调用失败：" + (m.error || "未知错误")));
   if (m.stop_reason === "refusal") w.append(callout("warning", "模型基于安全策略拒绝了这个请求"));
   if (m.stop_reason === "aborted") w.append(callout("info", "输出在生成过程中被取消，以上是已生成的部分"));
@@ -172,6 +177,64 @@ const extLink = (u, text) => {
   const href = httpUrl(u);
   return href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>` : esc(text);
 };
+
+// ====================================================================== 回答里的 [n] 引用
+// 内置搜索每次结果都从 [1] 编号。一个任务里搜了几次，[3] 可能指不同的网页：只有本任务里所有搜索在这个编号上
+// 都是同一个网址时才变成链接，有歧义的保持原样（模型按要求会同时写出网址）。
+export function resetCites(ctx) { ctx.cites = []; }
+export function noteCites(ctx, details) {
+  if (Array.isArray(details?.hits) && details.hits.length) (ctx.cites ||= []).push(details.hits);
+}
+function citeMap(ctx) {
+  const map = new Map(), bad = new Set();
+  for (const hits of ctx.cites || []) {
+    for (const x of hits) {
+      const n = Number(x.n), href = httpUrl(x.url);
+      if (!Number.isInteger(n) || bad.has(n)) continue;
+      if (!href) { bad.add(n); map.delete(n); continue; }
+      const prev = map.get(n);
+      if (prev && prev.url !== href) { bad.add(n); map.delete(n); continue; }
+      map.set(n, { url: href, title: x.title || href });
+    }
+  }
+  return map;
+}
+function linkCites(root, map) {
+  if (!map.size) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement?.closest("a, code, pre") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (/\[\d{1,3}\]/.test(n.nodeValue)) nodes.push(n);
+  for (const node of nodes) {
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const mt of node.nodeValue.matchAll(/\[(\d{1,3})\]/g)) {
+      const hit = map.get(Number(mt[1]));
+      if (!hit) continue;
+      frag.append(node.nodeValue.slice(last, mt.index));
+      frag.append(h("a", { class: "cite", href: hit.url, target: "_blank", rel: "noopener noreferrer", title: hit.title, text: mt[0] }));
+      last = mt.index + mt[0].length;
+    }
+    if (!last) continue;
+    frag.append(node.nodeValue.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
+/** 模型侧联网（供应商自带的搜索）：次数、查询词与来源。来源由供应商给出，被回答引用过的单独标出 */
+export function nativeSources(nw) {
+  const n = Number(nw.searches) || 0;
+  const bits = ["模型侧", n && `搜索 ${n} 次`, nw.errors?.length && `失败 ${nw.errors.length} 次`].filter(Boolean).join(" · ");
+  const label = `<div class="block-label">${icon("globe", "sm")}来源 · ${esc(bits)}</div>`;
+  const qs = (nw.queries || []).length ? `<p class="muted queries">查询：${(nw.queries || []).map((q) => esc(q)).join("；")}</p>` : "";
+  const errs = (nw.errors || []).length ? `<p class="muted">搜索失败：${(nw.errors || []).map((e) => `<code>${esc(e)}</code>`).join(" ")}</p>` : "";
+  const src = nw.sources || [];
+  if (!src.length) return `<div>${label}${qs}${errs}<p class="muted">供应商没有返回来源</p></div>`;
+  const rows = src.map((x) => `<li><span class="n tnum">[${esc(String(x.n ?? ""))}]</span><div class="src">${extLink(x.url, x.title || x.url)}
+    <span class="site">${esc([x.page_age, x.cited && "已引用"].filter(Boolean).join(" · "))}</span><span class="url mono">${esc(shortUrl(x.url))}</span></div></li>`).join("");
+  return `<div>${label}${qs}${errs}<ol class="web-sources">${rows}</ol></div>`;
+}
 
 /** web_search 的来源卡片：编号与模型看到的 [n] 一致 */
 export function webSources(d) {

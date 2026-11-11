@@ -292,14 +292,23 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "capabilities": {"web": web_info()},
         }
 
+    def native_info() -> dict[str, Any] | None:
+        """声明过的模型侧联网（主模型对得上时才有）：给人看的名字、地区、看不看得到搜索、单价、未核实的地方。"""
+        spec = h.native_web
+        if spec is None:
+            return None
+        return {"name": spec.name, "label": spec.label, "region": spec.region, "observable": spec.observable,
+                "citations": spec.citations, "price_per_call": spec.price_per_call, "notes": spec.notes}
+
     def web_info() -> dict[str, Any]:
         """建会话前的联网选项：只给能力和后端名字，不给端点、密钥变量名。"""
         level, why = h.web_ceiling()
-        names = [b.name for b in h.web.usable()] if h.web is not None and level != "off" else []
+        native = native_info() if level != "off" else None
+        names = [b.name for b in h.web.usable()] if h.web is not None and level != "off" and native is None else []
         w = h.config.web
         return {"available": level != "off", "fetch_available": level == "fetch", "backends": names,
-                "default": clamp(w.default, level)[0], "reason": why,
-                "limits": {"searches": w.max_searches_per_run, "fetches": w.max_fetches_per_run}}
+                "default": clamp(w.default, level)[0], "reason": why, "via": "native" if native else "tools",
+                "native": native, "limits": {"searches": w.max_searches_per_run, "fetches": w.max_fetches_per_run}}
 
     def web_settings() -> dict[str, Any] | None:
         w = h.config.web
@@ -316,6 +325,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                            "max_results": w.max_results, "fetch_chars": w.fetch_chars},
                 "unpriced": h.web.unpriced() if h.web is not None and level != "off" else [],
                 "native_via_extra_body": bool(h.native_search), "native_keys": list(h.native_search),
+                "native": {"configured": w.native, "active": native_info(), "reason": h.native_web_reason},
                 "sandbox_network": h.config.permissions.sandbox_network,
                 "mcp_tools": sum(1 for t in h.tools if t.name.startswith("mcp__"))}
 

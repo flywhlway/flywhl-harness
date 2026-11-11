@@ -40,6 +40,7 @@ from ..config import BudgetConfig, HarnessConfig, is_workspace_trusted, native_w
 from ..events import E, EPHEMERAL_EVENTS, Event
 from ..llm import create_provider
 from ..llm.base import Provider
+from ..llm.native import native_for
 from ..policy.approvals import ApprovalBroker, ApprovalDecision, Resolver
 from ..policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput
 from ..policy.permissions import PermissionPolicy, Rule, outside_rule
@@ -49,7 +50,7 @@ from ..tools import default_tools
 from ..tools.confine import Confinement
 from ..tools.registry import ToolRegistry
 from ..types import unpaired_tool_calls
-from .capabilities import clamp, current_web, session_web
+from .capabilities import clamp, current_web, session_native, session_web
 from .session import SessionLog
 from .state import ACTIVE, IllegalTransition, RunStateMachine, RunStatus, TERMINAL, TransitionConflict
 from .store import RunRecord, SessionRecord, Store
@@ -192,6 +193,8 @@ class Harness:
             self.web = WebService(self.config.web)
         # 模型侧联网（extra_body 打开的供应商搜索）：结果不经过 harness，新会话开局即置污点
         self.native_search = native_web_search(self.config.extra_body)
+        # 声明过的模型侧联网（[web] native = true 且主模型在 llm/native.py 里）：会话开“搜索”时改用它
+        self.native_web, self.native_web_reason = native_for(provider, self.model) if self.config.web.native else (None, "")
         loose = unpinned_in([(hc.command, hc.env) for hc in self.config.hooks], self.config.mcp_servers,
                             self.workspace_root)
         if loose and self.config.permissions.require_pinned:
@@ -260,8 +263,10 @@ class Harness:
     # ================================================================== 联网能力
     def web_ceiling(self) -> tuple[str, str]:
         """本进程能给会话的最高联网能力与原因：用户配置、可用后端、实际注册了哪些联网工具，取最严的。"""
-        if not self.config.web.enabled or self.web is None:
+        if not self.config.web.enabled or (self.web is None and self.native_web is None):
             return "off", "联网工具没有启用（用户配置 [web] enabled = false）"
+        if self.native_web is not None:
+            return "search", f"{self.native_web.label}只能搜索，读取网页由供应商在搜索时完成"
         level, why = self.web.availability()
         if level != "off" and "web_search" not in self.tools:
             return "off", "web_search 没有注册"
@@ -276,7 +281,10 @@ class Harness:
         ceiling, why = self.web_ceiling()
         want = requested if requested is not None else self.config.web.default
         level, reason = clamp(want, ceiling, why)
-        return {"web": level, "requested": want, "reason": reason}
+        cap = {"web": level, "requested": want, "reason": reason}
+        if level != "off" and self.native_web is not None:
+            cap.update(via="native", native=self.native_web.name)
+        return cap
 
     def set_capabilities(self, session_id: str, web: str) -> dict[str, Any]:
         """开工后只能收紧。放宽抛 ``PermissionError``：工具名单在建会话时就定了，放宽意味着改写已经进过请求的前缀。"""
@@ -306,7 +314,10 @@ class Harness:
                                                                          skills=cfg.load_skills)
         cap = capabilities if capabilities is not None else self.web_capability()
         level = session_web({"capabilities": cap}) if cap is not None else "off"
-        names = [t.name for t in self.tools if not t.egress or web_rank(level) >= web_rank(getattr(t, "web_level", "search"))]
+        native = session_native(cap)
+        # 模型侧联网的会话不钉联网工具：搜索在供应商那边发生，两条路并存会让同一次搜索被记两遍
+        names = [t.name for t in self.tools
+                 if not t.egress or (native is None and web_rank(level) >= web_rank(getattr(t, "web_level", "search")))]
         meta = {
             # 钉住：系统提示与工具集在会话创建时冻结（版本钉住 + 前缀稳定）；
             # 模型以当前 Harness 为准（这里记录创建时的模型，实际服务的模型记录在每条 assistant 消息上）
@@ -320,6 +331,8 @@ class Harness:
         if self.native_search and system_prompt is None:
             # 模型侧联网看不到搜了什么，只能按最坏情况处理：写入与外部操作从第一步起就要审批
             meta["tainted"] = True
+        if native is not None and not native.observable:
+            meta["tainted"] = True   # 声明里看不到“搜没搜”：同样按最坏情况，开局即置污点
         return self.store.create_session(title, str(ws), parent_session_id=parent_session_id, meta=meta)
 
     def workspace_trusted(self, workspace: str | Path) -> bool:
@@ -380,6 +393,8 @@ class Harness:
             w = cfg.web
             out["web"] = {"capability": session_web(s.meta), "max_searches_per_run": w.max_searches_per_run,
                           "max_fetches_per_run": w.max_fetches_per_run}
+            if (spec := session_native(s.meta.get("capabilities"))) is not None:
+                out["web"]["native"] = spec.name
         return out
 
     def _hook_warnings(self, run_id: str, warnings: list[str]) -> None:
@@ -824,7 +839,7 @@ class Harness:
         s = self._session(session_id)
         stats = ctxm.estimate(view.messages, s.meta.get("system_prompt", ""), self.tools.specs())
         res = await Compactor(self.provider, self.model, self.config.context).compact(
-            log, view, CancelToken(), tokens_before=stats.tokens, force=True)
+            log, view, CancelToken(), tokens_before=stats.tokens, force=True, keep_sources=session_web(s.meta) != "off")
         if res:
             self.store.update_session(session_id, meta={**s.meta, "clear_watermark": 0})
         return res.__dict__ if res else None
@@ -847,6 +862,8 @@ class Harness:
         inherited = current_web(self.store, parent.session_id)
         cap = {"web": inherited, "requested": inherited, "reason": "继承父会话"} \
             if self.config.web.enabled or "capabilities" in ps.meta else None
+        if cap is not None and inherited != "off" and (spec := session_native(ps.meta.get("capabilities"))) is not None:
+            cap.update(via="native", native=spec.name)   # 父会话用模型侧联网，子代理也一样（它也没有联网工具）
         child_s = self.create_session(f"子代理：{description}", workspace=str(parent.workspace.root),
                                       mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp,
                                       capabilities=cap)

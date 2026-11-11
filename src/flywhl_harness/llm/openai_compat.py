@@ -31,6 +31,7 @@ from .base import (
     ErrorKind, MessageBuilder, ModelRequest, Provider, ProviderError, StreamEvent, classify_http_error, prepare_history,
 )
 from .models import ModelInfo, compute_cost, get_model_info
+from .native import NATIVE_SPECS, matches
 from .profiles import PROFILES, ProviderProfile
 
 _FINISH = {
@@ -167,6 +168,10 @@ class OpenAICompatProvider(Provider):
             body["temperature"] = req.temperature
         if self.name == "openrouter" and req.model.startswith("anthropic/"):
             body["cache_control"] = {"type": "ephemeral"}    # 别家由服务端自动缓存，Claude 不带这个标记就不缓存
+        spec = NATIVE_SPECS.get(req.native_search or "")
+        if spec is not None and matches(spec, self, req.model):
+            # 模型侧联网：并入声明的请求字段（百炼 enable_search）。降级到别家时声明对不上，不带
+            body.update(json.loads(json.dumps(spec.request)))
         body.update(self.options)
         return body
 

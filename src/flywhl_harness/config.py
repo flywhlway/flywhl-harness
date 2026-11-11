@@ -160,6 +160,9 @@ class WebConfig:
     timeout: float = 15.0
     cache_ttl: float = 600.0                   # 同会话同参数的搜索结果缓存秒数，0 关闭
     backend: dict[str, dict[str, Any]] = field(default_factory=dict)   # [web.backend.<名字>]
+    # 改用模型供应商自带的搜索（llm/native.py 里已确认的那几家）：会话开“搜索”时不注册 web_search，
+    # 搜索在供应商那边发生；主模型不在声明里时照常用内置工具
+    native: bool = False
 
     def __post_init__(self) -> None:
         check_web(self)
@@ -169,8 +172,9 @@ def check_web(w: "WebConfig") -> "WebConfig":
     """``[web]`` 写错在加载时就报错。_merge 用 setattr 赋值，不经过 __post_init__，所以加载完再调一次。"""
     from .tools.egress import parse_rules   # 延迟导入：tools 依赖本模块
 
-    if not isinstance(w.enabled, bool):
-        raise ValueError(f"web.enabled 必须是 true 或 false，实际是 {w.enabled!r}")
+    for k in ("enabled", "native"):
+        if not isinstance(getattr(w, k), bool):
+            raise ValueError(f"web.{k} 必须是 true 或 false，实际是 {getattr(w, k)!r}")
     if w.default not in WEB_LEVELS:
         raise ValueError(f"web.default 只能是 {'、'.join(WEB_LEVELS)}，实际是 {w.default!r}")
     if w.fetch_scope not in FETCH_SCOPES:
@@ -502,7 +506,7 @@ def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
 def _keep_web_tight(data: dict[str, Any], user: WebConfig, path: Path) -> dict[str, Any]:
     """项目配置里的 ``[web]`` 只能收紧，信任过也一样：联网把工作区的内容送到第三方，开不开、送给谁是用户的决定。
 
-    - ``enabled`` 只能写 false；``default``、``fetch_scope`` 只能比用户配置更严；数值上限只能调低；
+    - ``enabled``、``native`` 只能写 false；``default``、``fetch_scope`` 只能比用户配置更严；数值上限只能调低；
     - ``backends``、``fetch_backend``、``[web.backend.*]``、``fetch_allow`` 一律丢弃：它们决定查询词和网址发给谁、
       从哪台机器发出（``fetch_backend = "direct"`` 把抓取搬到本机）；
     - ``deny_domains`` 与用户配置合并，只增不减。"""
@@ -514,8 +518,8 @@ def _keep_web_tight(data: dict[str, Any], user: WebConfig, path: Path) -> dict[s
     dropped: list[str] = []
     out: dict[str, Any] = {}
     for k, v in spec.items():
-        if k == "enabled":
-            ok = v is False
+        if k in ("enabled", "native"):
+            ok = v is False   # native = true 会把查询词交给模型供应商：只认用户配置
         elif k == "default":
             ok = v in WEB_LEVELS and web_rank(v) <= web_rank(user.default)
         elif k == "fetch_scope":

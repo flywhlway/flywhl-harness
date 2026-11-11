@@ -169,11 +169,18 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     b.onclick = () => openMenu(b, draft ? draftWebItems(wi, cur) : tightenWebItems(cur), { align: "start", label: "联网能力" });
     return b;
   }
+  function webBadge(web, cap) {
+    const native = cap?.via === "native";
+    const tip = `本会话可以联网（${webLevel(web).label}${native ? "，由模型供应商搜索" : ""}）：结果按不可信内容处理，之后的写入与外部操作需要确认`;
+    return `<span class="badge outline web-badge" title="${esc(tip)}">${icon("globe")}联网 · ${esc(webLevel(web).short)}${native ? " · 模型侧" : ""}</span>`;
+  }
   function draftWebItems(wi, cur) {
+    const nat = wi.native;
+    const natDesc = nat ? `由 ${nat.label} 在供应商那边搜索${nat.observable ? "" : "；看不到搜了什么，开工即按不可信内容处理"}` : "";
     return [{ head: "联网能力（开工后只能收紧）" }, ...WEB_LEVELS.map((l) => {
       const off = (l.id !== "off" && !wi.available) || (l.id === "fetch" && !wi.fetch_available);
       return { label: l.label, icon: l.id === "off" ? "ban" : l.id === "search" ? "globe" : "external", checked: l.id === cur, disabled: off,
-        desc: off ? wi.reason || "当前配置不支持" : l.desc,
+        desc: off ? wi.reason || "当前配置不支持" : l.id === "search" && natDesc ? natDesc : l.desc,
         onSelect: () => { V.web = l.id; renderComposerLeft(); input.focus(); } };
     })];
   }
@@ -222,7 +229,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     const web = sessionWeb();
     $("#s-status", header).innerHTML = (V.run ? statusBadge(V.run.status) : "")
       + (s?.meta?.archived ? `<span class="badge outline">${icon("archive")}已归档</span>` : "")
-      + (s && web !== "off" ? `<span class="badge outline web-badge" title="${esc(`本会话可以联网（${webLevel(web).label}）：结果按不可信内容处理，之后的写入与外部操作需要确认`)}">${icon("globe")}联网 · ${esc(webLevel(web).short)}</span>` : "");
+      + (s && web !== "off" ? webBadge(web, s.meta.capabilities) : "");
     $("#s-meta", header).innerHTML = V.run ? `<span class="mono">${esc(fmt.shortId(V.run.id))}</span>${V.run.attempt > 1 ? `<span>· 第 ${V.run.attempt} 次尝试</span>` : ""}` : "";
     const mode = modeOf(s?.meta?.mode || app.info.mode);
     const mb = $("#s-mode", header);
@@ -410,7 +417,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     message_end(d) {
       const m = d.message;
       if (m.role === "assistant") finalizeLive(m);
-      else if (m.role === "user") add(T.userItem(m));
+      else if (m.role === "user") { if (m.meta?.kind === "prompt") T.resetCites(ctx); add(T.userItem(m)); }
     },
     model_retry(d) {
       if (d.discard_partial && V.live) {
@@ -429,7 +436,11 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       if (u.progress) T.setToolState(card, `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>${esc(u.progress)}`, "run");
       if (u.subagent) T.subagentLine(card, u.subagent, ctx);
     },
-    tool_end(d) { T.setToolResult(ensureCard({ id: d.call_id, name: d.name, arguments: {} }), d.message, ctx); follow(); },
+    tool_end(d) {
+      T.setToolResult(ensureCard({ id: d.call_id, name: d.name, arguments: {} }), d.message, ctx);
+      if (d.name === "web_search") T.noteCites(ctx, d.message?.details);
+      follow();
+    },
     approval_request(d) { attachApproval(d); app.refreshApprovals(); },
     approval_resolved(d) { removeApproval(d.call_id); app.refreshApprovals(); },
     compaction_start(d) { add(T.pendingCompaction(d)); },
@@ -536,8 +547,11 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       prev = it.run_id || prev;
       if (it.kind === "compaction") { frag.append(T.compactionDivider(it.payload)); continue; }
       const m = it.message;
-      if (m.role === "user") frag.append(T.userItem(m));
-      else if (m.role === "assistant") frag.append(T.assistantItem(m, results, ctx));
+      if (m.role === "user") { if (m.meta?.kind === "prompt") T.resetCites(ctx); frag.append(T.userItem(m)); }
+      else if (m.role === "assistant") {
+        frag.append(T.assistantItem(m, results, ctx));
+        for (const b of m.content || []) if (b.type === "tool_call" && b.name === "web_search") T.noteCites(ctx, results[b.id]?.details);
+      }
     }
     if (prev) closeRun(prev);
     inner.append(frag);

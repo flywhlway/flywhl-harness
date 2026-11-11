@@ -44,7 +44,17 @@ class ToolCall:
     type: Literal["tool_call"] = "tool_call"
 
 
-Block = Union[TextBlock, ThinkingBlock, ToolCall]
+@dataclass
+class ServerBlock:
+    """在供应商那边执行的工具块（Anthropic 的 ``server_tool_use`` / ``web_search_tool_result``）：原样保存，
+    同一端点续写时原样回传，别家 provider 或别的端点忽略。``data`` 是供应商的原始块，``origin`` 是产生它的端点主机。"""
+
+    data: dict[str, Any]
+    origin: str = ""
+    type: Literal["server"] = "server"
+
+
+Block = Union[TextBlock, ThinkingBlock, ToolCall, ServerBlock]
 
 
 @dataclass
@@ -192,6 +202,8 @@ class Message:
                 blocks.append(
                     ToolCall(b["id"], b["name"], b.get("arguments") or {}, b.get("raw_arguments"), b.get("parse_error"))
                 )
+            elif t == "server" and isinstance(b.get("data"), dict):
+                blocks.append(ServerBlock(b["data"], b.get("origin") or ""))
         usage = d.get("usage")
         return cls(
             role=d["role"],

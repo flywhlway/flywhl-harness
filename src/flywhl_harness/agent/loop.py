@@ -41,6 +41,7 @@ from .._utils import clip, new_id, now
 from ..cancel import RunCancelled, RunPaused
 from ..events import E, Event
 from ..llm.base import ErrorKind, ModelRequest, ProviderError
+from ..llm.native import NATIVE_SPECS
 from ..llm.replay import context_fingerprint
 from ..policy.hooks import HookEvent, HookInput
 from ..policy.permissions import Mode
@@ -180,6 +181,8 @@ class AgentLoop:
             msg = self._last
             assert msg is not None
             rc.budget.charge_model(msg.usage)
+            for ev in self._settle_native(msg):
+                yield ev
             yield self._ev(E.USAGE, **rc.budget.snapshot())
 
             if msg.stop_reason == StopReason.REFUSAL:
@@ -304,7 +307,8 @@ class AgentLoop:
                 yield ev
         yield self._ev(E.COMPACTION_START, tokens=stats.tokens, window=stats.window, threshold=stats.compact_at, forced=force)
         res = await rc.compactor.compact(rc.log, view, rc.cancel, tokens_before=stats.tokens,
-                                         extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window)
+                                         extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window,
+                                         keep_sources=rc.budget.web is not None)
         if res is None:
             rc.state["compact_skipped_at"] = stats.tokens
             yield self._ev(E.COMPACTION_END, skipped=True, reason="没有可压缩的历史（最近的消息本身就很大，压缩无法再降低水位）")
@@ -345,10 +349,12 @@ class AgentLoop:
             yield self._ev(E.NOTICE, level="info", code="clear_tool_results", text=f"已清理第 {wm} 条之前的大工具结果")
         if rc.project_context:   # 不进历史：压缩碰不到它；每次都排在最前面：前缀缓存不受影响
             messages = [user_message(rc.project_context, kind=MsgKind.PROJECT_CONTEXT), *messages]
+        native, native_opts = self._native_request(purpose)
         req = ModelRequest(
             model=rc.model, system=rc.system_prompt, messages=messages, tools=specs,
             max_tokens=rc.config.max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
             purpose=purpose, metadata={"role": rc.role, "run_id": rc.run_id, "session_id": rc.session_id},
+            native_search=native, native_opts=native_opts,
         )
         mid = new_id("m_")
         # 上下文指纹：回放时比对“模型看到的东西”是否与录制时一致，用来定位分叉点
@@ -374,6 +380,9 @@ class AgentLoop:
                     yield self._ev(E.MODEL_RETRY, message_id=mid, **sev.info)
                 elif t == "notice":
                     yield self._ev(E.NOTICE, level="info", **sev.info)
+                    if native and sev.info.get("code") == "fallback":
+                        yield self._ev(E.NOTICE, level="warn", code="native_web_lost",
+                                       text="已降级到备用模型：模型侧联网只对声明过的模型生效，这次回答没有联网")
                 elif t == "done":
                     final = sev.message
         except RunCancelled:
@@ -487,6 +496,40 @@ class AgentLoop:
         for c in unpaired_tool_calls(self.rc.log.context().messages):
             self.rc.store.step_finished(self.rc.run_id, c.id, "cancelled", {"content": text})
             yield self._persist_tool_error(c, text, "cancelled")
+
+    def _native_request(self, purpose: str) -> tuple[str | None, dict[str, Any]]:
+        """模型侧联网：会话在建立时选了它、当前能力没收紧到 off、本次 Run 的搜索次数没用完，才在请求里带上。
+        每次都从存储读能力位：父会话或设置页刚收紧的，下一次请求就生效。"""
+        rc = self.rc
+        if purpose != "turn" or rc.budget.web is None:
+            return None, {}
+        from ..runtime.capabilities import current_web, session_native   # 延迟导入：runtime 依赖 agent
+
+        s = rc.store.get_session(rc.session_id)
+        spec = session_native((s.meta.get("capabilities") if s else None))
+        if spec is None or current_web(rc.store, rc.session_id) == "off":
+            return None, {}
+        left = rc.budget.web["searches"] - rc.budget.web_searches
+        if left <= 0:
+            return None, {}
+        return spec.name, {"max_uses": left, "deny_domains": list(rc.config.web.deny_domains)}
+
+    def _settle_native(self, msg: Message):
+        """模型侧联网的记账：按响应里整理好的 ``meta["native_web"]`` 计次数、按声明单价计费；第一次有搜索结果时置污点。
+        回放时消息来自录制，按同样的数据记账，预算走向与录制时一致。"""
+        rc = self.rc
+        nw = msg.meta.get("native_web")
+        if not isinstance(nw, dict):
+            return
+        spec = NATIVE_SPECS.get(nw.get("spec") or "")
+        n = int(nw.get("searches") or 0)
+        for _ in range(n):
+            rc.budget.charge_web("search", cost_usd=spec.price_per_call if spec else 0.0)
+        if (n or nw.get("sources")) and not rc.tainted:
+            rc.tainted = True
+            self._save_session_meta(tainted=True)
+            yield self._ev(E.NOTICE, level="info", code="tainted",
+                           text="模型侧联网的搜索结果已进入上下文：之后的副作用操作将需要人工确认")
 
     def _save_session_meta(self, **kv: Any) -> None:
         s = self.rc.store.get_session(self.rc.session_id)

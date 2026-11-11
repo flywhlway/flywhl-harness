@@ -183,10 +183,16 @@ def _args_key(name: str, args: dict[str, Any]) -> str:
 
 def _recorded_web(settings: dict[str, Any], tools: list[str]) -> dict[str, Any] | None:
     """回放会话的联网能力：录制时记了就用记的，老轨迹按工具名单推断。没有联网工具时返回 None，会话元数据与以前一样。"""
-    level = (settings.get("web") or {}).get("capability")
+    web = settings.get("web") or {}
+    level = web.get("capability")
     if level not in ("search", "fetch"):
         level = "fetch" if "web_fetch" in tools else "search" if "web_search" in tools else None
-    return None if level is None else {"web": level, "requested": level, "reason": "回放：取录制时的能力"}
+    if level is None:
+        return None
+    cap = {"web": level, "requested": level, "reason": "回放：取录制时的能力"}
+    if isinstance(web.get("native"), str):   # 模型侧联网：请求指纹里有它，回放也要带上才对得上
+        cap.update(via="native", native=web["native"])
+    return cap
 
 
 def _external_inputs(msgs: list[Message], kinds: frozenset[str]) -> dict[int, list[str]]:

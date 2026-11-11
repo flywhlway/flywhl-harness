@@ -59,7 +59,20 @@ function webPosture(s) {
   const w = s.web;
   if (!w) return [];
   const out = [];
-  if (w.enabled) {
+  const nat = w.native?.active;
+  if (w.enabled && nat) {
+    const notes = [nat.observable
+      ? "harness 看得到次数和来源，计入每次运行的搜索上限与费用上限，但没法在结果进上下文之前过滤或标注；第一次出现搜索结果时会话进入污点态"
+      : "看不到搜了什么：不计数，新会话开局即按读过不可信内容处理",
+    "deny_domains 作为 blocked_domains 交给供应商", "降级到备用模型时这次回答不联网，时间线会提示"];
+    if (nat.notes) notes.push(`未核实：${nat.notes}`);
+    if (w.mcp_tools) notes.push(`另有 ${w.mcp_tools} 个 MCP 工具不受会话联网开关控制`);
+    out.push({ tone: nat.observable ? "ok" : "warn", icon: "globe", label: "模型侧联网",
+      value: `${nat.label}${nat.region ? `（${nat.region}）` : ""}；每次 ${nat.price_per_call} 美元；${DEFAULT_WEB[w.default] || w.default}`,
+      why: `会话开「仅搜索」时不注册 web_search，搜索在模型供应商那边发生。${notes.join("。")}` });
+  } else if (w.enabled) {
+    if (w.native?.configured) out.push({ tone: "warn", icon: "globe", label: "模型侧联网", value: "已配置，当前主模型不适用",
+      why: `${w.native.reason}；会话照常用内置联网工具` });
     const names = w.backends.map((b) => `${BACKEND[b.name] || b.name}${b.region ? `（${b.region}）` : ""}${b.available ? "" : "·不可用"}`).join("、");
     const notes = [];
     if (w.sandbox_network === "deny") notes.push("命令沙箱禁止联网，联网工具照常可用：两个开关管的是不同通道");

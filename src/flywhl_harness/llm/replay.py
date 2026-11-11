@@ -22,11 +22,14 @@ def context_fingerprint(req: ModelRequest) -> str:
 
     工具取名字 + 描述 + 参数 schema 的哈希：只改了一句工具描述，模型的行为也可能改变，回放必须能指出来。
     """
-    return short_hash({
+    fp: dict = {
         "system": req.system,
         "tools": [[t["name"], short_hash(t.get("description", "")), short_hash(t.get("parameters", {}))] for t in req.tools],
         "messages": [[m.role, m.text, [c.name for c in m.tool_calls], m.tool_call_id] for m in req.messages],
-    })
+    }
+    if req.native_search:   # 只在开了模型侧联网时出现：没开的请求指纹与以前相同
+        fp["native_search"] = req.native_search
+    return short_hash(fp)
 
 
 class ReplayProvider(Provider):

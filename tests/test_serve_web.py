@@ -30,7 +30,7 @@ async def test_info_and_settings_expose_levels_but_no_secrets(ws):
         settings = (await c.get("/api/settings")).json()
     web = info["capabilities"]["web"]
     assert web == {"available": True, "fetch_available": True, "backends": ["deepseek"], "default": "search", "reason": "",
-                   "limits": {"searches": 20, "fetches": 10}}
+                   "via": "tools", "native": None, "limits": {"searches": 20, "fetches": 10}}
     assert settings["web"]["level"] == "fetch" and settings["web"]["backends"][0] == {
         "name": "deepseek", "region": "境内", "available": True, "reason": "", "priced": True}
     blob = json.dumps([info, settings], ensure_ascii=False)
