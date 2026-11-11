@@ -380,7 +380,7 @@ class AgentLoop:
                     yield self._ev(E.MODEL_RETRY, message_id=mid, **sev.info)
                 elif t == "notice":
                     yield self._ev(E.NOTICE, level="info", **sev.info)
-                    if native and sev.info.get("code") == "fallback":
+                    if native and sev.info.get("code") == "fallback" and not sev.info.get("native_kept"):
                         yield self._ev(E.NOTICE, level="warn", code="native_web_lost",
                                        text="已降级到备用模型：模型侧联网只对声明过的模型生效，这次回答没有联网")
                 elif t == "done":
@@ -509,7 +509,7 @@ class AgentLoop:
         spec = session_native((s.meta.get("capabilities") if s else None))
         if spec is None or current_web(rc.store, rc.session_id) == "off":
             return None, {}
-        left = rc.budget.web["searches"] - rc.budget.web_searches
+        left = rc.budget.web["searches"] - rc.budget.root().web_searches   # 上限按整次运行算，子代理也看顶层计数
         if left <= 0:
             return None, {}
         return spec.name, {"max_uses": left, "deny_domains": list(rc.config.web.deny_domains)}

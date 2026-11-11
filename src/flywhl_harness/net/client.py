@@ -17,6 +17,7 @@ DNS 重绑定         解析一次、核验一次，连接用核过的 IP（自�
 
 from __future__ import annotations
 
+import codecs
 import http.cookiejar
 import ipaddress
 import re
@@ -69,11 +70,23 @@ class Fetched:
         for part in self.headers.get("content-type", "").split(";")[1:]:
             k, _, v = part.strip().partition("=")
             if k.lower() == "charset" and v:
-                enc = v.strip("\"' ")
-        try:
-            return self.body.decode(enc, "replace")
-        except LookupError:
-            return self.body.decode("utf-8", "replace")
+                enc = _text_charset(v.strip("\"' "))
+        return self.body.decode(enc, "replace")
+
+
+# 网页实际会用的字符集。响应头里的 charset 由对方控制：punycode、idna 这类编码解 2MB 正文是平方级的，
+# unicode-escape、utf-7 会把转义序列还原成另一段文字，都不认，按 utf-8 解
+_CHARSETS = {"utf-8", "utf-16", "utf-16-le", "utf-16-be", "ascii", "gbk", "gb2312", "gb18030", "big5", "big5hkscs",
+             "shift_jis", "cp932", "euc_jp", "iso2022_jp", "euc_kr", "cp949", "koi8-r", "koi8-u"}
+
+
+def _text_charset(name: str) -> str:
+    try:
+        canon = codecs.lookup(name).name
+    except LookupError:
+        return "utf-8"
+    ok = canon in _CHARSETS or canon.startswith(("iso8859-", "cp125"))
+    return canon if ok else "utf-8"
 
 
 class _PinnedBackend(httpcore.AsyncNetworkBackend):
@@ -206,6 +219,8 @@ class WebClient:
             else:
                 ips = await vet_host(host, port, reaches, self.resolve, "联网工具只连公网地址")
         except EgressDenied as e:
+            if literal is None:   # 不说解析到了哪些 IP：否则 web_fetch 就成了查内网 DNS 的工具，结果还进模型上下文
+                raise WebError("blocked", f"{host} 解析到的不是公网地址，联网工具只连公网地址") from None
             raise WebError("blocked", str(e)) from None
         except OSError as e:
             raise WebError("transient", f"解析 {host} 失败：{e or type(e).__name__}") from None

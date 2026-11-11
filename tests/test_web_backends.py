@@ -14,7 +14,7 @@ from flywhl_harness.net.backends.direct import DirectFetch
 from flywhl_harness.net.backends.searxng import SearxngSearch
 from flywhl_harness.net.client import WebError
 from flywhl_harness.net.extract import html_to_text, to_text
-from flywhl_harness.net.search import SearchQuery, WebService, normalize_url, url_key
+from flywhl_harness.net.search import SearchQuery, WebService, classify_status, normalize_url, public_reason, url_key
 from flywhl_harness.tools.base import TransientToolError
 
 from .webkit import BOCHA, DS_FETCH, DS_SEARCH, FAKE_KEY, Net, Resolver, Sleeps, ds_search, fixture
@@ -55,6 +55,14 @@ async def test_deepseek_search_mapping_and_normalization():
     assert first.content.startswith("HTTPX 的更新日志")         # summary 给模型
     assert out.filtered == {"deny": 1, "dup": 1}               # 镜像站被 deny_domains 滤掉，#history 去重
     assert out.billed and out.cost_usd == PRICE and not out.cached
+
+
+async def test_deny_domains_match_the_canonical_host():
+    """结尾带点、大写的主机名与读取时同一套规范化：不能靠写法差异漏过 deny_domains。"""
+    hits = [{"title": "镜像", "url": url, "snippet": "s"} for url in
+            ("https://Mirror.SPAM.example./x", "https://spam.example.:443/y", "https://bad host/z")]
+    out = await service(Net().on("POST", DS_SEARCH, ds_search(hits)), deny_domains=["spam.example"]).search(Q)
+    assert out.hits == [] and out.filtered.get("deny") == 2
 
 
 def test_deepseek_compose_puts_filters_into_the_query_and_refuses_overflow():
@@ -116,6 +124,25 @@ async def test_searxng_mapping_private_opt_in_and_403_hint():
     with pytest.raises(WebError, match="search.formats 里打开 json"):
         await SearxngSearch({"endpoint": "https://searx.example/search"}).search(Q, forbidden.client())
     assert SearxngSearch({}).missing() == "没有配置 endpoint"
+
+
+async def test_failover_reasons_do_not_reveal_internal_hosts_or_ips():
+    """自建后端连不上、被出口策略拒绝时，给模型看的说明只有后端名和类别，不带内网主机名和 IP。"""
+    lan = "http://searx.corp.internal:8080/search"
+
+    def refuse(req):
+        raise httpx.ConnectError("connect to 10.20.30.40:8080 refused")
+
+    resolver = Resolver({"searx.corp.internal": "10.20.30.40"})
+    net = Net().on("GET", lan, refuse).on("POST", DS_SEARCH, ds_search())
+    out = await service(net, backends=("searxng", "deepseek"), resolver=resolver,
+                        backend={"searxng": {"endpoint": lan, "allow_private": True}}).search(Q)
+    assert out.backend == "deepseek" and out.failover == ["searxng：暂时连不上（网络错误或超时）"]
+    with pytest.raises(WebError) as e:   # 没写 allow_private：出口核验拒绝，同样不说解析到了哪
+        await service(net, backends=("searxng", "deepseek"), resolver=resolver,
+                      backend={"searxng": {"endpoint": "https://searx.corp.internal/search"}}).search(Q)
+    assert e.value.kind == "blocked" and str(e.value) == "searxng：端点被出口策略拒绝"
+    assert "鉴权失败（HTTP 401）" in public_reason(classify_status(401, "deepseek"))   # 按状态码归类的说明照原样
 
 
 async def test_searxng_results_are_sorted_by_score():
@@ -211,9 +238,12 @@ async def test_missing_keys_are_skipped_with_a_reason():
     cfg = WebConfig(enabled=True, backends=["deepseek", "bocha"])
     svc = WebService(cfg, env={"BOCHA_API_KEY": FAKE_KEY}, client=net.client(), sleep=Sleeps())
     out = await svc.search(Q)
-    assert out.backend == "bocha" and out.failover == ["deepseek：缺少密钥（环境变量 DEEPSEEK_API_KEY 为空）"]
-    none = WebService(WebConfig(enabled=True), env={}, client=net.client())
-    assert none.availability() == ("off", "没有可用的搜索后端（deepseek：缺少密钥（环境变量 DEEPSEEK_API_KEY 为空））")
+    why = "缺少密钥（用户配置 [web.backend.deepseek] api_key_env 指向的环境变量为空）"
+    assert out.backend == "bocha" and out.failover == [f"deepseek：{why}"]
+    none = WebService(WebConfig(enabled=True, backend={"deepseek": {"api_key_env": "ACME_INTERNAL_DS_KEY"}}), env={},
+                      client=net.client())
+    assert none.availability() == ("off", f"没有可用的搜索后端（deepseek：{why}）")
+    assert "ACME_INTERNAL_DS_KEY" not in str(none.availability())   # 自定义的变量名不往外说
 
 
 async def test_empty_results_are_counted_but_not_charged():

@@ -30,7 +30,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..config import WebConfig
 from ..tools.base import TransientToolError
-from .client import Fetched, WebClient, WebError
+from .client import Fetched, WebClient, WebError, canonical_url
 
 BREAKER_SECONDS = 600.0
 CONCURRENCY = 4
@@ -125,6 +125,17 @@ def classify_status(status: int, service: str, *, retry_after: str | None = None
     if status in (408,) or status >= 500:
         return WebError("transient", f"{service} 暂时不可用（HTTP {status}）", status=status)
     return WebError("bad_request", f"{service} 拒绝了请求（HTTP {status}）{tail}", status=status)
+
+
+# 连接层报错（解析、建连、出口核验、超时）的说明里有主机名、解析到的 IP，自建后端时就是内网拓扑。
+# 故障切换说明会进模型看到的工具结果，这类报错只留类别；按状态码归类的说明只有服务名和状态码，照原样
+_KIND_TEXT = {"transient": "暂时连不上（网络错误或超时）", "blocked": "端点被出口策略拒绝", "rate_limited": "限流",
+              "too_large": "响应过大", "bad_type": "响应类型不对", "bad_request": "请求写法不对", "auth": "鉴权失败",
+              "quota": "余额不足", "no_content": "没有可用内容"}
+
+
+def public_reason(e: WebError) -> str:
+    return str(e) if e.status is not None else _KIND_TEXT.get(e.kind, "请求失败")
 
 
 def _retry_after(v: str | None) -> float | None:
@@ -326,8 +337,8 @@ class WebService:
                 if e.kind == "quota":
                     self._broken[b.name] = self.clock() + BREAKER_SECONDS
                 if e.kind in ("bad_request", "blocked"):
-                    raise
-                failover.append(f"{b.name}：{e}")
+                    raise WebError(e.kind, f"{b.name}：{public_reason(e)}", status=e.status) from None
+                failover.append(f"{b.name}：{public_reason(e)}")
                 continue
             out = self._normalize(b, hits, q)
             out.elapsed_ms = int((self.clock() - t0) * 1000)
@@ -369,8 +380,12 @@ class WebService:
         for h in hits:
             if not h.url.lower().startswith(("https://", "http://")):
                 continue
+            try:   # 禁止域名按读取时同一套规范化判定：末尾的点、全角字符、IDN 写法都绕不过去；读不了的网址直接丢
+                _, _, host, _ = canonical_url(h.url)
+            except WebError:
+                continue
             h.url = normalize_url(h.url)
-            if denied_host(host_of(h.url), self.cfg.deny_domains):
+            if denied_host(host, self.cfg.deny_domains):
                 deny += 1
                 continue
             if h.url in seen:
@@ -415,4 +430,4 @@ class WebService:
 
 __all__ = ["FRESHNESS_DAYS", "FetchBackend", "FetchOutcome", "Page", "SearchBackend", "SearchHit", "SearchOutcome",
            "SearchQuery", "WebService", "check", "classify_status", "clean_text", "denied_host", "host_of",
-           "normalize_url", "url_key"]
+           "normalize_url", "public_reason", "url_key"]

@@ -27,7 +27,8 @@ class BochaSearch(SearchBackend):
         self.price = float(opts.get("price_per_call") or 0.0)
 
     def missing(self) -> str | None:
-        return None if self._key else f"缺少密钥（环境变量 {self.key_env} 为空）"
+        # 不写变量名：原因会进会话元数据、接口和模型看到的工具结果，自定义的变量名也是配置细节
+        return None if self._key else "缺少密钥（用户配置 [web.backend.bocha] api_key_env 指向的环境变量为空）"
 
     async def search(self, q: SearchQuery, http: WebClient, *, question: str | None = None) -> list[SearchHit]:
         text = f"{q.q.strip()} site:{q.site.strip()}" if q.site else q.q.strip()

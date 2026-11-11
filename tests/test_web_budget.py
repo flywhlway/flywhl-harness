@@ -54,6 +54,17 @@ def test_state_round_trip_and_child_propagation():
     assert b.child().limits.max_cost_usd == 0.5   # 子预算拿到的是扣掉联网花费之后的余额
 
 
+def test_counts_survive_resuming_after_tightening_to_off():
+    """暂停时已经花过联网的钱，恢复前会话收紧到 off（恢复时不再 enable_web）：计数和费用要跨过后面的每个检查点。"""
+    b = Budget(BudgetConfig(max_cost_usd=1.0)).enable_web(20, 10)
+    b.charge_web("search", cost_usd=0.4)
+    resumed = Budget(BudgetConfig(max_cost_usd=1.0)).restore(b.state())
+    again = Budget(BudgetConfig(max_cost_usd=1.0)).restore(resumed.state())
+    assert (again.web_searches, again.tool_cost_usd, again.cost_usd) == (1, 0.4, 0.4)
+    assert resumed.snapshot()["tool_cost_usd"] == 0.4 and "max_web_searches" not in resumed.snapshot()
+    assert resumed.web_counts() == {"web_searches": 1, "web_fetches": 0, "tool_cost_usd": 0.4}
+
+
 def test_budget_without_web_keeps_its_old_shape():
     b = Budget(BudgetConfig())
     assert not any(k.startswith("web_") or k == "tool_cost_usd" for k in b.state())

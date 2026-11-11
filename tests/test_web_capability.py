@@ -170,6 +170,29 @@ async def test_subagent_inherits_and_shares_the_run_limit(ws):
     assert h.store.get_run(res.run_id).result["web_searches"] == 2
 
 
+def test_inflight_reservations_are_shared_across_concurrent_subagents(ws):
+    """并发的子代理各有自己的 Run 和 state，调用编号还可能相同：在途占位挂在顶层预算上、按 Run 区分，
+    第二个子代理看得到第一个还没记账的调用，合计不超过本次运行的上限。"""
+    from types import SimpleNamespace
+
+    from flywhl_harness.agent.budget import Budget
+    from flywhl_harness.config import BudgetConfig
+    from flywhl_harness.tools.base import ToolContext
+
+    tool = make_web_harness(ws, [], web_net(), web__max_searches_per_run=1).tools.get("web_search")
+    top = Budget(BudgetConfig()).enable_web(1, 1)
+
+    def sub(run_id: str) -> ToolContext:
+        return ToolContext(run_id=run_id, session_id="s", call_id="c1", workspace=None, cancel=None, blobs=None,
+                           idempotency_key=f"{run_id}:c1", run=SimpleNamespace(budget=top.child()))
+
+    a, b = sub("r_a"), sub("r_b")
+    assert tool._reserve(a) is None
+    assert "搜索上限 1 次" in (tool._reserve(b) or "")
+    tool._release(a)                      # 第一个失败退回占位后，第二个才能用
+    assert tool._reserve(b) is None and top.web_inflight == {"r_b:c1": "search"}
+
+
 async def test_subagent_of_a_tightened_parent_gets_the_tightened_level(ws):
     prov = RoleRouter(main=[{"tool_calls": [{"name": "task", "args": {"description": "d", "prompt": "p"}}]}, "好"],
                       sub=['{"status": "ok", "summary": "s"}'])

@@ -44,7 +44,8 @@ class SearxngSearch(SearchBackend):
                                   max_bytes=4_000_000, accept=("application/json",), allow_http=self.allow_http,
                                   allow_private=self.allow_private)
         if resp.status == 403:
-            raise WebError("auth", "SearXNG 拒绝了 JSON 请求（HTTP 403）：实例要在 settings.yml 的 search.formats 里打开 json")
+            raise WebError("auth", "SearXNG 拒绝了 JSON 请求（HTTP 403）：实例要在 settings.yml 的 search.formats 里打开 json",
+                           status=403)
         data = check(resp, "SearXNG") or {}
         return [SearchHit(title=str(r.get("title") or ""), url=str(r["url"]), snippet=str(r.get("content") or ""), site="",
                           published=_day(r.get("publishedDate")),

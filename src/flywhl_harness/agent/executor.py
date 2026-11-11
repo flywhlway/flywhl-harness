@@ -365,6 +365,11 @@ class ToolExecutor:
             if code and publish is not None:   # 不带参数：被拦下的正是参数里疑似密钥的那段，通知不能再抄一遍
                 publish(E.NOTICE, {"level": "warn", "code": code, "text": f"{tool.name} 调用被拦截：{why}"})
             return replace(perm, decision=Decision.DENY, reason=why)
+        if verdict == "ask" and rc.tainted and getattr(rc.approvals, "on_ask", "wait") == "allow":
+            # --yes 自动批准所有 ask。会话读过不可信内容后，没出现过的网址正是注入外传的通道，
+            # 自动批准就等于 fetch_scope = public；没读过不可信内容时照常按 --yes 放行
+            return replace(perm, decision=Decision.DENY,
+                           reason=f"{why}。会话读取过不可信内容，--yes 不自动批准这类读取：请先 web_search 找到它，或请用户把网址发过来")
         if verdict == "ask" and perm.decision == Decision.ALLOW:
             return replace(perm, decision=Decision.ASK, reason=why)
         return perm
@@ -373,7 +378,7 @@ class ToolExecutor:
         """联网工具的记账：按结果里的 ``details["web"]`` 计次数和费用，同时释放并行批里的占位。
         回放时结果来自录制，按同样的数据记账，预算走向与录制时一致。"""
         rc = self.rc
-        rc.state.get("web_inflight", {}).pop(call.id, None)
+        rc.budget.root().web_inflight.pop(f"{rc.run_id}:{call.id}", None)
         web = (result.details or {}).get("web")
         if isinstance(web, dict) and (web.get("counted") or web.get("cost_usd")):
             rc.budget.charge_web(str(web.get("op") or "search"), counted=bool(web.get("counted")),

@@ -62,7 +62,7 @@
 - 搜索默认用 DeepSeek Search（与模型共用 `DEEPSEEK_API_KEY`），可以按顺序加博查、自建 SearXNG 做故障转移；读取默认用 DeepSeek Fetch，
   也可以 `fetch_backend = "direct"` 从本机直连。
 - 读取范围 `fetch_scope` 默认 `ask`：用户给过的、搜索结果里出现过的网址直接读，其他网址要确认。按完整网址比对，查询串一个字符都不动。
-  查询词和网址里带像密钥的内容直接拒绝。
+  `--yes` 只在会话还没读过不可信内容时替你确认，读过之后没出现过的网址直接拒绝。查询词和网址里带像密钥的内容（不分大小写）直接拒绝。
 - 所有联网请求走同一个出站入口：只允许 https，只放行公网地址，连接钉在核过的 IP 上，重定向逐跳重新核验，不收发 Cookie。
 - 结果按不可信内容处理，第一次出现即置污点。次数受 `max_searches_per_run`、`max_fetches_per_run` 限制，费用计入 `max_cost_usd` 并单列为 `tool_cost_usd`。
 - 项目配置里的 `[web]` 只能收紧；后端、端点、密钥变量名、`fetch_allow` 只认用户配置，不出现在 `/api` 接口、事件和日志里。

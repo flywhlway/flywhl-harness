@@ -46,6 +46,8 @@ class Budget:
         self.web_searches = 0
         self.web_fetches = 0
         self.tool_cost_usd = 0.0
+        # 在途的联网调用（"run_id:call_id" → op），只用顶层预算上的这一份：并行批和并发子代理彼此看得到占位
+        self.web_inflight: dict[str, str] = {}
         self._soft_warned: set[str] = set()
 
     # ------------------------------------------------------------------ 记账
@@ -78,6 +80,13 @@ class Budget:
     def enable_web(self, max_searches: int, max_fetches: int) -> "Budget":
         self.web = {"searches": int(max_searches), "fetches": int(max_fetches)}
         return self
+
+    def root(self) -> "Budget":
+        """顶层预算：联网次数上限按整次运行算，子代理的调用累计到这里，剩余次数也要从这里看。"""
+        b = self
+        while b.parent is not None:
+            b = b.parent
+        return b
 
     @property
     def cost_usd(self) -> float:
@@ -153,9 +162,15 @@ class Budget:
         """可持久化的预算状态：暂停恢复、崩溃接管后从这里继续计数，而不是从零开始（否则反复暂停就能绕过限额）。"""
         st = {"turns": self.turns, "tool_calls": self.tool_calls, "usage": self.usage.to_dict(),
               "elapsed": round(self.elapsed, 3)}
-        if self.web is not None:
-            st.update(web_searches=self.web_searches, web_fetches=self.web_fetches, tool_cost_usd=self.tool_cost_usd)
+        st.update(self.web_counts())
         return st
+
+    def web_counts(self) -> dict:
+        """联网计数。开着联网，或者已经有计数时才输出：暂停时把会话收紧到 off 再恢复，``web`` 没了但花过的钱还在，
+        丢掉就会在下一个检查点归零、少算费用上限。从没联网过的运行返回空，状态与以前一样。"""
+        if self.web is None and not (self.web_searches or self.web_fetches or self.tool_cost_usd):
+            return {}
+        return {"web_searches": self.web_searches, "web_fetches": self.web_fetches, "tool_cost_usd": self.tool_cost_usd}
 
     def restore(self, st: dict | None) -> "Budget":
         if st:
@@ -176,9 +191,9 @@ class Budget:
             "usage": self.usage.to_dict(), "max_total_tokens": lim.max_total_tokens,
             "max_cost_usd": lim.max_cost_usd, "elapsed": round(self.elapsed, 2), "max_wall_seconds": lim.max_wall_seconds,
         }
+        snap.update(self.web_counts())
         if self.web is not None:
-            snap.update(web_searches=self.web_searches, max_web_searches=self.web["searches"],
-                        web_fetches=self.web_fetches, max_web_fetches=self.web["fetches"], tool_cost_usd=self.tool_cost_usd)
+            snap.update(max_web_searches=self.web["searches"], max_web_fetches=self.web["fetches"])
         return snap
 
 

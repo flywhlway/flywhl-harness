@@ -14,11 +14,12 @@ from flywhl_harness import Harness, ScriptedProvider, Store
 from flywhl_harness.cancel import CancelToken
 from flywhl_harness.config import HarnessConfig, UntrustedConfigWarning, WebConfig
 from flywhl_harness.llm import native as nat
-from flywhl_harness.llm.base import ModelRequest, StreamEvent
+from flywhl_harness.llm.base import ErrorKind, ModelRequest, ProviderError, StreamEvent
 from flywhl_harness.llm.native import NATIVE_SPECS, native_for, summarize
 from flywhl_harness.llm.openai_compat import OpenAICompatProvider
 from flywhl_harness.llm.replay import context_fingerprint
 from flywhl_harness.llm.resilient import ResilientProvider
+from flywhl_harness.runtime.retry import RetryPolicy
 from flywhl_harness.observe.replay import replay_run
 from flywhl_harness.types import Message, ServerBlock, TextBlock
 
@@ -317,6 +318,18 @@ async def test_no_native_search_once_the_run_budget_is_used(ws):
     assert [r.native_search for r in p.requests] == ["anthropic", None]
 
 
+async def test_subagent_sees_the_searches_its_parent_already_used(ws):
+    """上限按整次运行算：父代理把唯一一次搜索用掉后派出的子代理，请求里不能再带模型侧联网。"""
+    task = {"tool_calls": [{"id": "c1", "name": "task", "args": {"description": "查", "prompt": "查一下"}}]}
+    p = FakeClaude([task, '{"status": "ok", "summary": "s"}', "好"], natives={0: ONE})
+    h = _harness(ws, p, max_searches_per_run=1)
+    res = await h.run("x")
+    assert res.status == "completed"
+    roles = [(r.metadata.get("role"), r.native_search) for r in p.requests]
+    assert roles[0] == ("main", "anthropic") and ("subagent", None) in roles
+    assert ("subagent", "anthropic") not in roles
+
+
 async def test_tightening_to_off_stops_native_search(ws):
     p = FakeClaude(["一", "二"])
     h = _harness(ws, p)
@@ -333,6 +346,22 @@ async def test_fallback_announces_lost_native_search(ws):
     p = FakeClaude(["好"], notices={0: {"code": "fallback", "text": "降级到 x/y"}})
     res = await _harness(ws, p).run("x")
     assert any(e.type == "notice" and e.data.get("code") == "native_web_lost" for e in res.events)
+
+
+async def test_fallback_to_another_confirmed_claude_keeps_native_search(ws):
+    """降级链的备用项还在 Anthropic 官方端点、也是已确认的模型：server tool 照常带上，不该提示“没有联网”。"""
+    busy = [ProviderError(ErrorKind.OVERLOADED, "忙")]
+    once = RetryPolicy(max_attempts=1, base_delay=0.001)
+    backup = FakeClaude(["好"], natives={0: ONE})
+    chain = ResilientProvider([(FakeClaude(busy), "claude-opus-5-5"), (backup, "claude-sonnet-5-5")], once)
+    res = await _harness(ws, chain).run("x")
+    notes = {e.data.get("code"): e.data for e in res.events if e.type == "notice"}
+    assert notes["fallback"]["native_kept"] is True and "native_web_lost" not in notes
+    assert backup.requests[0].native_search == "anthropic"
+    # 降级到别家：联网丢了，照样提示
+    other = ResilientProvider([(FakeClaude(busy), "claude-opus-5-5"), (ScriptedProvider(["好"]), "m")], once)
+    lost = await _harness(ws, other).run("x")
+    assert any(e.type == "notice" and e.data.get("code") == "native_web_lost" for e in lost.events)
 
 
 async def test_off_session_requests_are_unchanged(ws):

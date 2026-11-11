@@ -263,6 +263,23 @@ async def test_web_runs_replay_deterministically_without_touching_the_network(ws
                                                      "max_fetches_per_run": 10}
 
 
+async def test_tightened_web_session_replays_deterministically(ws):
+    """开工前 fetch、跑之前收紧为 search：录制时两个工具规格都发给了模型，读取被执行门拒绝；回放要原样重现。"""
+    from .webkit import DS_SEARCH, Net, ds_search, fetch_call, make_web_harness, search_call, tool_results
+
+    net = Net().on("POST", DS_SEARCH, ds_search())
+    h = make_web_harness(ws, [search_call("httpx"), fetch_call("https://pypi.org/project/httpx/"), "答案"], net,
+                         web__default="fetch")
+    s = h.create_session("t")
+    h.set_capabilities(s.id, "search")
+    res = await h.run("httpx 最新版本", session_id=s.id)
+    assert res.status == "completed"
+    assert tool_results(res.events, "web_fetch")[0]["status"] == "denied"
+    sent = len(net.requests)
+    assert_same(await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools))
+    assert len(net.requests) == sent   # 回放不联网
+
+
 def _echo_last_tool(req):
     return next(m.text for m in reversed(req.messages) if m.role == "tool")
 

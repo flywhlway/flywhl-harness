@@ -115,9 +115,12 @@ def _today() -> str:
 
 def _top_budget(ctx: ToolContext) -> Any:
     b = getattr(ctx.run, "budget", None)
-    while b is not None and b.parent is not None:
-        b = b.parent
-    return b
+    return b.root() if b is not None else None
+
+
+def _inflight(ctx: ToolContext) -> dict[str, str]:
+    top = _top_budget(ctx)
+    return top.web_inflight if top is not None else ctx.state.setdefault("web_inflight", {})
 
 
 class _WebTool(Tool):
@@ -142,18 +145,18 @@ class _WebTool(Tool):
         limit = self.cfg.max_searches_per_run if self.op == "search" else self.cfg.max_fetches_per_run
         top = _top_budget(ctx)
         used = 0 if top is None else (top.web_searches if self.op == "search" else top.web_fetches)
-        inflight = ctx.state.setdefault("web_inflight", {})
+        inflight = _inflight(ctx)   # 挂在顶层预算上：并发的子代理也看得到彼此在途的调用
         pending = sum(1 for op in inflight.values() if op == self.op)
         if used + pending >= limit:
             what = "搜索" if self.op == "search" else "网页读取"
             key = "max_searches_per_run" if self.op == "search" else "max_fetches_per_run"
             return f"已达本次运行的{what}上限 {limit} 次（用户配置 [web] {key}）。请用已有信息完成任务，或说明还缺什么。"
-        inflight[ctx.call_id] = self.op
+        inflight[f"{ctx.run_id}:{ctx.call_id}"] = self.op
         return None
 
     @staticmethod
     def _release(ctx: ToolContext) -> None:
-        ctx.state.get("web_inflight", {}).pop(ctx.call_id, None)
+        _inflight(ctx).pop(f"{ctx.run_id}:{ctx.call_id}", None)
 
     def _header(self, kind: str, backend: str) -> str:
         return f"[{kind} · {'检索' if kind == '联网搜索结果' else '读取'}于 {self.today()} · 后端 {backend} · {UNTRUSTED}]"
@@ -178,6 +181,7 @@ class WebSearchTool(_WebTool):
 
     def precheck(self, args: dict[str, Any], rc: "RunContext") -> tuple[str, str, str | None]:
         """(allow | deny, 原因, notice 代码)。查询词只做外传检查，范围由后端主机名单决定。"""
+        from ..net.client import WebError, canonical_url
         from ..net.exfil import leaked
         from ..net.search import denied_host
 
@@ -185,8 +189,13 @@ class WebSearchTool(_WebTool):
         if why := leaked(text):
             return "deny", f"查询词{why}，可能是在把数据带出去，已拦截", "web_exfil"
         site = str(args.get("site") or "").strip().lower()
-        if site and denied_host(site, self.cfg.deny_domains):
-            return "deny", f"{site} 在 [web] deny_domains 里", None
+        if site:
+            try:   # 与读取同一套规范化：evil.com.、全角写法都按 evil.com 判
+                site = canonical_url(f"https://{site}/")[2]
+            except WebError:
+                return "deny", "site 不是合法的域名", None
+            if denied_host(site, self.cfg.deny_domains):
+                return "deny", f"{site} 在 [web] deny_domains 里", None
         return "allow", "", None
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:

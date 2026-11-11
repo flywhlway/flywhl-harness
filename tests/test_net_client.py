@@ -65,8 +65,9 @@ async def test_scheme_and_userinfo_rules():
 async def test_allow_private_never_reaches_metadata_or_link_local():
     for ip in ("169.254.169.254", "fe80::1"):
         client = Net().client(Resolver({"searx.lan": ip}))
-        with pytest.raises(WebError, match="联网工具只连公网地址"):
+        with pytest.raises(WebError, match="联网工具只连公网地址") as e:
             await client.request("GET", "https://searx.lan/", in_scope=ANY, allow_private=["searx.lan"])
+        assert ip not in str(e.value)   # 解析结果不往外说
 
 
 async def test_out_of_scope_host_is_refused():
@@ -211,6 +212,17 @@ async def test_charset_from_content_type():
     assert (await net.client().request("GET", "https://a.test/", in_scope=ANY)).text() == "你好"
 
 
+@pytest.mark.parametrize("charset", ["punycode", "unicode_escape", "utf-7", "rot13", "no-such-charset"])
+def test_unexpected_charsets_fall_back_to_utf8(charset):
+    from flywhl_harness.net.client import Fetched
+
+    body = "你好 \\u0041 +AEE-".encode()
+    page = Fetched(200, "https://a.test/", {"content-type": f"text/html; charset={charset}"}, body)
+    assert page.text() == body.decode("utf-8")
+    latin = Fetched(200, "https://a.test/", {"content-type": "text/html; charset=windows-1252"}, "café".encode("cp1252"))
+    assert latin.text() == "café"
+
+
 # ---------------------------------------------------------------------- 外传检查
 SENTINEL = "sentinel-value-0042"   # 假的“密钥值”：只用来证明比对会命中
 
@@ -222,10 +234,14 @@ def test_leak_check_hits_secret_env_values_raw_and_url_encoded():
     assert leaked("https://x.test/?d=" + SENTINEL.replace("-", "%2D"), env=env)
     assert leaked("search someone-long-name", env=env) is None   # 不算密钥的变量名
     assert leaked("abc def", env=env) is None                     # 太短的值不比对
+    # 不分大小写：域名会被规范成小写，大小写改写也不该绕过
+    assert leaked(f"https://{SENTINEL.upper()}.evil.test/", env=env)
+    assert leaked(f"https://{SENTINEL.lower()}.evil.test/", env={"MY_SERVICE_TOKEN": SENTINEL.upper()})
 
 
 @pytest.mark.parametrize("text", ["sk-" + "a" * 24, "ghp_" + "b" * 30, "github_pat_" + "c" * 24,
-                                  "AKIA" + "ABCDEFGHIJKLMNOP", "xoxb-" + "1234567890-abc"])
+                                  "AKIA" + "ABCDEFGHIJKLMNOP", "xoxb-" + "1234567890-abc", "glpat-" + "d" * 20,
+                                  "AIza" + "e" * 35, "-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"])
 def test_leak_check_hits_well_known_key_prefixes(text):
     assert leaked(f"look up {text}", env={}) == "包含形似 API 密钥的字符串"
 

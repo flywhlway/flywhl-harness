@@ -39,7 +39,8 @@ class _DeepSeek:
         self.hosts = ((urlsplit(base).hostname or "").lower(),)
 
     def missing(self) -> str | None:
-        return None if self._key else f"缺少密钥（环境变量 {self.key_env} 为空）"
+        # 不写变量名：原因会进会话元数据、接口和模型看到的工具结果，自定义的变量名也是配置细节
+        return None if self._key else "缺少密钥（用户配置 [web.backend.deepseek] api_key_env 指向的环境变量为空）"
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}

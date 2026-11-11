@@ -298,6 +298,11 @@ async def _replay_in(
         s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass",
                              project_context=traj["session"].get("project_context"),   # 模型当时看到的，从轨迹里取
                              capabilities=_recorded_web(settings, session_tools))
+        if s.meta.get("tools") != list(session_tools):
+            # 工具名单照录制的来：开工后收紧过的会话，录制时联网工具还在名单里（收紧只拦调用、不撤规格），
+            # 按收紧后的能力重新筛会少一个规格，第一步就分叉。执行门照样按收紧后的能力拒绝
+            h.store.update_session(s.id, meta={**s.meta, "tools": list(session_tools)})
+            s = h.store.get_session(s.id)
         for e in traj.get("history") or []:
             h.store.append_entry(s.id, e["kind"], e["payload"], entry_id=e["id"])
         if settings.get("clear_watermark"):

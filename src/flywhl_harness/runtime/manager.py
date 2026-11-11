@@ -515,9 +515,7 @@ class Harness:
         # 预算计数和轮次一起落进 result：页面在运行结束后才打开时收不到实时 usage 事件，只能读这里
         result = {"text": out.final_text, "reason": out.reason, "turns": rc.budget.turns,
                   "tool_calls": rc.budget.tool_calls, "by": out.by}
-        if rc.budget.web is not None:
-            result.update(web_searches=rc.budget.web_searches, web_fetches=rc.budget.web_fetches,
-                          tool_cost_usd=rc.budget.tool_cost_usd)
+        result.update(rc.budget.web_counts())
         self._checkpoint(a, paused=out.status == "paused")
         self.store.update_run(a.run_id, usage=rc.run_usage.to_dict(), result=result, error=out.error)
         cur = RunStatus(self.store.get_run(a.run_id).status)  # type: ignore[union-attr]
