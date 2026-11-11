@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import http.cookiejar
 import ipaddress
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpcore
 import httpx
@@ -114,18 +115,51 @@ class _PinnedTransport(httpx.AsyncHTTPTransport):
         pool._network_backend = backend
 
 
-def _host_of(url: str) -> tuple[str, str, int]:
-    u = urlsplit(url)
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOSTNAME = re.compile(rf"(?:{_LABEL}\.)*{_LABEL}")
+_UNSAFE = re.compile(r"[\x00-\x20\x7f\\]")
+
+
+def canonical_url(url: str) -> tuple[str, str, str, int]:
+    """严格解析并重建网址，返回 (规范网址, 协议, 主机, 端口)。范围判定和实际发送都用规范网址：
+    同一个字符串在这里、httpx 和读取服务那里解析出的主机必须一致。
+
+    - 空白、控制字符、反斜杠一律拒绝：``urlsplit`` 会悄悄删掉制表符，WHATWG 解析器把反斜杠当路径分隔符，
+      ``https://evil.example\\.allowed.example/`` 在这里是一个主机、在读取服务那里是另一个；
+    - 带用户名密码的拒绝；主机名只能是合法域名（IDNA 转成 ASCII、小写、去掉末尾的点）或 IP 字面量；
+    - 片段丢弃（不会发给服务器），默认端口省略，路径和查询串原样保留。"""
+    if _UNSAFE.search(url):
+        raise WebError("blocked", "网址里不能有空白、控制字符或反斜杠")
+    try:
+        u = urlsplit(url)
+        port = u.port
+    except ValueError:
+        raise WebError("bad_request", f"网址写法不对：{url[:200]}") from None
+    scheme = u.scheme.lower()
     if u.username is not None or u.password is not None or "@" in (u.netloc or ""):
         raise WebError("blocked", "网址里不能带用户名或密码")
-    host = (u.hostname or "").rstrip(".").lower()
-    if not host:
+    raw = (u.hostname or "").rstrip(".")
+    if not raw:
         raise WebError("bad_request", f"网址缺少主机名：{url[:200]}")
     try:
-        port = u.port or (443 if u.scheme == "https" else 80)
+        host = str(ipaddress.ip_address(raw))
+        netloc_host = f"[{host}]" if ":" in host else host
     except ValueError:
-        raise WebError("bad_request", f"网址的端口不对：{url[:200]}") from None
-    return u.scheme.lower(), host, port
+        try:
+            host = raw.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            raise WebError("bad_request", f"主机名不合法：{raw[:100]}") from None
+        if not _HOSTNAME.fullmatch(host):
+            raise WebError("bad_request", f"主机名不合法：{raw[:100]}")
+        netloc_host = host
+    default = 443 if scheme == "https" else 80
+    netloc = netloc_host if port in (None, default) else f"{netloc_host}:{port}"
+    return urlunsplit((scheme, netloc, u.path or "/", u.query, "")), scheme, host, port or default
+
+
+def _host_of(url: str) -> tuple[str, str, int]:
+    _, scheme, host, port = canonical_url(url)
+    return scheme, host, port
 
 
 class WebClient:
@@ -187,6 +221,7 @@ class WebClient:
         accept_set = {a.lower() for a in accept} if accept is not None else None
         cur, cur_method, body = url, method, json
         for _ in range(redirects + 1):
+            cur = canonical_url(cur)[0]   # 核验、范围判定、发送用同一个字符串
             host, _port, ips = await self.vet(cur, allow_http=allow_http, allow_private=allow_private)
             if not in_scope(host, cur):
                 raise WebError("blocked", f"{host} 不在允许的范围内")
@@ -239,4 +274,4 @@ def _scope_text(ip: IPAddress) -> str:
     return {"loopback": "本机回环地址", "local": "链路本地、保留或云元数据地址", "private": "内网地址"}.get(address_scope(ip), "公网地址")
 
 
-__all__ = ["Fetched", "USER_AGENT", "WebClient", "WebError"]
+__all__ = ["Fetched", "USER_AGENT", "WebClient", "WebError", "canonical_url"]

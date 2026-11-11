@@ -283,22 +283,17 @@ class WebFetchTool(_WebTool):
 
     def precheck(self, args: dict[str, Any], rc: "RunContext") -> tuple[str, str, str | None]:
         """读取范围（``fetch_scope``）与外传检查。返回 (allow | ask | deny, 原因, notice 代码)。"""
-        from urllib.parse import urlsplit
-
+        from ..net.client import WebError, canonical_url
         from ..net.exfil import leaked
         from ..net.search import denied_host, url_key
 
         url = str(args.get("url", "")).strip()
         try:
-            u = urlsplit(url)
-            port = u.port or 443
-        except ValueError:
-            return "deny", "网址写法不对", None
-        if u.scheme.lower() != "https":
+            _, scheme, host, port = canonical_url(url)
+        except WebError as e:
+            return "deny", str(e), None
+        if scheme != "https":
             return "deny", "只能读取 https 网址", None
-        host = (u.hostname or "").lower()
-        if not host or u.username is not None or u.password is not None:
-            return "deny", "网址缺少主机名或带了用户名密码", None
         if denied_host(host, self.cfg.deny_domains):
             return "deny", f"{host} 在 [web] deny_domains 里", None
         seen = url_key(url) in seen_urls(rc)
@@ -321,21 +316,27 @@ class WebFetchTool(_WebTool):
     def _scope(self, url: str, rc: "RunContext | None") -> Callable[[str, str], bool]:
         """直连读取时每一跳的范围：第一跳已经过 precheck；重定向到同一主机、fetch_allow 里的主机放行，
         fetch_scope = public 时任意公网主机放行，其余的拒绝（跨主机跳转可以变成外传通道）。"""
-        from ..net.search import host_of
+        from ..net.exfil import leaked
+        from ..net.search import denied_host, host_of
 
         first = host_of(url)
 
         def ok(host: str, hop: str) -> bool:
+            if denied_host(host, self.cfg.deny_domains) or leaked(hop, heuristics=False):
+                return False   # 第一跳查过的禁止域名与外传检查，跳转之后照样要过
             return host == first or self.cfg.fetch_scope == "public" or self._allowed_host(host, 443)
 
         return ok
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        from ..net.client import WebError
+        from ..net.client import WebError, canonical_url
         from ..net.exfil import leaked
 
-        url = str(args["url"]).strip()
-        if not url.lower().startswith("https://"):
+        try:   # 发给读取服务的是规范网址：与 precheck 判定的是同一个主机
+            url, scheme, _host, _port = canonical_url(str(args["url"]).strip())
+        except WebError as e:
+            return ToolResult.error(str(e))
+        if scheme != "https":
             return ToolResult.error("只能读取 https 网址")
         if why := leaked(url, heuristics=False):   # 兜底：执行层的 precheck 已经查过一次
             return ToolResult.error(f"网址{why}，已拦截")

@@ -73,6 +73,16 @@ class RecordedTool(Tool):
     def effect_for(self, args: dict[str, Any], workspace: str | None = None) -> Effect:
         return self.fallback.effect_in(args, workspace) if self.fallback else Effect.READ
 
+    def precheck(self, args: dict[str, Any], rc: Any) -> tuple[str, str, str | None]:
+        """联网工具的范围与外传检查。用录制结果或 dry-run 的调用不出网，照常放行；``--allow-web`` 下真的要联网的，
+        交给真实工具判定，读取范围、外传检查一条不少。"""
+        if not self.egress or _args_key(self.name, args) in self.by_args or not self.allow_web:
+            return "allow", "", None
+        pre = getattr(self.fallback, "precheck", None)
+        if pre is None:
+            return "deny", f"没有可用的 {self.name}，分叉回放不能联网", None
+        return pre(args, rc)
+
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         rec = self.recorded.get(ctx.call_id)
         if rec is not None:

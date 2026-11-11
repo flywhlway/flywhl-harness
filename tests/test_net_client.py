@@ -237,3 +237,33 @@ def test_leak_check_heuristics_for_random_tokens():
     # 提交号、哈希、普通长词都不算
     assert leaked("https://github.com/encode/httpx/commit/" + "0123456789abcdef" * 3, env={}) is None
     assert leaked("https://docs.python.org/3/library/asyncio-eventloop.html", env={}) is None
+
+
+# ---------------------------------------------------------------------- 网址规范化：判定与发送用同一个字符串
+@pytest.mark.parametrize("url,canon", [
+    ("https://Docs.Python.org./3/?q=1#frag", "https://docs.python.org/3/?q=1"),
+    ("https://example.com:443", "https://example.com/"),
+    ("https://example.com:8443/a", "https://example.com:8443/a"),
+    ("https://中文.cn/页面", "https://xn--fiq228c.cn/页面"),
+    ("https://[::1]:8443/", "https://[::1]:8443/"),
+])
+def test_canonical_url(url, canon):
+    from flywhl_harness.net.client import canonical_url
+
+    assert canonical_url(url)[0] == canon
+
+
+@pytest.mark.parametrize("url", ["https://evil.example\\.allowed.example/", "https://evil.example\t.allowed.example/",
+                                 "https://a b.example/", "https://under_score.example/", "https://allowed.example%2F@evil.example/",
+                                 "https://-bad.example/", "https:///x"])
+def test_canonical_url_refuses_ambiguous_hosts(url):
+    from flywhl_harness.net.client import canonical_url
+
+    with pytest.raises(WebError):
+        canonical_url(url)
+
+
+async def test_requests_are_sent_to_the_canonical_url():
+    net = Net().on("GET", "https://docs.python.org/", httpx.Response(200, text="ok"))
+    out = await net.client().request("GET", "https://DOCS.python.org./3/#x", in_scope=lambda host, url: host == "docs.python.org")
+    assert out.url == "https://docs.python.org/3/" and str(net.requests[0].url) == "https://docs.python.org/3/"

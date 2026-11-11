@@ -214,3 +214,27 @@ async def test_fetch_service_errors_are_tool_errors(ws):
     res = await h.run("x")
     end = tool_results(res.events, "web_fetch")[0]
     assert end["is_error"] and "安全策略" in end["content"] and counters(h, res)["web_fetches"] == 0
+
+
+async def test_fetch_checks_and_sends_the_same_canonical_url(ws):
+    net = web_net()
+    script = [fetch_call("https://evil.example\\.docs.python.org/"), fetch_call("https://Docs.Python.org./3/#frag"), "好"]
+    h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch", web__fetch_allow=["*.python.org"])
+    bad, good = tool_results((await h.run("x")).events, "web_fetch")
+    assert bad["status"] == "denied" and "反斜杠" in bad["content"]
+    assert not good["is_error"], good["content"]
+    assert fetches(net) == ["https://docs.python.org/3/"]
+
+
+async def test_direct_fetch_redirects_cannot_reach_denied_domains_or_carry_keys(ws):
+    secret = "sk-" + "R" * 30
+    net = (Net().on("GET", "https://ok.example/a", httpx.Response(302, headers={"location": "https://x.spam.example/"}))
+           .on("GET", "https://ok.example/b", httpx.Response(302, headers={"location": f"https://other.example/?k={secret}"}))
+           .on("GET", "https://", httpx.Response(200, text="不该到这里", headers={"content-type": "text/plain"})))
+    h = make_web_harness(ws, [fetch_call("https://ok.example/a"), fetch_call("https://ok.example/b"), "好"], net,
+                         web__default="fetch", web__fetch_backend="direct", web__fetch_scope="public",
+                         web__deny_domains=["spam.example"])
+    a, b = tool_results((await h.run("x")).events, "web_fetch")
+    assert a["is_error"] and "不在允许的范围内" in a["content"]
+    assert b["is_error"] and "不在允许的范围内" in b["content"]
+    assert [str(r.url) for r in net.requests] == ["https://ok.example/a", "https://ok.example/b"]

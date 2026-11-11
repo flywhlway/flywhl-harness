@@ -287,3 +287,13 @@ async def test_forked_web_calls_dry_run_unless_recorded_or_allowed(ws):
     allowed = ScriptedProvider(["-", _live_search("别的查询"), _echo_last_tool])
     rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=allowed, fork_at=1, allow_web=True)
     assert rep.final_text.startswith("[联网搜索结果") and len(net.requests) == sent + 1
+
+
+async def test_forked_live_web_calls_still_go_through_fetch_scope(ws):
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    unseen = {"tool_calls": [{"id": "live_2", "name": "web_fetch", "args": {"url": "https://unseen.example/?d=1"}}]}
+    h.config.web.fetch_scope = "cited"
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=ScriptedProvider(["-", unseen, _echo_last_tool]),
+                           fork_at=1, allow_web=True)
+    assert "fetch_scope = cited" in rep.final_text and len(net.requests) == sent
