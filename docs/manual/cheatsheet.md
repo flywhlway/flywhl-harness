@@ -28,7 +28,7 @@
 | `~/.flywhl/trusted.json` | 已信任的配置文件（路径 + SHA-256）和工作区（仓库根） |
 | `~/.flywhl/server_token` | Web 访问令牌（0600） |
 | `<工作区>/.flywhl/` | 会话库、审批记录、影子 git 快照 |
-| `.env` | 各家密钥与 `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL` |
+| `.env` | 各家密钥（含 `BOCHA_API_KEY`）与 `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL` |
 
 ## 关键配置与默认值
 
@@ -45,6 +45,8 @@
 | `loop_guard.warn_repeats` / `stop_repeats` / `max_consecutive_errors` | 3 / 5 / 6 |
 | `permissions.mode` / `on_ask` / `approval_timeout` | `default` / `wait` / 600 秒 |
 | `permissions.sandbox` / `sandbox_network` / `strip_secret_env` | `auto` / `auto`（有沙箱时是空白名单的 `allowlist`）/ true |
+| `web.enabled` / `default` / `fetch_scope` | false / `off` / `ask` |
+| `web.backends` / `fetch_backend` / `max_searches_per_run` / `max_fetches_per_run` | `["deepseek"]` / `deepseek` / 20 / 10 |
 
 ## 规则语法
 

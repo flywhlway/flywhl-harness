@@ -63,6 +63,7 @@
 | `mock.py` | `ScriptedProvider`（测试与示例）、`DemoProvider`（无 Key 演示）、`deterministic_summary()` |
 | `replay.py` | `ReplayProvider`、`context_fingerprint()` |
 | `resilient.py` | `ResilientProvider`：重试 + 熔断 + 降级链 |
+| `native.py` | 模型侧联网的声明（`NativeSearchSpec`）、`native_for()` 门槛、server tool 参数、响应摘要 |
 | `__init__.py` | `create_provider()`（可跨供应商的降级链）、`detect_provider()` |
 
 ### tools/ —— 双手
@@ -81,6 +82,17 @@
 | `regex_search.py` | 正则搜索放进子进程执行（`grep`、`search_ref` 共用）：超时或取消时直接杀掉，灾难性回溯不卡事件循环 |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
 | `mcp.py` | 最小 MCP stdio 客户端与 `MCPTool`（注解的保守默认值、环境隔离、`notifications/cancelled`） |
+| `web.py` | `web_search` / `web_fetch`：静态规格、结果格式、`fetch_scope` 判定（`precheck`）、本会话出现过的网址 |
+
+### net/ —— 联网
+
+| 文件 | 内容 |
+|---|---|
+| `client.py` | `WebClient`：唯一的出站 HTTP 入口（https、公网地址、连接钉 IP、逐跳重定向、不收发 Cookie）；`canonical_url()` |
+| `search.py` | `WebService`：后端归一化、故障转移、熔断、并发上限、会话内缓存、计费；`deny_domains` 过滤与去重 |
+| `exfil.py` | `leaked()`：查询词与网址里的密钥、密钥前缀、长随机串 |
+| `extract.py` | 直连读取的正文抽取（HTML 转文本） |
+| `backends/` | DeepSeek Search / Fetch、博查、SearXNG、`direct` |
 
 ### policy/ —— 策略
 
@@ -104,6 +116,7 @@
 | `retry.py` | `RetryPolicy`、`CircuitBreaker`（探测名额 `release()` 与过期）、`RetryBudget`、`retry_async()` |
 | `scheduler.py` | `DagScheduler`、`TaskSpec`、`UpstreamFailed`、`critical_path()` |
 | `dispatch.py` | `CommandDispatcher`、`EdgeExecutor`（已执行表 + 在途去重）、`FlakyTransport` |
+| `capabilities.py` | 会话联网能力位：`clamp()`、沿父会话链取最严的 `current_web()`、`session_native()` |
 
 ### observe/、server/、web/
 

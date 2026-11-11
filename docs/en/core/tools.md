@@ -26,6 +26,8 @@ The harness also has to decide, for each call, whether it can run in parallel, b
 
 **Bash details.** It runs in its own process group, ends it with SIGTERM then SIGKILL after a 2 second grace, closes stdin, strips environment variables whose names look like secrets, and decodes UTF-8 incrementally while streaming output. It sets `manages_timeout`, so the executor leaves it room to return partial output.
 
+**Web tools.** `web_search` (DeepSeek Search by default, Bocha and self-hosted SearXNG as failover) and `web_fetch` (DeepSeek Fetch, or `direct` from this machine) are off by default; when off they are not registered and requests are byte-identical to before. Each session picks `off`, `search` or `fetch` before it starts, clamped to what the user config and available backends allow, and can only tighten afterwards: the tool list stays pinned and the executor refuses calls above the current level. Both tools are `read` and `egress`, their output taints the session, and search results carry `[n]` numbers, URLs and a dated header. `fetch_scope` (`cited`, `ask` by default, `public`) decides which URLs can be read without asking, matching full URLs against what the user typed or searches returned. Searches and fetches have per-run caps and their per-call price counts toward `max_cost_usd`, shown separately as `tool_cost_usd`. With `[web] native = true` and a confirmed vendor (Anthropic's `web_search` server tool), the vendor searches instead: server blocks are kept and echoed only to the same endpoint, and counts and sources are read from the response. Replay uses recorded results, and a counterfactual fork stays offline unless `allow_web` is passed.
+
 `todo_write` has no table. The plan is the arguments of the last successful `todo_write` call in the history, so branches and recovery stay consistent.
 
 ## Key code
@@ -41,7 +43,9 @@ The harness also has to decide, for each call, whether it can run in parallel, b
 | `tools/fs.py` `_atomic_write()`, `_check_stale()` | Atomic writes and stale-read protection |
 | `tools/shell.py` `BashTool`, `_terminate()` | Process group kill, streaming, dynamic effect |
 | `tools/extra.py` `latest_todos()` | Rebuilds the plan from history |
-| `tools/__init__.py` `default_tools()` | Fixed registration order of the ten built-in tools |
+| `tools/__init__.py` `default_tools()` | Fixed registration order of the ten built-in tools; web tools come last when enabled |
+| `tools/web.py`, `net/search.py` `WebService` | Web tool specs and `fetch_scope`; backend failover, breaker, cache, pricing |
+| `runtime/capabilities.py`, `llm/native.py` | Session web capability; vendor-side search declarations |
 
 ## Related chapters
 

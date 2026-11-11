@@ -22,6 +22,7 @@
 | **Loop** | async generator 主循环；阶段化（整形→模型→落盘→工具→守卫→续跑）；插话 / 排队 | `agent/loop.py` |
 | **模型接入** | 统一消息与流事件；`<供应商>:<模型>` 写法与供应商档案（DeepSeek 默认、百炼、Kimi、智谱、MiniMax、OpenRouter、Ollama、Anthropic 官方 SDK）；思考内容按各家规则回传；错误分类（含余额不足、模型不存在）、重试 + 全抖动、熔断、跨供应商降级链；`flywhl doctor` 接入自检 | `llm/` |
 | **工具** | 副作用三级（read/write/external）；schema 校验与可操作错误；只读并发、写操作串行、原序回填；大结果外置句柄；MCP 接入 | `tools/`、`agent/executor.py` |
+| **联网** | `web_search` / `web_fetch`，默认关闭；会话开工前选能力、开工后只能收紧；DeepSeek / 博查 / SearXNG 故障转移；读取范围按完整网址匹配，外传检查；唯一的出站 HTTP 入口（只放行公网、连接钉在核过的 IP、每跳重新核验）；次数与费用进预算；可选的模型侧联网（Anthropic server tool） | `tools/web.py`、`net/`、`llm/native.py` |
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
 | **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
 | **生命周期** | 14 态状态机 + CAS 迁移（接管时钉住观察到的版本）；协作式取消（可中断/不可中断/结果未知）；暂停恢复 + 漂移说明；失败重试；心跳租约 + 周期性崩溃接管（kill -9 后副作用恰好一次）；关闭服务时暂停、重启后继续 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` |

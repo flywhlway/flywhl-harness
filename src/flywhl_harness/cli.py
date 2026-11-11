@@ -151,6 +151,7 @@ async def terminal_approval(rec) -> ApprovalDecision:
 IMPLICIT_ENV_KEYS = frozenset({k for p in PROFILES.values() for k in p.key_env} | {
     "FLYWHL_MODEL", "FLYWHL_FALLBACK_MODELS", "LLM_PRIMARY_MODEL", "LLM_FALLBACK_MODEL",
     "FLYWHL_THINKING", "FLYWHL_REASONING_EFFORT", "FLYWHL_CNY_PER_USD",
+    "BOCHA_API_KEY",   # 联网搜索后端的密钥，与模型密钥同类；端点只认用户配置
 })
 
 
