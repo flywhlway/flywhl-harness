@@ -179,38 +179,60 @@ const extLink = (u, text) => {
 };
 
 // ====================================================================== 回答里的 [n] 引用
-// 内置搜索每次结果都从 [1] 编号。一个任务里搜了几次，[3] 可能指不同的网页：只有本任务里所有搜索在这个编号上
-// 都是同一个网址时才变成链接，有歧义的保持原样（模型按要求会同时写出网址）。
+// 内置搜索每次结果都从 [1] 编号。一个任务里搜了几次，[3] 可能指不同的网页：本任务里所有搜索在这个编号上
+// 都是同一个网址时直接链接（map）；对应多个的（amb）看回答自己怎么写：某一段或某个列表项里有 [3]，
+// 同时恰好写出了 [3] 候选网址中的一个，就按它链接，回答各处的写法要一致。都对不上的保持原样，宁可不链也不链错。
 export function resetCites(ctx) { ctx.cites = []; }
 export function noteCites(ctx, details) {
   if (Array.isArray(details?.hits) && details.hits.length) (ctx.cites ||= []).push(details.hits);
 }
 function citeMap(ctx) {
-  const map = new Map(), bad = new Set();
+  const all = new Map();
   for (const hits of ctx.cites || []) {
     for (const x of hits) {
-      const n = Number(x.n), href = httpUrl(x.url);
-      if (!Number.isInteger(n) || bad.has(n)) continue;
-      if (!href) { bad.add(n); map.delete(n); continue; }
-      const prev = map.get(n);
-      if (prev && prev.url !== href) { bad.add(n); map.delete(n); continue; }
-      map.set(n, { url: href, title: x.title || href });
+      const n = Number(x.n);
+      if (!Number.isInteger(n)) continue;
+      const list = all.get(n) || [];
+      const url = httpUrl(x.url);   // 不是 http(s) 的照样占一个候选，让这个编号不会被当成唯一
+      if (!list.some((c) => c.url === url)) list.push({ url, title: x.title || url });
+      all.set(n, list);
     }
   }
-  return map;
+  const map = new Map(), amb = new Map();
+  for (const [n, list] of all) {
+    if (list.length > 1) amb.set(n, list.filter((c) => c.url));
+    else if (list[0].url) map.set(n, list[0]);
+  }
+  return { map, amb };
 }
-function linkCites(root, map) {
-  if (!map.size) return;
+function citeInBlock(cands, node, root) {
+  if (!cands?.length) return null;
+  const block = node.parentElement?.closest("li, p, td, th, blockquote, h1, h2, h3, h4, h5, h6");
+  const text = (block && root.contains(block) ? block : root).textContent || "";
+  const found = cands.filter((c) => text.includes(c.url.replace(/\/$/, "")));
+  return found.length === 1 ? found[0] : null;
+}
+function linkCites(root, { map, amb }) {
+  if (!map.size && !amb.size) return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => (n.parentElement?.closest("a, code, pre") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });
   const nodes = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) if (/\[\d{1,3}\]/.test(n.nodeValue)) nodes.push(n);
+  const seen = new Map();   // 有歧义的编号 → 回答里与它同段出现的候选网址
+  for (const node of nodes) {
+    for (const mt of node.nodeValue.matchAll(/\[(\d{1,3})\]/g)) {
+      const n = Number(mt[1]), c = map.has(n) ? null : citeInBlock(amb.get(n), node, root);
+      if (c) { if (!seen.has(n)) seen.set(n, new Map()); seen.get(n).set(c.url, c); }
+    }
+  }
+  const resolved = new Map([...seen].filter(([, urls]) => urls.size === 1).map(([n, urls]) => [n, [...urls.values()][0]]));
   for (const node of nodes) {
     const frag = document.createDocumentFragment();
     let last = 0;
     for (const mt of node.nodeValue.matchAll(/\[(\d{1,3})\]/g)) {
-      const hit = map.get(Number(mt[1]));
+      const n = Number(mt[1]);
+      const hit = map.get(n) || resolved.get(n);
       if (!hit) continue;
       frag.append(node.nodeValue.slice(last, mt.index));
       frag.append(h("a", { class: "cite", href: hit.url, target: "_blank", rel: "noopener noreferrer", title: hit.title, text: mt[0] }));
