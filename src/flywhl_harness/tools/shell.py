@@ -6,7 +6,8 @@ bash 是最强也最危险的工具。这里的工程要点：
   一次性杀掉整棵进程树（``npm run dev`` 会派生多个子进程，只杀父进程会留下孤儿）。
 - **两段式终止**：先 SIGTERM 给进程优雅退出的机会，宽限期后仍未退出再 SIGKILL。
 - **流式输出**：边执行边通过 ``ctx.emit`` 推送输出，UI 能实时看到构建/测试日志。
-- **输出截断保尾**：错误与结论通常在最后，所以保留结尾；完整输出外置为 blob 句柄。
+- **输出截断保尾**：错误与结论通常在最后，所以保留结尾；完整输出外置为 blob 句柄。截断在 ``finalize_result`` 里做，
+  排在 PostToolUse hook 之后：hook 拿到的是完整输出，句柄里存的也是 hook 处理过的版本。
 - **密钥不可见**：默认从子进程环境中剥离看起来像凭据的变量——名字含 KEY/TOKEN/SECRET/PASSWORD 等字样，
   或以 ``_PWD``、``_PASS``、``_PAT``、``_DSN`` 结尾（``MYSQL_PWD``、``SMTP_PASS``、``GITHUB_PAT``），
   或值是带口令的 URL（``postgres://u:p@host/db``）。模型即使执行 ``env`` 也看不到原始凭据。
@@ -54,9 +55,22 @@ OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)")
 
 
+def _credential_git_key(key: str) -> bool:
+    """值本身就是凭证的 git 配置键：``http.extraHeader`` 与按网址限定的 ``http.<url>.extraHeader``。
+    额外请求头几乎都用来带认证（Authorization、PRIVATE-TOKEN、Cookie），变量名看不出来，值里是什么都不留。
+    git 的节名和变量名不分大小写。"""
+    k = key.strip().lower()
+    return k.startswith("http.") and k.endswith(".extraheader")
+
+
 def _renumber_git_config(env: dict[str, str], n: int) -> int:
     """值被当成密钥剥掉之后，键和 GIT_CONFIG_COUNT 还在，git 会报错退出：去掉这一对，其余的重新编号，返回剩下的对数。
-    键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动。"""
+    键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动；
+    但键是凭证类（``_credential_git_key``）的，不管编号能不能被 git 读到都连同值一起去掉：``env`` 照样看得见它。"""
+    for name in [k for k in env if k.startswith("GIT_CONFIG_KEY_") and _GIT_CONFIG_PAIR.fullmatch(k)]:
+        if _credential_git_key(env[name]):
+            env.pop(name)
+            env.pop("GIT_CONFIG_VALUE_" + name.removeprefix("GIT_CONFIG_KEY_"), None)
     seen = {int(m[1]) for m in map(_GIT_CONFIG_PAIR.fullmatch, list(env)) if m and int(m[1]) < n}
     pairs = []
     for i in sorted(seen):
@@ -253,13 +267,14 @@ class BashTool(Tool):
             return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
                               details={"command": command, "sandbox": box.level, "sandbox_network": box.network})
 
+        # 这里返回完整输出：截断和外置在 finalize_result 里做，排在 PostToolUse hook 之后，存下来的完整输出同样经过了脱敏
         output = b"".join(chunks).decode("utf-8", errors="replace")
-        body, cut, total = truncate_tail(output, OUT_LINES, OUT_BYTES)
+        body = output
         details: dict[str, Any] = {
             "command": command,
             "exit_code": proc.returncode,
             "duration_ms": int((time.monotonic() - started) * 1000),
-            "total_lines": total,
+            "total_lines": len(output.splitlines()),
         }
         if box.level != "off":
             details["sandbox"] = box.level
@@ -271,10 +286,6 @@ class BashTool(Tool):
             first = details["egress_denied"][0].rsplit(":", 1)[0]
             body += (f"\n[出站白名单拦下了 {'、'.join(details['egress_denied'])}。确实需要的话把主机加进 permissions.network_allow，"
                      f"或者启动时加 --net-allow {first}]")
-        if cut:
-            ref = ctx.blobs.put(ctx.session_id, output)
-            details["full_output_ref"] = ref
-            body = f"[输出共 {total} 行，仅保留最后部分；完整输出句柄 {ref}，可用 read_ref 查看]\n" + body
         if timed_out:
             details["timed_out"] = True  # 执行器据此判断：外部命令超时 = 结果未知
             return ToolResult(content=f"{body}\n[命令超时（{timeout:.0f}s），已终止进程组]", is_error=True, details=details)
@@ -284,3 +295,12 @@ class BashTool(Tool):
             body += _sandbox_hint(box, output[-4000:], bool(proxy and proxy.denied))
         status = f"\n[退出码 {proc.returncode}]"
         return ToolResult(content=(body or "(无输出)") + status, is_error=proc.returncode != 0, details=details)
+
+    def finalize_result(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
+        """长输出只保留结尾，完整输出外置成句柄。结尾的退出码、超时与沙箱提示都在保留范围里。"""
+        body, cut, total = truncate_tail(result.content, OUT_LINES, OUT_BYTES)
+        if not cut:
+            return result
+        ref = ctx.blobs.put(ctx.session_id, result.content)
+        head = f"[输出共 {total} 行，仅保留最后部分；完整输出句柄 {ref}，可用 read_ref 查看]\n"
+        return ToolResult(head + body, result.is_error, {**(result.details or {}), "full_output_ref": ref}, result.tainted)

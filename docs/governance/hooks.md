@@ -31,7 +31,7 @@ flywhl-harness 在 `src/flywhl_harness/policy/hooks.py` 的 `HookEvent` 中定�
 | `session_start` | `Harness.start_run`，仅会话首次运行 | `additional_context` 以 `<system-reminder>` 拼到首条 prompt 后 | 注入目录结构、可用命令、开场流程 | SessionStart |
 | `user_prompt_submit` | `AgentLoop._accept_prompt` | `block`/`deny` → Run 以 `failed` 结束；`additional_context` → reminder | 敏感词拦截、补充工单背景 | UserPromptSubmit |
 | `pre_tool_use` | `ToolExecutor._run_one`，权限判定之后；审批人改参后再跑一遍 | `allow`/`ask`/`deny`（只能收紧，`block` 视同 `deny`）、`updated_input`、`additional_context`、`stop_run` | 拦截危险命令、改写路径、注入租户 ID | PreToolUse（另有独立的 PermissionRequest） |
-| `post_tool_use` | `ToolExecutor._run_one`，执行之后、外置大结果之前 | `updated_result`、`block`（原因附加到结果并标记 `is_error`）、`additional_context` | 审计、脱敏、编辑后格式化或跑测试 | PostToolUse / PostToolUseFailure |
+| `post_tool_use` | `ToolExecutor._post_process`，执行之后（崩溃恢复时是对账之后）、截断与外置大结果之前 | `updated_result`、`block`（原因附加到结果并标记 `is_error`）、`additional_context` | 审计、脱敏、编辑后格式化或跑测试 | PostToolUse / PostToolUseFailure |
 | `stop` | `AgentLoop._stop_gaps`（主代理） | `block` → 作为验收缺口注入；`additional_context`（block 时并入缺口，否则 Run 完成时落盘为 reminder）；`stop_run` | 跑验收：测试、产物、清单 | Stop |
 | `subagent_stop` | 同上（`rc.role != "main"`） | 同上 | 校验子代理回传契约 | SubagentStop |
 | `pre_compact` | `AgentLoop._maybe_compact` | `additional_context` → 作为压缩器的 `extra_instructions` | 声明“压缩时必须保留”的信息 | PreCompact |
@@ -320,7 +320,7 @@ if dec.edited_args:
 
 `post_tool_use` 的处理更简单：`updated_result` 替换内容但保留 `tainted` 标记（脱敏不等于变可信）；
 `block` 把原因以 `[PostToolUse 反馈]` 附加到结果末尾并置 `is_error=True`，模型会把它当作一次需要修正的失败。
-注意 PostToolUse 运行在 `shape_tool_result`（大结果外置）之前，所以脱敏发生在结果落库之前。
+注意 PostToolUse 运行在 `shape_tool_result`（大结果外置）之前，所以脱敏发生在结果落库之前。bash 的保尾截断（`Tool.finalize_result`）同样排在 hook 之后：hook 拿到的是完整输出，`full_output_ref` 句柄里存的是 hook 处理过的版本。
 
 ## fail-open 还是 fail-closed
 
@@ -581,7 +581,7 @@ async def redact(inp):
 
 ::: warning 脱敏的覆盖范围
 bash 工具边执行边通过 `ctx.emit` 推送 `tool_update` 事件，这些部分输出在 PostToolUse 之前就已发布并批量落库（`EventHub.publish`）。
-PostToolUse 只能保证 **模型看到的结果** 和 `tool_end` 里的内容被脱敏，保护不了流式输出通道。需要严格脱敏时，要在 `emit` 路径上也做过滤。
+PostToolUse 只能保证 **模型看到的结果**（包括 `read_ref` 读得到的句柄内容）和 `tool_end` 里的内容被脱敏，保护不了流式输出通道。需要严格脱敏时，要在 `emit` 路径上也做过滤。
 :::
 
 编辑后跑测试，失败时把输出反馈给模型：

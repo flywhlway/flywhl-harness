@@ -102,6 +102,13 @@ class RecordedTool(Tool):
                               details={"dry_run": True})
         return await self.fallback.execute(args, ctx)
 
+    def finalize_result(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
+        # 录制结果当时已经收尾过，再截断一次会叠出第二个句柄头；只有真实工具这次执行出来的结果才交给它收尾
+        details = result.details or {}
+        if self.fallback is None or details.get("replayed") or details.get("dry_run"):
+            return result
+        return self.fallback.finalize_result(result, ctx)
+
 
 class HybridProvider(Provider):
     """前 switch_at 次调用走录制结果，之后切换到 live provider。"""

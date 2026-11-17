@@ -332,8 +332,8 @@ if recovering:
     step = rc.store.get_step(rc.run_id, call.id)
     if step is not None and step.status == "started":
         rec = await tool.reconcile(args, ctx)
-        if rec is not None:
-            return done(rec, "reconciled")
+        if rec is not None:   # 和执行结果一样过 PostToolUse、标签转义、大结果外置与污点标记
+            return done(await self._post_process(call, tool, args, ctx, rec, publish), "reconciled")
         if not (effect == Effect.READ or tool.idempotent):
             return done(ToolResult.error(
                 "上次执行在进程中断时结果未知，且该工具不支持对账。请先核实外部状态（例如查询目标系统），"

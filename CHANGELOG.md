@@ -115,6 +115,12 @@
 - `git clean` 的选项簇和缩写（`-dfx`、`--force`）、`-i`、`--no-dry-run` 判高危，`-n` 空跑不算。
 - `require_pinned`：40 位提交号只有写在 git 地址上才算锁住版本，普通 URL 的 `#片段`、npm dist-tag 不算。
 
+工具结果和子进程环境里的敏感信息：
+
+- bash 长输出存成句柄的完整输出，现在同样经过 `post_tool_use` hook 的脱敏。hook 收到的是完整输出（以前是截断后的结尾），保尾截断和存句柄都排在 hook 之后，`full_output_ref` 不再出现在 hook 的输入里。
+- 崩溃恢复时对账补出来的结果，现在和执行出来的结果一样经过 `post_tool_use` hook、`<system-reminder>` 转义、大结果外置和污点标记。
+- `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` 传进来的 `http.extraHeader`（包括 `http.<url>.extraHeader`）现在从 bash、hook、MCP 的子进程环境里剥离，其余配置重新连续编号。
+
 ### 修复
 
 **出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和解析出的地址字面相同就放行：`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在写成 IP 的规则和域名规则走同一个判定，这类条目加载时报错，见“行为变化”。
