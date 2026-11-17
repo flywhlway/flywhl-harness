@@ -11,7 +11,7 @@ bash 是最强也最危险的工具。这里的工程要点：
 - **密钥不可见**：默认从子进程环境中剥离看起来像凭据的变量——名字含 KEY/TOKEN/SECRET/PASSWORD 等字样，
   或以 ``_PWD``、``_PASS``、``_PAT``、``_DSN`` 结尾（``MYSQL_PWD``、``SMTP_PASS``、``GITHUB_PAT``），
   或值是带口令的 URL（``postgres://u:p@host/db``）。经 ``GIT_CONFIG_KEY_<n>``、``GIT_CONFIG_PARAMETERS`` 传进来的 git 配置
-  逐条看：``http.extraHeader`` 和带口令的网址去掉，其余保留。模型即使执行 ``env`` 也看不到原始凭据。
+  逐条看：带凭证的条目去掉（见 ``_secret_git_entry``），其余保留。模型即使执行 ``env`` 也看不到原始凭据。
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **系统沙箱**：默认 ``sandbox="auto"``，命令跑在 sandbox-exec / bubblewrap 里，凭证位置不可读、写操作限制在工作区与临时目录，
@@ -54,24 +54,36 @@ _NOT_SECRET_ENV = re.compile(r"GIT_CONFIG_KEY_\d+|GIT_AUTHOR_(NAME|EMAIL|DATE)")
 # GH_TOKEN、*_API_KEY 这类值本身就是凭证，沙箱外照样剥离
 OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)")
+# 键里任意位置的带口令网址：url.<base>.insteadOf、http.<url>.*、includeIf.hasconfig:remote.*.url:<url>.path 都把网址写在键中间
+_URL_PASSWORD_IN_KEY = re.compile(r"://[^/\s:@]*:[^/\s@]+@")
 
 
-def _credential_git_key(key: str) -> bool:
-    """值本身就是凭证的 git 配置键：``http.extraHeader`` 与按网址限定的 ``http.<url>.extraHeader``。
-    额外请求头几乎都用来带认证（Authorization、PRIVATE-TOKEN、Cookie），变量名看不出来，值里是什么都不留。
-    git 的节名和变量名不分大小写。"""
+def _secret_git_entry(key: str, value: str | None) -> bool:
+    """这条 git 配置带着凭证，变量名看不出来，要整条去掉。git 的节名和变量名不分大小写。
+
+    - 值本身就是凭证的键：``http.extraHeader`` 与 ``http.<url>.extraHeader``（额外请求头几乎都用来带认证：
+      Authorization、PRIVATE-TOKEN、Cookie），``sendemail[.<身份>].smtpPass``，``imap.pass``；
+    - ``credential[.<url>].helper`` 写成 ``!`` 开头的内联命令：令牌常直接写在命令里。只写助手名字（store、osxkeychain）的保留；
+    - 键里任意位置、或值开头是带口令的网址。"""
     k = key.strip().lower()
-    return k.startswith("http.") and k.endswith(".extraheader")
+    if k.startswith("http.") and k.endswith(".extraheader"):
+        return True
+    if k == "imap.pass" or (k.startswith("sendemail.") and k.endswith(".smtppass")):
+        return True
+    if k.startswith("credential.") and k.endswith(".helper") and (value or "").lstrip().startswith("!"):
+        return True
+    return bool(_URL_PASSWORD_IN_KEY.search(key) or (value is not None and _URL_WITH_PASSWORD.match(value)))
 
 
 def _renumber_git_config(env: dict[str, str], n: int) -> int:
     """值被当成密钥剥掉之后，键和 GIT_CONFIG_COUNT 还在，git 会报错退出：去掉这一对，其余的重新编号，返回剩下的对数。
     键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动；
-    但键是凭证类（``_credential_git_key``）的，不管编号能不能被 git 读到都连同值一起去掉：``env`` 照样看得见它。"""
+    但带凭证的（``_secret_git_entry``），不管编号能不能被 git 读到都连同值一起去掉：``env`` 照样看得见它。"""
     for name in [k for k in env if k.startswith("GIT_CONFIG_KEY_") and _GIT_CONFIG_PAIR.fullmatch(k)]:
-        if _credential_git_key(env[name]):
+        value_name = "GIT_CONFIG_VALUE_" + name.removeprefix("GIT_CONFIG_KEY_")
+        if _secret_git_entry(env[name], env.get(value_name)):
             env.pop(name)
-            env.pop("GIT_CONFIG_VALUE_" + name.removeprefix("GIT_CONFIG_KEY_"), None)
+            env.pop(value_name, None)
     seen = {int(m[1]) for m in map(_GIT_CONFIG_PAIR.fullmatch, list(env)) if m and int(m[1]) < n}
     pairs = []
     for i in sorted(seen):
@@ -143,14 +155,12 @@ def _git_config_parameters(raw: str) -> list[tuple[str, str, str | None]] | None
 
 
 def _strip_git_parameters(raw: str) -> str | None:
-    """``git -c`` 的配置经 ``GIT_CONFIG_PARAMETERS`` 传给子进程，和 ``GIT_CONFIG_KEY_<n>`` 一样要剥：凭证类的键，
-    键或值是带口令的网址，这几条去掉，其余原样保留。git 认不出的格式整个去掉，它本来就会让所有 git 命令报错退出。"""
+    """``git -c`` 的配置经 ``GIT_CONFIG_PARAMETERS`` 传给子进程，和 ``GIT_CONFIG_KEY_<n>`` 一样要剥：带凭证的条目
+    （``_secret_git_entry``）去掉，其余原样保留。git 认不出的格式整个去掉，它本来就会让所有 git 命令报错退出。"""
     entries = _git_config_parameters(raw)
     if entries is None:
         return None
-    kept = [text for text, key, value in entries
-            if not (_credential_git_key(key) or _URL_WITH_PASSWORD.match(key)
-                    or (value is not None and _URL_WITH_PASSWORD.match(value)))]
+    kept = [text for text, key, value in entries if not _secret_git_entry(key, value)]
     return " ".join(kept) or None
 
 
@@ -373,10 +383,12 @@ class BashTool(Tool):
         return ToolResult(content=(body or "(无输出)") + status, is_error=proc.returncode != 0, details=details)
 
     def finalize_result(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
-        """长输出只保留结尾，完整输出外置成句柄。结尾的退出码、超时与沙箱提示都在保留范围里。"""
+        """长输出只保留结尾，完整输出外置成句柄。结尾的退出码、超时与沙箱提示都在保留范围里。
+        行数按句柄里存的内容数（hook 处理过、带提示行）：句柄头、``details["total_lines"]`` 与 read_ref 报的总行数一致。"""
         body, cut, total = truncate_tail(result.content, OUT_LINES, OUT_BYTES)
         if not cut:
             return result
         ref = ctx.blobs.put(ctx.session_id, result.content)
         head = f"[输出共 {total} 行，仅保留最后部分；完整输出句柄 {ref}，可用 read_ref 查看]\n"
-        return ToolResult(head + body, result.is_error, {**(result.details or {}), "full_output_ref": ref}, result.tainted)
+        details = {**(result.details or {}), "full_output_ref": ref, "total_lines": total}
+        return ToolResult(head + body, result.is_error, details, result.tainted)

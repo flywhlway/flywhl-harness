@@ -93,17 +93,25 @@ def truncate_head(text: str, max_lines: int, max_bytes: int) -> tuple[str, bool,
 
 
 def truncate_tail(text: str, max_lines: int, max_bytes: int) -> tuple[str, bool, int]:
-    """保留结尾（适合 bash：错误信息与最终结果通常在最后）。返回 (文本, 是否截断, 总行数)。"""
+    """保留结尾（适合 bash：错误信息与最终结果通常在最后）。返回 (文本, 是否截断, 总行数)。
+
+    放不下的那一行不整行丢掉，保留它的字节尾巴、前面标 ``…``：结尾常是几行短提示（退出码），
+    前面一行几十 KB 的输出整行丢掉的话，模型就什么输出都看不到了。"""
     lines = text.splitlines(keepends=True)
-    out, size = [], 0
+    out, size, partial = [], 0, False
     for line in reversed(lines[-max_lines:] if max_lines else []):
-        b = len(line.encode("utf-8"))
-        if size + b > max_bytes and out:
+        data = line.encode("utf-8")
+        if size + len(data) > max_bytes:
+            room = max_bytes - size - len("…".encode("utf-8"))
+            tail = data[-room:].decode("utf-8", errors="ignore") if room > 0 else ""
+            if tail:   # 从字节中间切开时，开头半个多字节字符丢掉
+                out.append("…" + tail)
+                partial = True
             break
         out.append(line)
-        size += b
+        size += len(data)
     out.reverse()
-    truncated = len(out) < len(lines)
+    truncated = partial or len(out) < len(lines)
     return "".join(out), truncated, len(lines)
 
 

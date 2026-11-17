@@ -805,6 +805,95 @@ async def test_redaction_also_covers_the_full_output_behind_a_bash_handle(ws):
     assert not [t for t in _blob_texts(h) if FAKE_SECRET in t]
 
 
+def _tool_texts(h, session_id) -> list:
+    return [m for m in h.log(session_id).messages() if m.role == "tool"]
+
+
+async def test_an_oversized_last_line_keeps_its_tail_next_to_the_exit_code(ws):
+    """输出是一行 40000 字节、没有换行，后面跟着很短的退出码行：截断后要看得到这一行的结尾，不能只剩句柄头和退出码。"""
+    (ws / "one.txt").write_text("x" * 39990 + "END-OF-LINE", encoding="utf-8")
+    h = make_harness(ws, [{"tool_calls": [{"name": "bash", "args": {"command": "cat one.txt"}}]}, "结束"],
+                     permissions__mode="bypass", context__tool_result_max_tokens=100_000)
+    res = await h.run("看")
+    msg = _tool_texts(h, res.session_id)[0]
+    assert "END-OF-LINE\n[退出码 0]" in msg.text and "…xxxxxxxx" in msg.text, msg.text[:200]
+    assert msg.details["full_output_ref"] in msg.text and len(msg.text.encode("utf-8")) < 31 * 1024
+
+
+def test_tail_truncation_cuts_inside_a_line_on_a_character_boundary():
+    from flywhl_harness._utils import truncate_tail
+
+    body, cut, total = truncate_tail("中" * 20000 + "\n短\n", 400, 1000)
+    assert cut and total == 2 and body.startswith("…中") and body.endswith("中\n短\n")
+    assert "�" not in body and len(body.encode("utf-8")) <= 1000
+
+
+async def test_a_failing_fail_closed_redaction_leaves_no_raw_handle_behind(ws):
+    """fail-closed 的脱敏 hook 出错时结果换成占位文字；长输出也不能留下存着原文的句柄。"""
+    lines = [f"token={FAKE_SECRET}", *(f"line {i}" for i in range(1000))]
+    (ws / "big.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    provider = ScriptedProvider([{"tool_calls": [{"name": "bash", "args": {"command": "cat big.log"}}]}, "结束"])
+    h = make_harness(ws, provider, permissions__mode="bypass")
+
+    @h.hooks.on(HookEvent.POST_TOOL_USE, matcher="bash", fail_closed=True)
+    async def redact(inp):
+        raise ValueError("脱敏服务不可用")
+
+    res = await h.run("看日志")
+    msg = _tool_texts(h, res.session_id)[0]
+    assert WITHHELD_RESULT in msg.text and "full_output_ref" not in msg.details
+    assert not [t for t in _blob_texts(h) if FAKE_SECRET in t] and FAKE_SECRET not in request_text(provider.requests[-1])
+
+
+async def test_a_hook_that_makes_the_output_longer_still_gets_the_tail_cut(ws):
+    """hook 改写后内容反而变长：照样保尾截断，句柄里存 hook 的版本；句柄头、details 与 read_ref 报的总行数一致。"""
+    provider = ScriptedProvider([
+        {"tool_calls": [{"name": "bash", "args": {"command": "echo hi"}}]},
+        lambda req: {"tool_calls": [{"name": "read_ref", "args": {"ref": _handle(req), "limit": 1}}]},
+        "结束",
+    ])
+    h = make_harness(ws, provider, permissions__mode="bypass")
+
+    @h.hooks.on(HookEvent.POST_TOOL_USE, matcher="bash")
+    async def annotate(inp):
+        return HookOutput(updated_result=inp.tool_result["content"] + "\n" + "\n".join(f"注释 {i}" for i in range(1000)))
+
+    res = await h.run("x")
+    bash_msg, ref_msg = _tool_texts(h, res.session_id)
+    total = bash_msg.details["total_lines"]
+    assert f"[输出共 {total} 行" in bash_msg.text and "注释 999" in bash_msg.text and "注释 500\n" not in bash_msg.text
+    assert ref_msg.text.startswith("hi\n") and f"共 {total} 行" in ref_msg.text
+
+
+@pytest.mark.parametrize("key,value", [
+    ("sendemail.smtpPass", "canary-key-1"),
+    ("sendemail.work.smtpPass", "canary-key-2"),
+    ("imap.pass", "canary-key-3"),
+    ("includeIf.hasconfig:remote.*.url:https://u:canary-key-4@git.example.invalid/**.path", "x.inc"),
+    ("credential.helper", "!f() { echo password=canary-key-5; }; f"),
+    ("credential.https://git.example.invalid.helper", "  !echo password=canary-key-6"),
+], ids=["smtppass", "smtppass-identity", "imap-pass", "url-in-key", "inline-helper", "inline-helper-url"])
+def test_credential_git_config_is_stripped_from_both_env_channels(monkeypatch, key, value):
+    """值本身是口令的键、内联命令写的凭证助手、键中间带口令的网址：GIT_CONFIG_KEY_<n> 和 GIT_CONFIG_PARAMETERS 两条通道都去掉。
+    只写助手名字的 credential.helper 留着。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    def q(s: str) -> str:
+        return "'" + s.replace("'", "'\\''") + "'"
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", key)
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", value)
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "credential.helper")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "store")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"{q(key)}={q(value)} {q('credential.helper')}={q('store')}")
+    env = _clean_env(True)
+
+    assert "canary-key" not in str(env)
+    assert (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]) == ("credential.helper", "store")
+    assert env["GIT_CONFIG_PARAMETERS"] == "'credential.helper'='store'"
+
+
 def test_a_replay_cuts_only_what_the_live_bash_produced(ws):
     """分叉回放里，录制结果当时已经收尾过，再截一次会叠出第二个句柄头；真实 bash 这次跑出来的才交给它收尾。"""
     from dataclasses import replace

@@ -321,6 +321,7 @@ if dec.edited_args:
 `post_tool_use` 的处理更简单：`updated_result` 替换内容但保留 `tainted` 标记（脱敏不等于变可信）；
 `block` 把原因以 `[PostToolUse 反馈]` 附加到结果末尾并置 `is_error=True`，模型会把它当作一次需要修正的失败。
 注意 PostToolUse 运行在 `shape_tool_result`（大结果外置）之前，所以脱敏发生在结果落库之前。bash 的保尾截断（`Tool.finalize_result`）同样排在 hook 之后：hook 拿到的是完整输出，`full_output_ref` 句柄里存的是 hook 处理过的版本。
+完整输出没有上限，命令打出几十 MB 时 hook 的输入也是几十 MB，默认 10 秒的 `timeout` 可能不够。超时的 fail-open hook 被忽略，原文照样进上下文和句柄；fail-closed 的 hook 超时，结果换成占位文字、不存句柄。所以脱敏 hook 要写 `fail_closed=True`，并按可能的输出规模调大 `timeout`。
 
 ## fail-open 还是 fail-closed
 
@@ -571,7 +572,8 @@ hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过
 import re
 PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 
-@h.hooks.on(HookEvent.POST_TOOL_USE, matcher="bash|read", priority=10, fail_closed=True)
+# bash 的输出整段交给 hook，没有上限：timeout 按可能的输出规模放宽
+@h.hooks.on(HookEvent.POST_TOOL_USE, matcher="bash|read", priority=10, fail_closed=True, timeout=60)
 async def redact(inp):
     text = inp.tool_result["content"]
     masked = PHONE.sub(lambda m: m.group()[:3] + "****" + m.group()[-4:], text)
