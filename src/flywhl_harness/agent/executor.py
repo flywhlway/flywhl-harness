@@ -186,13 +186,14 @@ class ToolExecutor:
                 try:
                     rec = await tool.reconcile(args, ctx)
                 except Exception as e:   # 查询外部状态本身失败：结果仍然未知，不能往下走重新执行
-                    # 异常文本只给人看：外部客户端的报错常带着 URL（含 query 里的令牌）或响应体，而这条结果不经过 PostToolUse 脱敏
+                    # 异常文本只给人看：外部客户端的报错常带着 URL（含 query 里的令牌）或响应体，没配脱敏 hook 时会原样进上下文
                     publish(E.NOTICE, {"level": "warn", "code": "reconcile_failed",
                                        "text": f"{call.name} 对账失败：{type(e).__name__}: {e}"})
-                    return done(ToolResult.error(f"上次执行在进程中断时结果未知，对账也失败了（{type(e).__name__}）。"
-                                                 f"请先核实外部状态，不要盲目重试。幂等键：{ctx.idempotency_key}"), "unknown")
-                if rec is not None:
-                    return done(rec, "reconciled")
+                    failed = ToolResult.error(f"上次执行在进程中断时结果未知，对账也失败了（{type(e).__name__}）。"
+                                              f"请先核实外部状态，不要盲目重试。幂等键：{ctx.idempotency_key}")
+                    return done(await self._post_process(call, tool, args, ctx, failed, publish), "unknown")
+                if rec is not None:   # 对账结果来自外部系统，和执行结果一样要过 hook、转义、外置与污点标记
+                    return done(await self._post_process(call, tool, args, ctx, rec, publish), "reconciled")
                 if not (effect == Effect.READ or tool.idempotent):
                     return done(ToolResult.error(
                         "上次执行在进程中断时结果未知，且该工具不支持对账。请先核实外部状态（例如查询目标系统），"
@@ -327,6 +328,16 @@ class ToolExecutor:
         exec_ms = int((time.monotonic() - t_exec) * 1000)
         self._settle_web(call, result)
 
+        result = await self._post_process(call, tool, args, ctx, result, publish)
+        msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
+        if decision == Decision.ASK:
+            msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]
+        return msg
+
+    async def _post_process(self, call: ToolCall, tool: Tool, args: dict[str, Any], ctx: ToolContext,
+                            result: ToolResult, publish) -> ToolResult:
+        """工具代码产出的结果在写回历史之前都走这一段：执行出来的，和崩溃恢复时对账补出来的，一视同仁。"""
+        rc = self.rc
         # ---- PostToolUse hooks ----
         if rc.hooks.has(HookEvent.POST_TOOL_USE):
             hi = self._hook_input(HookEvent.POST_TOOL_USE, call.name, args)
@@ -341,6 +352,9 @@ class ToolExecutor:
             if out.additional_context:
                 rc.remind(out.additional_context)
 
+        # ---- 工具自己的收尾（bash 的保尾截断）：在 hook 之后，外置下来的完整输出也是脱敏过的 ----
+        result = tool.finalize_result(result, ctx)
+
         # ---- 外置大结果 + 污点 ----
         result = rc.context.shape_tool_result(result, rc.store.blobs, rc.scope)
         foreign = tool.reads_workspace and not rc.workspace_trusted   # 没信任过的工作区：文件是仓库作者写的，不是用户写的
@@ -350,10 +364,7 @@ class ToolExecutor:
             source = "没有信任过的工作区" if foreign else "不可信来源"
             publish(E.NOTICE, {"level": "info", "code": "tainted",
                                "text": f"{call.name} 的输出来自{source}：之后的副作用操作将需要人工确认"})
-        msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
-        if decision == Decision.ASK:
-            msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]
-        return msg
+        return result
 
     # ================================================================== 联网工具
     def _capability_denied(self, tool: Tool) -> str | None:

@@ -129,6 +129,11 @@ class Tool:
         """
         return None
 
+    def finalize_result(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
+        """结果的收尾（例如 bash 的保尾截断、完整输出外置）。执行器在 PostToolUse hook 之后调用：
+        工具自己外置的内容必须经过 hook 的脱敏，不能在 ``execute`` 里先存下原文。默认原样返回。"""
+        return result
+
     def interruptible_for(self, args: dict[str, Any], workspace: str | None = None) -> bool:
         """按参数判定能否在取消时直接中止。默认取静态 interruptible；bash 对外部操作（如 git push）返回 False。"""
         return self.interruptible

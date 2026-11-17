@@ -69,6 +69,8 @@ class Tool:
     async def execute(self, args, ctx: ToolContext) -> ToolResult: ...
     async def reconcile(self, args, ctx) -> ToolResult | None:  # 崩溃后凭幂等键对账
         return None
+    def finalize_result(self, result, ctx) -> ToolResult:      # PostToolUse 之后的收尾（bash 的保尾截断与外置）
+        return result
     def interruptible_for(self, args, workspace=None) -> bool:  # 按参数判定可中断性
         return self.interruptible
     def effect_for(self, args, workspace=None) -> Effect:       # 动态副作用等级（workspace：工作区根目录）
@@ -379,7 +381,7 @@ def shape_tool_result(self, result: ToolResult, blobs: BlobStore, scope: str) ->
     return ToolResult(text, result.is_error, details, result.tainted)
 ```
 
-它在 `_run_one` 的最后、PostToolUse hooks 之后执行。放在 hooks 之后是因为 hook 可能改写或追加结果，外置要基于最终内容。
+它在 `_post_process` 里执行，排在 PostToolUse hooks 和工具自己的 `finalize_result`（bash 的保尾截断）之后。放在 hooks 之后是因为 hook 可能改写或追加结果，外置要基于最终内容；bash 的完整输出也是在 hook 之后才存成句柄，所以 `full_output_ref` 里是 hook 处理过的版本。崩溃恢复时对账补出来的结果走同一段 `_post_process`。
 `details["externalized_ref"]` 这一笔很关键：后面旧结果清理把这条结果替换成占位时，会把句柄写进占位文本，模型仍然能找回原文
 （见 [07 上下文工程与压缩](/core/context-engineering)）。
 

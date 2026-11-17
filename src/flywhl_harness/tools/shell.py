@@ -6,10 +6,12 @@ bash 是最强也最危险的工具。这里的工程要点：
   一次性杀掉整棵进程树（``npm run dev`` 会派生多个子进程，只杀父进程会留下孤儿）。
 - **两段式终止**：先 SIGTERM 给进程优雅退出的机会，宽限期后仍未退出再 SIGKILL。
 - **流式输出**：边执行边通过 ``ctx.emit`` 推送输出，UI 能实时看到构建/测试日志。
-- **输出截断保尾**：错误与结论通常在最后，所以保留结尾；完整输出外置为 blob 句柄。
+- **输出截断保尾**：错误与结论通常在最后，所以保留结尾；完整输出外置为 blob 句柄。截断在 ``finalize_result`` 里做，
+  排在 PostToolUse hook 之后：hook 拿到的是完整输出，句柄里存的也是 hook 处理过的版本。
 - **密钥不可见**：默认从子进程环境中剥离看起来像凭据的变量——名字含 KEY/TOKEN/SECRET/PASSWORD 等字样，
   或以 ``_PWD``、``_PASS``、``_PAT``、``_DSN`` 结尾（``MYSQL_PWD``、``SMTP_PASS``、``GITHUB_PAT``），
-  或值是带口令的 URL（``postgres://u:p@host/db``）。模型即使执行 ``env`` 也看不到原始凭据。
+  或值是带口令的 URL（``postgres://u:p@host/db``）。经 ``GIT_CONFIG_KEY_<n>``、``GIT_CONFIG_PARAMETERS`` 传进来的 git 配置
+  逐条看：带凭证的条目去掉（见 ``_secret_git_entry``），其余保留。模型即使执行 ``env`` 也看不到原始凭据。
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **系统沙箱**：默认 ``sandbox="auto"``，命令跑在 sandbox-exec / bubblewrap 里，凭证位置不可读、写操作限制在工作区与临时目录，
@@ -52,11 +54,38 @@ _NOT_SECRET_ENV = re.compile(r"GIT_CONFIG_KEY_\d+|GIT_AUTHOR_(NAME|EMAIL|DATE)")
 # GH_TOKEN、*_API_KEY 这类值本身就是凭证，沙箱外照样剥离
 OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)")
+# 键里任意位置的带口令网址：url.<base>.insteadOf、http.<url>.*、includeIf.hasconfig:remote.*.url:<url>.path 都把网址写在键中间
+_URL_PASSWORD_IN_KEY = re.compile(r"://[^/\s:@]*:[^/\s@]+@")
+_BARE_HELPER = re.compile(r"[A-Za-z0-9_-]*")   # 凭证助手只写名字（git 补成 git-credential-<名字>），或者为空
+
+
+def _secret_git_entry(key: str, value: str | None) -> bool:
+    """这条 git 配置带着凭证，变量名看不出来，要整条去掉。git 的节名和变量名不分大小写。
+
+    - 值本身就是凭证的键：``http.extraHeader`` 与 ``http.<url>.extraHeader``（额外请求头几乎都用来带认证：
+      Authorization、PRIVATE-TOKEN、Cookie），``sendemail[.<身份>].smtpPass``，``imap.pass``；
+    - ``credential[.<url>].helper`` 除了空值（清空助手列表）和只写助手名字的（store、osxkeychain）都去掉：
+      ``!`` 开头的内联命令、带参数的写法（``my-helper --token=…``）都可能把令牌直接写在里面；
+    - 键里任意位置、或值开头是带口令的网址。"""
+    k = key.strip().lower()
+    if k.startswith("http.") and k.endswith(".extraheader"):
+        return True
+    if k == "imap.pass" or (k.startswith("sendemail.") and k.endswith(".smtppass")):
+        return True
+    if k.startswith("credential.") and k.endswith(".helper") and not _BARE_HELPER.fullmatch((value or "").strip()):
+        return True
+    return bool(_URL_PASSWORD_IN_KEY.search(key) or (value is not None and _URL_WITH_PASSWORD.match(value)))
 
 
 def _renumber_git_config(env: dict[str, str], n: int) -> int:
     """值被当成密钥剥掉之后，键和 GIT_CONFIG_COUNT 还在，git 会报错退出：去掉这一对，其余的重新编号，返回剩下的对数。
-    键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动。"""
+    键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动；
+    但带凭证的（``_secret_git_entry``），不管编号能不能被 git 读到都连同值一起去掉：``env`` 照样看得见它。"""
+    for name in [k for k in env if k.startswith("GIT_CONFIG_KEY_") and _GIT_CONFIG_PAIR.fullmatch(k)]:
+        value_name = "GIT_CONFIG_VALUE_" + name.removeprefix("GIT_CONFIG_KEY_")
+        if _secret_git_entry(env[name], env.get(value_name)):
+            env.pop(name)
+            env.pop(value_name, None)
     seen = {int(m[1]) for m in map(_GIT_CONFIG_PAIR.fullmatch, list(env)) if m and int(m[1]) < n}
     pairs = []
     for i in sorted(seen):
@@ -68,12 +97,85 @@ def _renumber_git_config(env: dict[str, str], n: int) -> int:
     return len(pairs)
 
 
+_C_SPACE = " \t\n\v\f\r"
+
+
+def _sq_dequote_step(s: str, i: int) -> tuple[str, int] | None:
+    """git 的 ``sq_dequote_step``：从 ``s[i]`` 的单引号开始取一段，返回 (内容, 结束位置)，格式不对返回 None。
+    引号外只认 ``\\'``、``\\!`` 两种转义，而且后面必须紧接着重新进入单引号（``sq_quote`` 写出来就是这样）。"""
+    if i >= len(s) or s[i] != "'":
+        return None
+    out: list[str] = []
+    i += 1
+    while True:
+        if i >= len(s):
+            return None   # 单引号没闭合
+        if s[i] != "'":
+            out.append(s[i])
+            i += 1
+            continue
+        i += 1
+        if s[i:i + 1] == "\\" and i + 2 < len(s) and s[i + 1] in "'!" and s[i + 2] == "'":
+            out.append(s[i + 1])
+            i += 3
+            continue
+        return "".join(out), i
+
+
+def _git_config_parameters(raw: str) -> list[tuple[str, str, str | None]] | None:
+    """按 git 的 ``parse_config_env_list`` 解析 ``GIT_CONFIG_PARAMETERS``，返回 [(原文片段, 键, 值)]；git 认不出的返回 None。
+    新写法 ``'键'='值'``，旧写法 ``'键=值'``，``'键'=`` 和不带等号的旧写法是隐式布尔真（值为 None）。"""
+    entries: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(raw):
+        start = i
+        step = _sq_dequote_step(raw, i)
+        if step is None:
+            return None
+        key, i = step
+        value: str | None = None
+        if i >= len(raw) or raw[i] in _C_SPACE:
+            key, eq, rest = key.partition("=")
+            value = rest if eq else None
+        elif raw[i] == "=":
+            i += 1
+            if raw[i:i + 1] == "'":
+                step = _sq_dequote_step(raw, i)
+                if step is None:
+                    return None
+                value, i = step
+                if i < len(raw) and raw[i] not in _C_SPACE:
+                    return None
+            elif i < len(raw) and raw[i] not in _C_SPACE:
+                return None
+        else:
+            return None
+        entries.append((raw[start:i], key, value))
+        while i < len(raw) and raw[i] in _C_SPACE:
+            i += 1
+    return entries
+
+
+def _strip_git_parameters(raw: str) -> str | None:
+    """``git -c`` 的配置经 ``GIT_CONFIG_PARAMETERS`` 传给子进程，和 ``GIT_CONFIG_KEY_<n>`` 一样要剥：带凭证的条目
+    （``_secret_git_entry``）去掉，其余原样保留。git 认不出的格式整个去掉，它本来就会让所有 git 命令报错退出。"""
+    entries = _git_config_parameters(raw)
+    if entries is None:
+        return None
+    kept = [text for text, key, value in entries if not _secret_git_entry(key, value)]
+    return " ".join(kept) or None
+
+
 def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
     """``keep`` 是剥离之后要留下的变量名，只给人批准过的沙箱外命令用。"""
     env = dict(os.environ)
     if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
                if k in keep or not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+        if "GIT_CONFIG_PARAMETERS" in env:
+            params = _strip_git_parameters(env.pop("GIT_CONFIG_PARAMETERS"))
+            if params is not None:
+                env["GIT_CONFIG_PARAMETERS"] = params
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
@@ -253,13 +355,14 @@ class BashTool(Tool):
             return ToolResult(content=f"沙箱不可用，命令未执行：{e}", is_error=True,
                               details={"command": command, "sandbox": box.level, "sandbox_network": box.network})
 
+        # 这里返回完整输出：截断和外置在 finalize_result 里做，排在 PostToolUse hook 之后，存下来的完整输出同样经过了脱敏
         output = b"".join(chunks).decode("utf-8", errors="replace")
-        body, cut, total = truncate_tail(output, OUT_LINES, OUT_BYTES)
+        body = output
         details: dict[str, Any] = {
             "command": command,
             "exit_code": proc.returncode,
             "duration_ms": int((time.monotonic() - started) * 1000),
-            "total_lines": total,
+            "total_lines": len(output.splitlines()),
         }
         if box.level != "off":
             details["sandbox"] = box.level
@@ -271,10 +374,6 @@ class BashTool(Tool):
             first = details["egress_denied"][0].rsplit(":", 1)[0]
             body += (f"\n[出站白名单拦下了 {'、'.join(details['egress_denied'])}。确实需要的话把主机加进 permissions.network_allow，"
                      f"或者启动时加 --net-allow {first}]")
-        if cut:
-            ref = ctx.blobs.put(ctx.session_id, output)
-            details["full_output_ref"] = ref
-            body = f"[输出共 {total} 行，仅保留最后部分；完整输出句柄 {ref}，可用 read_ref 查看]\n" + body
         if timed_out:
             details["timed_out"] = True  # 执行器据此判断：外部命令超时 = 结果未知
             return ToolResult(content=f"{body}\n[命令超时（{timeout:.0f}s），已终止进程组]", is_error=True, details=details)
@@ -284,3 +383,14 @@ class BashTool(Tool):
             body += _sandbox_hint(box, output[-4000:], bool(proxy and proxy.denied))
         status = f"\n[退出码 {proc.returncode}]"
         return ToolResult(content=(body or "(无输出)") + status, is_error=proc.returncode != 0, details=details)
+
+    def finalize_result(self, result: ToolResult, ctx: ToolContext) -> ToolResult:
+        """长输出只保留结尾，完整输出外置成句柄。结尾的退出码、超时与沙箱提示都在保留范围里。
+        行数按句柄里存的内容数（hook 处理过、带提示行）：句柄头、``details["total_lines"]`` 与 read_ref 报的总行数一致。"""
+        body, cut, total = truncate_tail(result.content, OUT_LINES, OUT_BYTES)
+        if not cut:
+            return result
+        ref = ctx.blobs.put(ctx.session_id, result.content)
+        head = f"[输出共 {total} 行，仅保留最后部分；完整输出句柄 {ref}，可用 read_ref 查看]\n"
+        details = {**(result.details or {}), "full_output_ref": ref, "total_lines": total}
+        return ToolResult(head + body, result.is_error, details, result.tainted)

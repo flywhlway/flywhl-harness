@@ -236,8 +236,8 @@ if recovering:
     step = rc.store.get_step(rc.run_id, call.id)
     if step is not None and step.status == "started":
         rec = await tool.reconcile(args, ctx)
-        if rec is not None:
-            return done(rec, "reconciled")
+        if rec is not None:   # 和执行结果一样过 PostToolUse、标签转义、大结果外置与污点标记
+            return done(await self._post_process(call, tool, args, ctx, rec, publish), "reconciled")
         if not (effect == Effect.READ or tool.idempotent):
             return done(ToolResult.error(
                 "上次执行在进程中断时结果未知，且该工具不支持对账。请先核实外部状态（例如查询目标系统），"
@@ -250,7 +250,7 @@ if recovering:
 
 三个细节：
 
-- **对账成功会直接返回**，不再经过权限与审批——因为这一次没有新的副作用。
+- **对账成功会直接返回**，不再经过权限与审批——因为这一次没有新的副作用。对账结果本身照样经过 `_post_process`：PostToolUse hook、标签转义、大结果外置与污点标记，和执行出来的结果一样。
 - **重执行路径会继续往下走**，重新做权限判定、PreToolUse hook，必要时再次请求审批，然后再次 `step_started`（`ON CONFLICT ... attempt=attempt+1`）。恢复时原有的待审批对象已被 `Harness.recover()` 置为 `expired`，所以用户可能需要再批一次。
 - **抢占式终止也按崩溃处理。** `run_batch()` 捕获 `asyncio.CancelledError` 时设置 `abrupt = True`，不为在途调用补写“未执行”，保留 `started` 状态留给对账。写“未执行”在这里是撒谎：请求可能已经发出去了。
 

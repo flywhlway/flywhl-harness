@@ -29,7 +29,7 @@ The chapter's test for where a rule belongs: can you accept "the model forgot th
 ## Lessons the chapter records
 
 - A fail-open hook turned a serialization bug into a silent bypass. `to_json` once used `dataclasses.asdict`, which tried to deep-copy the SQLite connection in `context`, raised, and let the `rm` through. The unit test missed it because it built a `HookInput` without `context`. Test hooks through the real executor path.
-- Redaction in `post_tool_use` covers what the model sees and `tool_end`, not the streamed `tool_update` events that were already published.
+- Redaction in `post_tool_use` covers what the model sees, including blob handles it can open with `read_ref`, and `tool_end`, not the streamed `tool_update` events that were already published. The hook gets bash's full output, with no size cap, so a command that prints tens of MB hands the hook tens of MB; the tail truncation and the `full_output_ref` handle come after it. A fail-open hook that times out is ignored and the raw text goes through; a fail-closed one withholds the result. Make redaction hooks `fail_closed=True` and raise `timeout` (default 10 s) to fit the output you expect. Results filled in by `reconcile()` during crash recovery go through the same step.
 - Checking command text for a file name is easy to evade (`sed -i … feature_*.json`). The long-running example therefore also uses a Stop hook that checks the resulting state.
 
 ## Key code

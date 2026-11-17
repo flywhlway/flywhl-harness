@@ -75,6 +75,8 @@
 
 **English summary.** When one argument of a writing or unknown command is itself a whole catastrophic command (`python3 tool.py 'rm -rf ~'`), the call is refused in every mode, bypass included, because such commands may hand the argument to a shell (`script -c`, `flock f -c`). Known commands such as `echo`, `git commit -m` and `gh … --body` are not affected.
 
+**bash 的 `post_tool_use` hook 收到完整输出。** 以前收到的是截断后的结尾（最多 400 行 / 30KB），现在保尾截断和存句柄都排在 hook 之后，hook 输入的 `details` 里也不再有 `full_output_ref`。完整输出没有上限，命令打出几十 MB 时 hook 的输入也是几十 MB，默认 10 秒的 `timeout` 可能不够：超时的 fail-open hook 被忽略，fail-closed 的 hook 把结果换成占位文字。脱敏 hook 请写 `fail_closed`，并按可能的输出规模调大 `timeout`。
+
 **Anthropic provider 不再发送 `temperature`。** 以前只在开着 thinking 时不发。用非思考模型或关掉 `thinking` 时，它会传给 SDK，anthropic 2.x 直接抛 `TypeError`，Run 以失败结束。升级 SDK 之前就有这个问题。
 现在一律不发。DeepSeek、OpenAI 兼容等其他供应商照常发送。
 
@@ -127,6 +129,14 @@
 - `git clean` 的选项簇和缩写（`-dfx`、`--force`）、`-i`、`--no-dry-run` 判高危，`-n` 空跑不算。
 - `require_pinned`：40 位提交号只有写在 git 地址上才算锁住版本，普通 URL 的 `#片段`、npm dist-tag 不算。
 
+工具结果和子进程环境里的敏感信息：
+
+- bash 长输出存成句柄的完整输出，现在同样经过 `post_tool_use` hook 的脱敏，见“行为变化”。
+- 崩溃恢复时对账补出来的结果，现在和执行出来的结果一样经过 `post_tool_use` hook、`<system-reminder>` 转义、大结果外置和污点标记。
+- `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` 传进来的 `http.extraHeader`（包括 `http.<url>.extraHeader`）现在从 bash、hook、MCP 的子进程环境里剥离，其余配置重新连续编号。
+- `GIT_CONFIG_PARAMETERS`（`git -c` 传给子进程的配置）现在逐条检查，带凭证的条目去掉，其余原样保留；git 认不出的格式整个去掉。
+- 两条通道里都按条目剥离的 git 配置：`http[.<url>].extraHeader`、`sendemail[.<身份>].smtpPass`、`imap.pass`、除了空值和只写助手名字以外的 `credential[.<url>].helper`，以及键里任意位置或值开头是带口令网址的条目。
+
 ### 修复
 
 **出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和解析出的地址字面相同就放行：`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在写成 IP 的规则和域名规则走同一个判定，这类条目加载时报错，见“行为变化”。
@@ -150,6 +160,7 @@
   DeepSeek 返回 400 `Invalid assistant message: content or tool_calls must be set`。这个错误不重试，历史里又一直带着它，重试和“继续”都同样失败。
   现在组装请求时跳过只有思考的消息，已经出过这个错的会话点“重试”就能接着跑；Loop 改用“少推演、分步做”的提示让模型重来，
   每次被截断后把本次运行的输出上限提高到 4 倍，不超过模型登记的最大输出和 65536，降级到备用模型时按备用模型的上限收回；连续 3 次仍只有思考，以 `incomplete` 结束。
+- bash 长输出保尾截断时，放不下的那一行整行丢掉：结尾几行短输出之前是一行几十 KB 的内容（压缩过的 JSON、没换行的日志）时，模型只看得到结尾那几行。现在保留这一行的结尾部分，前面标 `…`；只有一行、超过 30KB 的输出同样只保留结尾，不再整行放进上下文。
 
 补测试时发现的问题：
 
