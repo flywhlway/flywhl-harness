@@ -129,6 +129,7 @@ _LIT = ""
 _DRIFT = "\ue025"   # IFS 的取值里有它：source 执行的脚本可能改了 IFS，见 _drift_seps
 _BRACE_RANGE = re.compile(r"(?:(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z]))(?:\.\.(-?\d+))?")
 _BRACE_LIMIT = 64                                      # 展开结果的上限：{a,b}{a,b}…… 会指数膨胀
+_BRACE_WORD_LIMIT = 4   # 一段里含可展开花括号的词最多枚举这么多个“展开/不展开”组合（2^4），再多就退回全展开并按 external
 
 GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog", "ls-tree",
             "cat-file", "merge-base", "rev-list", "show-ref", "for-each-ref", "count-objects", "check-ignore", "name-rev",
@@ -1498,51 +1499,17 @@ def _brace_range(lo: int, hi: int, incr: str | None) -> range:
     return range(lo, hi + sign, sign * (abs(int(incr or 1)) or 1))
 
 
-def _program_words(seg: list[str]) -> set[int]:
-    """段里 sed / awk 程序文本的位置。程序几乎都写在引号里，shell 不展开里面的花括号，shlex 却已经去掉了引号：
-    ``awk 'BEGIN{print "a", "b"; system("x")}'`` 按逗号展开之后程序就碎了，后半截成了数据文件。"""
-    k = _command_index(seg)
-    if k is not None and (name := seg[k].rsplit("/", 1)[-1]) in ("sed", "awk", "gawk", "mawk"):
-        return {k + 1 + j for j in _script_args(name, seg[k + 1:]).words}
-    return set()
+_SED_AWK = {"sed", "awk", "gawk", "mawk"}
 
 
-def _command_index(seg: list[str]) -> int | None:
-    """段里真正执行的命令是第几个词：跳过前置赋值、保留字和包装命令连同它们的选项与选项值（``timeout 5``、
-    ``nice -n 5``、``sudo -u u``）。规则和 _unwrap 一致，只是不改分析状态；拿不准（``env -S``）时返回 None。"""
-    k = 0
-    while k < len(seg):
-        while k < len(seg) and (_ASSIGN.fullmatch(seg[k]) or seg[k] in RESERVED or seg[k] == "function"):
-            k += 2 if seg[k] == "function" else 1
-        if k >= len(seg):
-            return None
-        name = seg[k].rsplit("/", 1)[-1]
-        if name not in WRAPPERS:
-            return k
-        takes = WRAPPERS[name]
-        k += 1
-        while k < len(seg) and (seg[k].startswith("-") or (name == "env" and _ASSIGN.fullmatch(seg[k]))):
-            opt = seg[k]
-            k += 1
-            if _ASSIGN.fullmatch(opt):
-                continue
-            parts = _split_cluster(opt, takes)
-            key = parts[-1].split("=", 1)[0]
-            if len(parts) > 1 and parts[-2] in takes:   # -Cdir：值紧贴在簇里
-                key, inline = parts[-2], True
-            else:
-                if len(key) > 2 and key.startswith("--"):
-                    key = next((o for o in sorted(takes) if o.startswith(key)), key)
-                inline = "=" in parts[-1]
-            if name == "env" and key in ("-S", "--split-string"):
-                return None
-            if key in takes and not inline:
-                k += 1
-        if name == "command" and k < len(seg) and seg[k - 1] in ("-v", "-V"):
-            return None
-        if name == "timeout" and k < len(seg) and _DURATION.fullmatch(seg[k]):
-            k += 1
-    return None
+def _maybe_sed_awk(seg: list[str]) -> bool:
+    """这段命令是否可能是 sed / awk——名字可能藏在花括号里（{sed,}、{nice,sed}）。保守地看每个词本身和它的花括号展开结果，
+    任一 basename 命中就算是。只用在“花括号的词多到穷举不过来”的兜底里：拿不准宁可算是，多走一遍兜底读法（判严）。"""
+    for w in seg:
+        for f in (w, *_expand_braces(w)[0]):
+            if f.rsplit("/", 1)[-1] in _SED_AWK:
+                return True
+    return False
 
 
 def _classify(seg: list[str], a: CommandAnalysis, stdin: list[str] | None = None) -> None:
@@ -1556,13 +1523,37 @@ def _classify(seg: list[str], a: CommandAnalysis, stdin: list[str] | None = None
             out.extend(words)
         return out
 
-    variants = [expand(set())]
-    if programs := _program_words(seg):
-        # sed / awk 的程序写在引号里时 shell 不展开里面的花括号，没加引号时照常展开（awk {-f,x.awk} 就是 awk -f x.awk），
-        # shlex 去掉引号后分不出是哪种：两种读法都分析，取更严的。程序词的位置是在展开前的词上找的，照常展开的那份不依赖它
-        kept = expand(programs)
-        if kept != variants[0]:
-            variants.append(kept)
+    # sed / awk 的程序写在引号里时 shell 不展开里面的花括号，没加引号时照常展开（awk {-f,x.awk} 就是 awk -f x.awk），
+    # shlex 去掉引号后分不出是哪种。命令名、包装命令的参数或命令名自身带花括号时（{sed,}、timeout {5,}、sed {-n,-e}、
+    # $S），靠“展开前定位程序词”会落空，只剩照常展开那份，引号里的 sed 程序被切碎、丢掉灾难性标记。改成：对每个含可展开
+    # 花括号的词都枚举“展开 / 不展开”两种读法，所有组合各分析一遍取更严的——不再依赖展开前定位命令词。
+    braced: list[int] = []
+    for k, w in enumerate(seg):
+        words, complete = _expand_braces(w)
+        if not complete or words != [w]:
+            braced.append(k)
+    if len(braced) <= _BRACE_WORD_LIMIT:
+        variants: list[list[str]] = []
+        for r in range(len(braced) + 1):
+            for combo in itertools.combinations(braced, r):   # combo 是这份读法里保持不展开的词
+                v = expand(set(combo))
+                if v not in variants:
+                    variants.append(v)
+    else:
+        # 词太多，2^m 组合会指数膨胀，穷举不过来。总是补上线性读法（全展开 + 每个带花括号的词单独不展开 + 全部不展开）：
+        # 让引号里的程序——哪怕命令名来自变量、要等变量代入后才看得出是 sed（$S '…'）——也至少被当成程序看过一次，藏毒的仍
+        # 判灾难性。普通命令（echo、cp、mkdir、grep……）的这些读法不会升级，级别和 main 一样，不因为花括号多就被挡。只有确实
+        # 可能是 sed/awk（程序会被花括号切碎而判松）、却又没判出灾难性时，再按 external 标一笔：默认模式要人确认（判严）。
+        variants = [expand(set())]
+        for k in braced:
+            v = expand({k})
+            if v not in variants:
+                variants.append(v)
+        v = expand(set(braced))
+        if v not in variants:
+            variants.append(v)
+        if _maybe_sed_awk(seg):
+            a.bump("external", "可能是 sed/awk 且含花括号的词太多，未逐种组合穷举；已按线性兜底分析")
     # 然后是变量展开：命令里赋过值的按每种取值各分析一遍（C=rm; $C -rf ~ 实际执行的是 rm -rf ~）
     todo: list[tuple[list[str], str | None]] = [(w, None) for v in variants for w in _substitute(v, a)]
     if _DRIFT in (a.vars.get("IFS") or ()):
