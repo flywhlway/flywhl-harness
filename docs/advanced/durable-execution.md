@@ -32,7 +32,7 @@ if rc.resume and rc.resume_note:
 ```
 
 上下文从 `entries` 重建，没有结果的工具调用按 `steps` 对账，补上恢复说明，然后直接进入下一轮——这依赖一个性质：**Loop 在两轮之间几乎不持有内存状态**，消息历史就是它的全部状态。
-少数确实存在的内存状态需要单独持久化：`Harness._checkpoint` 在每轮结束时把 `Budget.state()`（轮次、工具调用数、用量、已用墙钟）写进 `runs.checkpoint`，恢复时由 `Budget.restore` 接着计数；暂停时尚未注入的 steer / follow-up 也随检查点带回；会话污点（`tainted`）与会话级授权（`grants`）写在 `session.meta` 里，恢复后保留。
+少数确实存在的内存状态需要单独持久化：`Harness._checkpoint` 在每轮结束时把 `Budget.state()`（轮次、工具调用数、用量、已用墙钟，联网过的还有联网次数与 `tool_cost_usd`）写进 `runs.checkpoint`，恢复时由 `Budget.restore` 接着计数；暂停时尚未注入的 steer / follow-up 也随检查点带回；会话污点（`tainted`）与会话级授权（`grants`）写在 `session.meta` 里，恢复后保留。
 而 `LoopGuard` 的观察窗口、`stop_blocks` 计数、软阈值“已提醒过”的记录没有持久化，恢复后从零开始。这个“几乎”恰好是两种路线差异最大的地方：重放代码的引擎不需要逐项决定“哪些变量要存”。
 
 ## Temporal 关键概念速览

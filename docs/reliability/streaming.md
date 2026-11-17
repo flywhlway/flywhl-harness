@@ -225,7 +225,10 @@ def close(self) -> None:
 @app.get("/api/runs/{rid}/events")
 async def events(rid: str, request: Request, after: int = 0) -> StreamingResponse:
     run_dict(rid)
-    last = int(request.headers.get("last-event-id") or after or 0)
+    try:
+        last = int(request.headers.get("last-event-id") or after or 0)
+    except ValueError:   # 坏掉的 Last-Event-ID：从头补发，不报 500
+        last = 0
 
     async def gen():
         # 有界队列：客户端读得慢时 pump 阻塞，背压传回 EventHub（其队列满了会触发 _LAGGED → 从库补齐）
@@ -285,7 +288,7 @@ async def events(rid: str, request: Request, after: int = 0) -> StreamingRespons
 
 | 用户动作 | 发生了什么 |
 |---|---|
-| 刷新页面 | 旧连接断开、订阅取消；新页面先用库里的会话时间线渲染历史，再以会话详情返回的 `last_seq` 为起点订阅（`selectSession()`）。`run_dict()` 先 `flush_if_active()` 再取库中最大 `seq`，所以 `last_seq` 不会落后于已经扇出的事件。Run 不受影响；唯一的代价是正在生成的那条消息，`message_start` 早于起点，草稿不显示，要等它的 `message_end` 到达才出现 |
+| 刷新页面 | 旧连接断开、订阅取消；新页面先用库里的会话时间线渲染历史，再以会话详情返回的 `last_seq` 为起点订阅（`connect(ar.id, ar.last_seq)`）。`run_dict()` 先 `flush_if_active()` 再取库中最大 `seq`，所以 `last_seq` 不会落后于已经扇出的事件。Run 不受影响；唯一的代价是正在生成的那条消息，`message_start` 早于起点，草稿不显示，要等它的 `message_end` 到达才出现 |
 | 关闭标签页 | 同上，Run 继续执行，稍后打开还能看到结果 |
 | 网络抖动 | `EventSource` 1.5 秒后带 `Last-Event-ID` 重连，从库里补齐 |
 | 点击“停止” | 显式 `POST /api/runs/{rid}/cancel`，走取消语义 |
@@ -401,12 +404,16 @@ kw["tools"] = [{"name": t["name"], "description": t["description"], "input_schem
 
 ```javascript
 model_retry(d) {
-  if (d.discard_partial && S.live) { S.live.text = ""; S.live.thinking = ""; S.live.thinkingEl.classList.add("hidden"); S.live.tools.innerHTML = ""; scheduleLive(); }
-  addNotice({ level: "warn", text: `模型调用重试 #${d.attempt}（${d.kind}）：${d.delay}s 后重试${d.discard_partial ? "，已丢弃半截输出" : ""}` });
+  if (d.discard_partial && V.live) {
+    V.live.text = ""; V.live.thinking = ""; V.live.tools.innerHTML = "";
+    V.live.thinkingEl?.remove(); V.live.thinkingEl = null;
+    scheduleLive();
+  }
+  add(T.noticeItem({ level: "warn", text: `模型调用失败（${d.kind}），${d.delay}s 后第 ${d.attempt} 次重试${d.discard_partial ? "；已丢弃不完整的输出" : ""}` }));
 },
 ```
 
-清空的是同一个 `message_id` 下的全部实时缓冲：文本、thinking（连同它的展示区域一起隐藏）和工具卡片。漏掉任何一种，上一次尝试的残留就会和新一次的增量拼在一起。Loop 一侧对应的处理（清空 `text_acc`）以及成本问题见 [13 重试、熔断与降级](/reliability/retry-fallback)。
+清空的是同一个 `message_id` 下的全部实时缓冲：文本、thinking（连同它的展示区域一起移除）和工具卡片。漏掉任何一种，上一次尝试的残留就会和新一次的增量拼在一起。Loop 一侧对应的处理（清空 `text_acc`）以及成本问题见 [13 重试、熔断与降级](/reliability/retry-fallback)。
 
 ## 前端渲染：增量只是草稿
 
@@ -415,23 +422,24 @@ model_retry(d) {
 ```javascript
 function connect(runId, after) {
   disconnect();
-  S.lastSeq = after || 0;
-  const es = new EventSource(`/api/runs/${runId}/events?after=${S.lastSeq}`);
-  S.es = es;
+  V.lastSeq = after || 0;
+  const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events?after=${V.lastSeq}`);
+  V.es = es;
   for (const t of EVENT_TYPES) es.addEventListener(t, (e) => onEvent(JSON.parse(e.data)));
-  es.addEventListener("stream_end", () => { es.close(); if (S.es === es) S.es = null; });
+  // ... onopen / onerror 更新连接状态
+  es.addEventListener("stream_end", () => { es.close(); if (V.es === es) V.es = null; setConn("idle"); });
 }
 
 function onEvent(ev) {
-  if (ev.seq <= S.lastSeq) return; // 按 seq 去重：断线续传时不会重复处理
-  S.lastSeq = ev.seq;
+  if (V.disposed || ev.seq <= V.lastSeq) return;   // 按 seq 去重：续传时不会重复处理
+  V.lastSeq = ev.seq;
   // ... 分发到 H[ev.type]
 }
 ```
 
-1. **增量：`requestAnimationFrame` 合并。** `message_update` 只把 delta 追加到 `S.live.text`，然后 `scheduleLive()`；同一帧内无论来多少 token，只重新渲染一次 Markdown。不这样做，每个 token 都触发一次完整的 Markdown 解析和重排，长回答时界面会明显卡顿。pi-web-ui 用的是同样的手法。
+1. **增量：`requestAnimationFrame` 合并。** `message_update` 只把 delta 追加到 `V.live.text`，然后 `scheduleLive()`；同一帧内无论来多少 token，只重新渲染一次 Markdown。不这样做，每个 token 都触发一次完整的 Markdown 解析和重排，长回答时界面会明显卡顿。pi-web-ui 用的是同样的手法。
 2. **消息结束：用持久化消息重绘。** `message_end` 携带的是已经落盘的完整消息，`finalizeLive()` 用它构建的 DOM 整体替换实时草稿——草稿里的任何拼接偏差都在这一刻被纠正。
-3. **Run 结束：以会话时间线为准。** `run_end` 调用 `refreshDetail()` 重新拉取会话详情并重绘，这是最终的权威视图。
+3. **Run 结束：以会话时间线为准。** `run_end` 调用 `reload()` 重新拉取会话详情并重绘，这是最终的权威视图。
 
 客户端也按 `seq` 去重，这是防御性的：服务端的 `subscribe()` 已保证同一条连接内不重复，但跨连接时（浏览器自动重连、前端手动重连、切换会话后重新订阅）只要任何一处在边界上多给了一个事件，`onEvent` 都不会重复渲染。`EVENT_TYPES` 是一份显式清单——服务端新增一种事件类型而前端没有登记，浏览器会静默忽略它。
 
@@ -460,21 +468,22 @@ function onEvent(ev) {
 .venv/bin/flywhl serve -w playground --provider mock --port 8799
 ```
 
-另开终端：
+另开终端（`flywhl serve` 默认要求访问令牌，回环地址也一样，令牌在 `~/.flywhl/server_token`）：
 
 ```bash
-SID=$(curl -s -X POST localhost:8799/api/sessions -H 'content-type: application/json' \
+AUTH="Authorization: Bearer $(cat ~/.flywhl/server_token)"
+SID=$(curl -s -X POST localhost:8799/api/sessions -H "$AUTH" -H 'content-type: application/json' \
       -d '{"title":"t"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-RID=$(curl -s -X POST localhost:8799/api/sessions/$SID/runs -H 'content-type: application/json' \
+RID=$(curl -s -X POST localhost:8799/api/sessions/$SID/runs -H "$AUTH" -H 'content-type: application/json' \
       -d '{"prompt":"等待 3 秒"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 sleep 1
-curl -s -X POST localhost:8799/api/runs/$RID/steer -H 'content-type: application/json' \
+curl -s -X POST localhost:8799/api/runs/$RID/steer -H "$AUTH" -H 'content-type: application/json' \
      -d '{"text":"顺便列出目录","mode":"steer"}'
 
 # 完整事件流
-curl -sN localhost:8799/api/runs/$RID/events | grep -v '^data'
+curl -sN -H "$AUTH" localhost:8799/api/runs/$RID/events | grep -v '^data'
 # 从 seq 40 之后续传
-curl -sN -H 'Last-Event-ID: 40' localhost:8799/api/runs/$RID/events | grep -v '^data'
+curl -sN -H "$AUTH" -H 'Last-Event-ID: 40' localhost:8799/api/runs/$RID/events | grep -v '^data'
 ```
 
 第一条命令输出以 `retry: 1500` 开头，之后是一组组 `id: N` / `event: 类型`，最后是 `event: stream_end`（Run 结束后才请求时会立即回放完毕）；第二条命令的第一个 `id` 是 41。在 `data` 行里查找 `steer`，可以看到 `steer_queued` 通知出现在工具执行期间，`kind: steer` 的 user 消息出现在 `tool_end` 之后。

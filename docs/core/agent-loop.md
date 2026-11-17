@@ -45,7 +45,7 @@ while True:
 | flywhl-harness | 一次 `_call_model()` 加上随后的工具执行，由 `turn_start` / `turn_end` 包围 | 1 次 |
 
 flywhl-harness 采用与 pi 相同的细粒度定义：`self.turn` 与 `rc.budget.next_turn()` 都在每次模型调用前加一，
-所以 `BudgetConfig.max_turns=30` 的意思是“最多调用 30 次模型”，而不是“最多 30 轮对话”。
+所以 `BudgetConfig.max_turns=40`（默认值）的意思是“最多调用 40 次模型”，而不是“最多 40 轮对话”。
 Codex 意义上的 turn，在本项目里大致对应一次 Run（一个 prompt 加上运行中排队进来的 follow-up）。
 
 ## 一轮的阶段拆解

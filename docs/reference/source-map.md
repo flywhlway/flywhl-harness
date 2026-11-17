@@ -1,6 +1,6 @@
 # 源码地图
 
-`src/flywhl_harness/` 约 1.5 万行 Python（其中大量是中文注释）加约 3,600 行前端（原生 JS 与 CSS，无构建步骤）。下面给出推荐的阅读顺序，
+`src/flywhl_harness/` 约 1.9 万行 Python（其中大量是中文注释）加约 4,100 行前端（原生 JS 与 CSS，无构建步骤）。下面给出推荐的阅读顺序，
 以及每个文件“读它时该带着什么问题”。
 
 ## 推荐阅读顺序
@@ -29,13 +29,13 @@
 
 | 文件 | 行数量级 | 内容 |
 |---|---|---|
-| `types.py` | 230 | `Message`、`TextBlock`、`ThinkingBlock`、`ToolCall`、`Usage`、`StopReason`、`MsgKind`、`unpaired_tool_calls()` |
-| `events.py` | 80 | 事件类型常量 `E`、`Event`、`EPHEMERAL_EVENTS` |
+| `types.py` | 260 | `Message`、`TextBlock`、`ThinkingBlock`、`ToolCall`、`Usage`、`StopReason`、`MsgKind`、`unpaired_tool_calls()` |
+| `events.py` | 70 | 事件类型常量 `E`、`Event`、`EPHEMERAL_EVENTS` |
 | `cancel.py` | 130 | `CancelToken`（`cancel` / `child` / `guard` / `iterate` / `sleep`）、`RunCancelled`、`RunPaused` |
-| `config.py` | 380 | `HarnessConfig` 及子配置；`load()`：默认值 → 用户配置 → 项目配置 → 环境变量 → 参数，未知键报错；项目配置信任（`split_untrusted`、`trusted.json`） |
-| `prompts.py` | 150 | 系统提示、`build_project_context()`（项目指令通道）、`find_project_context()`（AGENTS.md）、`find_skills()`（渐进披露）、压缩模板、`reminder()` |
-| `_utils.py` | 170 | `new_id`、`canonical_json`、`estimate_tokens`、截断函数、`extract_json_block` |
-| `cli.py` | 450 | `flywhl` 命令、`TerminalRenderer`、终端审批、`.env` 白名单与项目配置信任确认 |
+| `config.py` | 820 | `HarnessConfig` 及子配置（含 `[web]`）；`load()`：默认值 → 用户配置 → 项目配置 → 环境变量 → 参数，未知键报错；项目配置信任（`split_untrusted`、`trusted.json`）、工作区信任（`is_workspace_trusted`） |
+| `prompts.py` | 220 | 系统提示、`build_project_context()`（项目指令通道）、`find_project_context()`（AGENTS.md）、`find_skills()`（渐进披露）、压缩模板、`reminder()` |
+| `_utils.py` | 160 | `new_id`、`canonical_json`、`estimate_tokens`、截断函数、`extract_json_block` |
+| `cli.py` | 600 | `flywhl` 命令、`TerminalRenderer`、终端审批、`.env` 白名单、项目配置与工作区的信任确认 |
 
 ### agent/ —— 大脑
 
@@ -54,7 +54,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `base.py` | `ModelRequest`、`StreamEvent`、`ErrorKind`、`ProviderError`、`classify_http_error()`、`MessageBuilder`、`Provider`、`prepare_history()` |
+| `base.py` | `ModelRequest`、`StreamEvent`、`ErrorKind`、`ProviderError`、`classify_http_error()`、`MessageBuilder`、`Provider`、`prepare_history()`（跳过只有思考、没有正文和工具调用的消息，见 `has_payload()`） |
 | `models.py` | `ModelInfo` 能力矩阵、`MODELS` 价格表、`compute_cost()` |
 | `profiles.py` | `ProviderProfile` 供应商档案（地址、密钥变量、思考内容的来源与回传方式、思考开关）、`<供应商>:<模型>` 解析 `resolve()` |
 | `openai_compat.py` | 用 httpx 直读 Chat Completions SSE（DeepSeek / 百炼 / Kimi / 智谱 / MiniMax / OpenRouter / Ollama…）；思考回传、`<think>` 拆分、流完整性 |
@@ -62,7 +62,7 @@
 | `anthropic.py` | 基于官方 SDK 的原始流事件；tool_result 合并、thinking 回传、缓存、refusal、server-side fallback |
 | `mock.py` | `ScriptedProvider`（测试与示例）、`DemoProvider`（无 Key 演示）、`deterministic_summary()` |
 | `replay.py` | `ReplayProvider`、`context_fingerprint()` |
-| `resilient.py` | `ResilientProvider`：重试 + 熔断 + 降级链 |
+| `resilient.py` | `ResilientProvider`：重试 + 熔断 + 降级链；降级时按备用模型的最大输出收回截断后提高的 `max_tokens` |
 | `native.py` | 模型侧联网的声明（`NativeSearchSpec`）、`native_for()` 门槛、server tool 参数、响应摘要 |
 | `__init__.py` | `create_provider()`（可跨供应商的降级链）、`detect_provider()` |
 
@@ -82,7 +82,7 @@
 | `regex_search.py` | 正则搜索放进子进程执行（`grep`、`search_ref` 共用）：超时或取消时直接杀掉，灾难性回溯不卡事件循环 |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
 | `mcp.py` | 最小 MCP stdio 客户端与 `MCPTool`（注解的保守默认值、环境隔离、`notifications/cancelled`） |
-| `web.py` | `web_search` / `web_fetch`：静态规格、结果格式、`fetch_scope` 判定（`precheck`）、本会话出现过的网址 |
+| `web.py` | `web_search` / `web_fetch`：静态规格、结果格式、`fetch_scope` 判定（`precheck`）、本会话出现过的网址（`seen_urls()`）、已读的页（`fetched_urls()`）与顺序翻页（`page_of_seen()`） |
 
 ### net/ —— 联网
 
@@ -102,7 +102,9 @@
 | `bash_analyzer.py` | `analyze()`：词法切分、剥包装命令、`sh -c` / `eval` 递归分析、花括号展开、工作区边界、`catastrophic` / `credential` / `network` 标记；无法静态分析的结构一律保守 |
 | `sensitive.py` | 凭证位置清单分两档：`CREDENTIAL_GLOBS` / `CREDENTIAL_HINTS`（文件工具、bash、沙箱共用，任何模式拒绝）与 `SECRET_HINT_GLOBS` / `SECRET_HINTS`（需确认） |
 | `hooks.py` | `HookEvent`、`HookInput`、`HookOutput`、`normalize_decision()`、`Hook`、`HookBus`、`CommandHook` |
-| `approvals.py` | `ApprovalBroker`：持久化审批、超时、CAS 决定一次 |
+| `approvals.py` | `ApprovalBroker`：持久化审批、超时、CAS 决定一次；无人值守时的自动批准与 `--approve-outside` 记录 |
+| `fatigue.py` | 审批疲劳：秒批与同类重复批准的提示（`notice(code=approval_fatigue)`）、`approval_stats()` |
+| `supply_chain.py` | hook 与 MCP 服务器的供应链检查：命令引用的脚本按内容绑定进信任哈希、包管理器临时拉取的代码要锁版本（`require_pinned`） |
 
 ### runtime/ —— 运行时
 
@@ -127,10 +129,11 @@
 | `observe/replay.py` | `replay_run()`、`replay_trajectory()`（只靠保存的轨迹回放）、`RecordedTool`、`HybridProvider` |
 | `observe/evals.py` | `EvalCase`、`run_eval()`、`wilson_interval()`、`mcnemar_exact()` |
 | `server/app.py` | FastAPI：会话/Run（含暂停、恢复、重试）/审批/上下文检查器/快照 REST；SSE（`Last-Event-ID`、心跳、断开检测）；lifespan 中启动周期性恢复；访问控制中间件（Host 白名单、跨站写请求检查、默认开启的访问令牌）、安全响应头（CSP）、请求体上限；会话导出、当前生效的设置 |
+| `server/exposure.py` | `flywhl serve` 启动前的网络暴露判定：非回环要 `--expose`、令牌长度、`--no-token` 时沙箱里的命令连不连得到控制台端口（`console_reachers()`） |
 | `web/app.js` | 控制台入口：路由（深链接 `#/s/<会话>`、`#/runs`、`#/approvals`、`#/tools`、`#/settings`）、侧边栏、命令面板、全局快捷键、审批计数轮询 |
 | `web/views/session.js` | 会话工作区：SSE 订阅与按 seq 去重、断线续传、rAF 合并的流式渲染、贴底滚动、运行控制、权限模式 |
 | `web/views/timeline.js` | 时间线渲染器：消息、思考过程、工具调用卡片、审批卡片（风险、命令分析、diff 预览、可编辑参数）、压缩分隔线、运行小结 |
-| `web/views/inspector.js` | 检查器：概览（状态流转、预算、状态机）、上下文、事件、历史（分支与快照） |
+| `web/views/inspector.js` | 检查器：概览（状态流转、按运行的预算与本会话累计、状态机）、上下文、事件、历史（分支与快照） |
 | `web/views/pages.js` | 运行记录、审批收件箱、工具目录 |
 | `web/views/settings.js` | 「环境与安全」页：当前实际生效的配置（只读）、安全体检、桌面通知等本机偏好 |
 | `web/boot.js` | 首帧设置明暗主题；必须是外链脚本，因为 CSP 不执行内联脚本 |
@@ -153,5 +156,11 @@
 | `tests/test_security.py` | hook 决策归一化、命令 hook 超时被杀、命令分析的绕过写法、灾难性命令全模式拒绝、工作区外读取、命令替换不被 allow 规则放行、网络输出污点、伪造提醒标签、改参重跑守卫、审批预览、MCP 注解默认值、影子仓库隔离、Web 服务访问控制 |
 | `tests/test_sandbox_default.py` | 默认开启的系统沙箱：档位解析、项目配置的限制、沙箱外执行的人工门（含回放与批准后改写），bash、命令 hook、MCP 服务器、验收命令四条通道读不到凭证哨兵、写不了工作区外，只读位置、影子 git 不执行嵌套仓库配置、出站代理与转发器 |
 | `tests/test_hardening.py` | 第二轮加固：伪装成只读的执行、仓库配置驱动 git、符号链接与判定后换链接、凭证清单、正则子进程、hook 改写与失败策略、沙箱断网、Web 令牌 / CSP / 请求体、回滚参数、断线续传、终端控制序列 |
+| `tests/test_workspace_trust.py`、`tests/test_project_files.py` | 工作区信任与污点、项目指令文件的独立通道、项目文件的符号链接与读取边界 |
+| `tests/test_approve_outside.py` | `--approve-outside` 的模式匹配与拒绝条件、放行记录、沙箱外保留 `SSH_AUTH_SOCK` |
+| `tests/test_serve_exposure.py` | `flywhl serve` 的 `--expose`、Host 白名单、令牌长度、`--no-token` 的拒绝条件 |
+| `tests/test_durability.py` | 会话库落盘强度（`durability`）的配置与 SQLite 设置 |
+| `tests/test_truncation_recovery.py` | 只有思考的截断：请求里跳过这类消息、提高输出上限、降级时收回、连续截断以 `incomplete` 结束 |
+| `tests/test_web_*.py`、`tests/test_net_client.py`、`tests/test_native_web.py` | 联网工具：能力位、后端与故障转移、读取范围与翻页、外传检查、出站入口、预算与计费、模型侧联网、回放 |
 
-示例 `examples/01`–`10` 的说明见 [02 快速上手](/guide/quickstart) 与仓库 README。
+示例 `examples/01`–`11` 的说明见 [02 快速上手](/guide/quickstart) 与仓库 README。

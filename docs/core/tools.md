@@ -211,7 +211,7 @@ flowchart LR
 prepared = [self._prepare(c) for c in calls]
 batches: list[list[Prepared]] = []
 for p in prepared:
-    if batches and p.parallel and batches[-1][0].parallel:
+    if batches and p.parallel(self._root) and batches[-1][0].parallel(self._root):
         batches[-1].append(p)
     else:
         batches.append([p])
@@ -387,7 +387,7 @@ def shape_tool_result(self, result: ToolResult, blobs: BlobStore, scope: str) ->
 
 | 性质 | 实现 | 意义 |
 |---|---|---|
-| 内容寻址 | `ref = "blob_" + sha256(text)[:16]`，`INSERT OR IGNORE` | 同一内容只存一份；bash 已存的句柄被 `shape_tool_result` 直接复用 |
+| 内容寻址 | `ref = "blob_" + sha256(text)[:16]`，同一 `(scope, ref)` 冲突时只刷新 `expires_at` | 同一内容只存一份；bash 已存的句柄被 `shape_tool_result` 直接复用 |
 | 按 scope 隔离 | 主键含 `scope`，`get(scope, ref)` | 别的会话拿到句柄也读不到，避免跨会话泄漏；子代理用根会话的 scope，父子之间可以互相读 |
 | TTL | `expires_at` + `purge_expired()` | 大结果不必永久保留；内置调用方目前都不设 TTL |
 
@@ -398,7 +398,7 @@ def shape_tool_result(self, result: ToolResult, blobs: BlobStore, scope: str) ->
 ## 内置工具精读
 
 内置工具集在 `tools/__init__.py::default_tools()` 里按固定顺序注册：read、write、edit、bash、ls、grep、todo_write、
-read_ref、search_ref、task。顺序是请求前缀的一部分：`ToolRegistry.specs()` 按注册顺序输出，会话创建时工具名单写入 `Session.meta` 钉住
+read_ref、search_ref、task，开启联网时 web_search、web_fetch 排在 task 之后。顺序是请求前缀的一部分：`ToolRegistry.specs()` 按注册顺序输出，会话创建时工具名单写入 `Session.meta` 钉住
 （MCP 工具也在第一次 Run 之前注册完毕），运行中途不增删，以免前缀缓存失效。
 
 ### read：截断要显式，续读要有指引
@@ -536,14 +536,13 @@ async def _terminate(proc, grace: float = 2.0) -> None:
             pass
         await proc.wait()
 
-# BashTool.execute（节选）
-proc = await asyncio.create_subprocess_shell(
-    command, cwd=str(ctx.workspace.root),
+# BashTool.execute（节选；run 来自系统沙箱的包装 box.enter([shell, "-c", command], ..., env)，见 18 章）
+proc = await asyncio.create_subprocess_exec(
+    *run.argv, cwd=str(ctx.workspace.root),
     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     stdin=asyncio.subprocess.DEVNULL,
     start_new_session=True,
-    env=_clean_env(self.strip_secret_env),
-    # ...
+    env=run.env,   # 以 _clean_env() 剥离密钥后的环境为底
 )
 decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
@@ -578,7 +577,7 @@ except asyncio.CancelledError:
 | `stdin=DEVNULL` | 命令等待交互输入（`git commit` 打开编辑器、`rm -i` 询问确认），一直挂到超时 |
 | `PAGER=cat`、`GIT_PAGER=cat`、`NO_COLOR=1` | `git log` 进入分页器卡住；ANSI 颜色码白白占 token |
 | stderr 合并进 stdout | 错误信息和正常输出的先后顺序丢失，模型对不上哪条错误属于哪一步 |
-| 剥离名字匹配 `KEY/TOKEN/SECRET/PASSWORD/PASSWD/CREDENTIAL/AUTH` 的环境变量 | 模型执行一次 `env`，凭据就进了上下文、轨迹和日志 |
+| 剥离名字匹配 `KEY/TOKEN/SECRET/PASSWORD/PASSWD/PASSPHRASE/CREDENTIAL/AUTH/COOKIE`（及 `_PWD`、`_PAT`、`_DSN` 这类后缀）的环境变量，以及值是带密码 URL 的变量 | 模型执行一次 `env`，凭据就进了上下文、轨迹和日志 |
 | `ctx.emit` 流式推送 | 跑 5 分钟的测试，UI 一直没有输出，用户不知道它是卡住了还是在跑 |
 | 增量 UTF-8 解码 | 一个汉字的 3 个字节恰好被 4096 字节的分块切开，流式输出里出现乱码 |
 | `manages_timeout = True` | 执行器的兜底计时器先于 bash 自己的超时触发，部分输出和“已终止进程组”的提示都被一句笼统的“工具执行超时”吞掉 |
@@ -590,6 +589,7 @@ except asyncio.CancelledError:
 执行器只在它之外留 10 秒余量做兜底；同时执行器把 Run 剩余的墙钟预算放进 `ctx.time_left`，bash 据此收紧自己的超时，
 让截止时间沿调用链传递（`tests/test_runtime.py::test_bash_own_timeout_keeps_partial_output`）。
 剥离环境变量只是降低暴露面，不是安全边界：模型仍然可以 `cat .env`，这要靠权限规则和沙箱处理（见 [18 Workspace 与沙箱](/governance/workspace-sandbox)）。
+人批准过的沙箱外命令（含 `flywhl run --approve-outside` 放行的）保留 `SSH_AUTH_SOCK` 以便 `git push`，其他密钥照样剥离。
 
 ### todo_write：状态从历史重建
 
@@ -707,7 +707,7 @@ harness 只能事后从响应里读到次数和来源，没法在结果进上下
 
 | 对策 | 做法 | 本项目 |
 |---|---|---|
-| 合并 | 把 `list_x` / `get_x` / `filter_x` 合成一个任务级工具 | 内置只有 10 个工具 |
+| 合并 | 把 `list_x` / `get_x` / `filter_x` 合成一个任务级工具 | 内置只有 10 个工具（开启联网再加 2 个） |
 | 按场景裁剪 | 子代理只拿完成子任务需要的工具 | `ToolRegistry.subset()`，子代理用更窄的工具集 |
 | 命名空间 | `mcp__{server}__{name}`，避免重名，也让模型知道来源 | `MCPTool` |
 | mask 而非 remove | 运行中需要禁用工具时，在执行层拒绝或用 `tool_choice` 限制，不删工具定义 | plan 模式在权限层拒绝写操作；预算耗尽的收尾请求用 `tool_choice="none"` 而保留 `tools` |

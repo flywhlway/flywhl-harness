@@ -389,11 +389,11 @@ flywhl-harness 的会话结构为“按领域合并”提供了一个天然的�
 | 分片 + 断点续传 | 大文件在弱网下传不完 | 按固定大小分片，每片带序号与哈希；重连后先询问云端已有哪些分片，只补缺失的 |
 | 完整性校验与原子发布 | 半截文件被当成完整产物引用 | 全部分片到齐、整体哈希校验通过后，才把产物引用写入工具结果 |
 
-云端已有的 `BlobStore`（`src/flywhl_harness/runtime/store.py`）是这套思路的缩影：`ref = "blob_" + sha256_hex(text)[:16]` 做内容寻址，`INSERT OR IGNORE` 让重复写入无害，按会话 `scope` 隔离读取权限。它只处理文本、不分片，并且只取哈希的前 16 个十六进制字符——单机存工具结果足够，用作跨租户的产物仓库时应改用完整哈希。
+云端已有的 `BlobStore`（`src/flywhl_harness/runtime/store.py`）是这套思路的缩影：`ref = "blob_" + sha256_hex(text)[:16]` 做内容寻址，`ON CONFLICT(scope, ref) DO UPDATE` 只刷新过期时间、让重复写入无害，按会话 `scope` 隔离读取权限。它只处理文本、不分片，并且只取哈希的前 16 个十六进制字符——单机存工具结果足够，用作跨租户的产物仓库时应改用完整哈希。
 
 ## 本地守护进程 + MCP
 
-把开发者本机的环境接入云端编排，常见形态是一个 **本地守护进程**：它主动向云端建立出站连接（本机不必开放入站端口），把本地能力以 MCP 工具的形式暴露给云端 harness。flywhl-harness 的 `src/flywhl_harness/tools/mcp.py` 已经能把 MCP 服务器的工具接入为普通工具（`mcp__<server>__<tool>` 命名空间、按配置判定只读、输出默认标记为污点），但只支持 stdio 传输，即 MCP 服务器与 harness 在同一台机器上；跨网络接入需要 MCP 的远程传输（如 Streamable HTTP，以 MCP 规范为准）或自建的隧道。
+把开发者本机的环境接入云端编排，常见形态是一个 **本地守护进程**：它主动向云端建立出站连接（本机不必开放入站端口），把本地能力以 MCP 工具的形式暴露给云端 harness。flywhl-harness 的 `src/flywhl_harness/tools/mcp.py` 已经能把 MCP 服务器的工具接入为普通工具（`mcp__<server>__<tool>` 命名空间、按配置判定只读、输出默认标记为污点、服务器进程跑在系统沙箱里），但只支持 stdio 传输，即 MCP 服务器与 harness 在同一台机器上；跨网络接入需要 MCP 的远程传输（如 Streamable HTTP，以 MCP 规范为准）或自建的隧道。
 
 这条链路上的授权与审计要两侧都做：
 

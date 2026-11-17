@@ -24,7 +24,7 @@ The chapter's test for where a rule belongs: can you accept "the model forgot th
 
 **Command hooks.** `CommandHook` follows the Claude Code protocol: JSON on stdin, exit 0 for success, exit 2 to block with stderr as the reason, anything else is an error handed to the fail policy. It differs in a few places: hooks run serially, event names are lowercase with underscores, and only the command hook type exists. Command hooks run inside the OS sandbox with secret-looking environment variables stripped. On timeout the whole process group is killed (`start_new_session=True` plus `os.killpg`), because cancelling the coroutine alone left the `sleep` child running.
 
-**Hooks are a supply-chain surface.** A hook runs outside the permission system and can read credentials on disk. A cloned repository's `flywhl.toml` could register one. Project hooks are therefore only registered after the user trusts that file by path and content hash, and command hooks re-check the script content before each run.
+**Hooks are a supply-chain surface.** A hook runs outside the permission system. The default sandbox hides the listed credential locations, but files outside that list, or any file for a hook whose sandbox the user config turns off, are still readable. A cloned repository's `flywhl.toml` could register one. Project hooks are therefore only registered after the user trusts that file by path and content hash, and command hooks re-check the script content before each run.
 
 ## Lessons the chapter records
 

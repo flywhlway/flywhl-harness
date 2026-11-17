@@ -12,7 +12,7 @@ Workspace 是 Agent 的工作现场，沙箱是这个现场的围墙。flywhl-ha
 |---|---|---|
 | 代码与文件 | 仓库、产物、临时文件 | `Workspace.root` |
 | 依赖 | `node_modules`、`.venv`、系统包 | 与宿主共用，不做隔离 |
-| 执行环境 | shell、解释器、环境变量、网络 | 宿主进程；bash 子进程剥离密钥环境变量 |
+| 执行环境 | shell、解释器、环境变量、网络 | 宿主上的子进程，默认进系统沙箱（与宿主共用内核）；子进程剥离密钥环境变量 |
 | 元数据 | 检查点清单、快照历史、会话数据 | `.flywhl/`：`harness.db`、`shadow.git`（数据目录在工作区外时为 `shadow-<hash>.git`） |
 | 凭据 | 访问外部系统的身份 | 理想情况下不在现场内，见下文“凭据代持” |
 
@@ -378,11 +378,12 @@ _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIA
                          r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
 _URL_WITH_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@", re.I)
 
-def _clean_env(strip: bool) -> dict[str, str]:
+def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
+    """``keep`` 是剥离之后要留下的变量名，只给人批准过的沙箱外命令用。"""
     env = dict(os.environ)
-    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+    if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
-               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+               if k in keep or not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
@@ -402,7 +403,7 @@ harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `e
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
 需要的凭证必须在 `flywhl.toml` 该服务器的 `env` 里显式给出——第三方 MCP 服务器拿到什么，从配置里一眼可见。
-进程外命令 hook 则仍继承完整的 `os.environ`，不经过这层过滤（见 [16 Hooks](/governance/hooks)）。
+进程外命令 hook 同样经过这层过滤，脚本确实要用的变量在该 hook 的 `env` 里写明取值或在 `pass_env` 里列出变量名（见 [16 Hooks](/governance/hooks)）。
 环境变量剥离只是“别把钥匙放在桌上”，不是“把钥匙锁起来”；后者需要沙箱加凭据代持。
 
 ## 浏览器自动化的隔离
@@ -447,7 +448,8 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 
 关闭只有三个入口：用户配置 `~/.flywhl/config.toml` 里的 `sandbox = "off"`、`-c` 指定的文件、`--sandbox off`。
 项目配置里写的会被丢弃并提示，**信任了也一样**：信任一个仓库的配置，是信它的 hook 和模型设置，不等于同意拆掉隔离。陌生仓库里的
-`flywhl.toml` 不能靠一次回车换到沙箱外运行。
+`flywhl.toml` 不能靠一次回车换到沙箱外运行。放开网络按同样的规矩：项目配置里的 `sandbox_network = "allow"`（单条 hook、MCP 服务器写的也一样）丢弃，
+只有用户配置、`-c` 文件和 `--network allow` 能放开。
 
 ### 默认网络
 
@@ -611,7 +613,7 @@ plan 模式、`deny` 规则、凭证位置、灾难性命令在这之前已经�
 | 什么都没写 | `auto`，网络 `allowlist` | 用户配置写 `sandbox = "off"` |
 | `sandbox = "off"` 在用户配置里 | 不变 | 不用改 |
 | `sandbox = "off"` 在项目配置里 | 丢弃并提示 | 挪到用户配置 |
-| `sandbox = "macos"` 或 `"linux"`，没写网络 | 网络从 `allow` 变成 `allowlist` | 写 `sandbox_network = "allow"` |
+| `sandbox = "macos"` 或 `"linux"`，没写网络 | 网络从 `allow` 变成 `allowlist` | 在用户配置或 `-c` 文件里写 `sandbox_network = "allow"`，项目配置写的丢弃 |
 | hook、MCP 服务器要读家目录里的文件或联网 | 会失败 | 按上面单独设置 |
 
 ### 开销
@@ -952,12 +954,12 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
-- 系统沙箱默认开启（`sandbox = "auto"`），用不了时拒绝执行，不退回沙箱外；只有用户配置、`-c`、`--sandbox off` 能关掉，项目配置不能。
+- 系统沙箱默认开启（`sandbox = "auto"`），用不了时拒绝执行，不退回沙箱外；只有用户配置、`-c`、`--sandbox off` 能关掉，项目配置不能，放开网络（`sandbox_network = "allow"`）同样如此。
   bash、命令 hook、MCP 服务器、`verify_command` 共用一层：凭证位置不可读写、写操作限制在工作区与临时目录。
 - 网络默认是空白名单的 `allowlist`：经代理按主机名放行，DNS 与本机套接字一并拒绝，被拦时报错写明主机和放行办法。Linux 上代理经 Unix 套接字和沙箱里的转发器接起来。
 - 要在沙箱外跑命令用 `outside_sandbox`，这是一道独立的人工门，任何模式都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时拒绝，只有命令行上 `--approve-outside` 写明的命令例外。
   工具只认执行器过了人工门之后给的标记，回放和直接调用走不到这里。
-- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。影子 git 自己也跑在沙箱外，不收录嵌套仓库，不执行它们的配置。
+- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`，以及把 git 引到别处读配置的 `.git/commondir`、`.git/config.worktree`、`.git/worktrees`。影子 git 自己也跑在沙箱外，不收录嵌套仓库，不执行它们的配置。
 - bypass 不要求沙箱。沙箱默认开启后，要在沙箱外用 bypass 必须显式关沙箱。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash、MCP 服务器、命令 hook 共用一套规则）只是最小实现。
 
