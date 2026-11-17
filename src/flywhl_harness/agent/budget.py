@@ -48,6 +48,9 @@ class Budget:
         self.tool_cost_usd = 0.0
         # 在途的联网调用（"run_id:call_id" → op），只用顶层预算上的这一份：并行批和并发子代理彼此看得到占位
         self.web_inflight: dict[str, str] = {}
+        # web_fetch 免确认放行的翻页（url_key → "pending" 已放行、还没发出 / "sent" 已发出）。同一批并行调用的预检都跑在
+        # 任何结果落盘之前，靠这一份才能互相看到；也只用顶层预算上的这一份
+        self.web_pages: dict[str, str] = {}
         self._soft_warned: set[str] = set()
 
     # ------------------------------------------------------------------ 记账
