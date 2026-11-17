@@ -13,7 +13,7 @@ from flywhl_harness.config import HarnessConfig, UntrustedConfigWarning, WebConf
     ({"default": "always"}, "web.default"), ({"fetch_scope": "any"}, "web.fetch_scope"),
     ({"fetch_backend": "jina"}, "web.fetch_backend"), ({"backends": ["brave"]}, "不认识"),
     ({"max_results": 0}, "必须是正数"), ({"timeout": -1}, "必须是正数"), ({"max_searches_per_run": True}, "必须是正数"),
-    ({"deny_domains": ["example.com/path"]}, "deny_domains"), ({"fetch_allow": ["*.bad*"]}, ""),
+    ({"deny_domains": ["example.com/path"]}, "deny_domains"), ({"fetch_allow": ["*.bad*"]}, "写法不对"),
     ({"backend": {"deepseek": {"api_key": "x"}}}, "api_key"), ({"backend": {"tavily": {}}}, "不认识"),
     ({"enabled": "yes"}, "web.enabled"),
 ])
