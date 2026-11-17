@@ -188,7 +188,7 @@ def check_web(w: "WebConfig") -> "WebConfig":
         v = getattr(w, k)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or (v == 0 and k not in ("cache_ttl",)):
             raise ValueError(f"web.{k} 必须是正数，实际是 {v!r}")
-    parse_rules(_check_str_list("web.fetch_allow", w.fetch_allow))
+    parse_rules(_check_str_list("web.fetch_allow", w.fetch_allow), key="web.fetch_allow")
     for d in _check_str_list("web.deny_domains", w.deny_domains):
         if not d.strip() or "/" in d:
             raise ValueError(f"web.deny_domains 写主机名或域名（如 example.com），实际是 {d!r}")
@@ -769,7 +769,7 @@ def _check_entry_sandbox(where: str, spec: dict[str, Any]) -> None:
     if spec.get("sandbox_network") not in (None, "allow", "deny", "allowlist"):
         raise ValueError(f"{where}.sandbox_network 只能是 allow、deny、allowlist，实际是 {spec['sandbox_network']!r}")
     if spec.get("network_allow") is not None:
-        parse_rules(_check_str_list(f"{where}.network_allow", spec["network_allow"]))
+        parse_rules(_check_str_list(f"{where}.network_allow", spec["network_allow"]), key=f"{where}.network_allow")
 
 
 def check_mcp_server(name: str, spec: Any) -> dict[str, Any]:

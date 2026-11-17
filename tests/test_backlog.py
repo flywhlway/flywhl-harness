@@ -380,7 +380,8 @@ async def test_egress_proxy_checks_resolved_addresses():
     assert await proxy.vet("localhost", 5432) == ["::1", "127.0.0.1"]
 
 
-@pytest.mark.parametrize("entry", ["0.0.0.0:5000", "169.254.169.254", "100.100.100.200", "127.0.0.2:5000", "224.0.0.1:*"])
+@pytest.mark.parametrize("entry", ["0.0.0.0:5000", "169.254.169.254", "100.100.100.200", "127.0.0.2:5000", "224.0.0.1:*",
+                                   "169.254.1.1", "240.0.0.1", "255.255.255.255"])
 def test_allowlist_refuses_literal_addresses_it_would_never_connect_to(entry):
     """写成 IP 的规则也走地址判定：0.0.0.0 连的是本机，元数据地址写全了也不放。启动时报错，不要悄悄失效。"""
     from flywhl_harness.tools.egress import AllowRule, parse_rules
@@ -395,22 +396,41 @@ async def test_egress_proxy_refuses_hosts_that_resolve_to_the_unspecified_addres
     """规则写成域名或别的写法，解析出 0.0.0.0、:: 时同样不连：它们都落到本机。"""
     from flywhl_harness.tools.egress import EgressDenied, EgressProxy, parse_rules
 
-    table = {"zero.corp": ["0.0.0.0"], "zero6.corp": ["::"], "000.000.000.000": ["0.0.0.0"]}
+    table = {"zero.corp": ["0.0.0.0"], "zero6.corp": ["::"]}
 
     async def resolve(host, port):
         return [ipaddress.ip_address(a) for a in table[host]]
 
-    proxy = EgressProxy(parse_rules(["zero.corp", "zero6.corp", "000.000.000.000"]), resolve=resolve)
+    proxy = EgressProxy(parse_rules(["zero.corp", "zero6.corp"]), resolve=resolve)
     for host in table:
         with pytest.raises(EgressDenied, match=host):
             await proxy.vet(host, 443)
 
 
+@pytest.mark.parametrize("entry", ["127.1:5000", "0:5000", "2130706433:5000", "0x7f.0.0.1:5000", "0177.0.0.1:5000",
+                                   "000.000.000.000", "1.2.3.0x4"])
+def test_allowlist_refuses_ip_lookalikes_that_are_not_dotted_quads(entry):
+    """解析器把这些当成 IPv4 的别种写法，连到的地址和规则字面上不一样：加载时就报错，不留一条说不清连到哪的规则。"""
+    from flywhl_harness.tools.egress import parse_rules
+
+    with pytest.raises(ValueError, match="点分十进制"):
+        parse_rules([entry])
+
+
+def test_web_fetch_allow_names_itself_when_a_literal_address_is_dead():
+    """web_fetch 只连公网，报错不能照搬“写 localhost:端口”这条只对 network_allow 成立的建议。"""
+    from flywhl_harness.config import WebConfig, check_web
+
+    with pytest.raises(ValueError, match="web.fetch_allow") as e:
+        check_web(WebConfig(fetch_allow=["169.254.169.254"]))
+    assert "公网" in str(e.value) and "localhost" not in str(e.value)
+
+
 def test_allowlist_keeps_literal_addresses_it_can_connect_to():
     from flywhl_harness.tools.egress import local_ports, parse_rules
 
-    rules = parse_rules(["127.0.0.1:5432", "10.0.0.5:8080", "8.8.8.8"])
-    assert [r.host for r in rules] == ["127.0.0.1", "10.0.0.5", "8.8.8.8"]
+    rules = parse_rules(["127.0.0.1:5432", "10.0.0.5:8080", "8.8.8.8", "100.64.1.2", "db1.internal", "*.0.0.1:5000"])
+    assert [r.host for r in rules] == ["127.0.0.1", "10.0.0.5", "8.8.8.8", "100.64.1.2", "db1.internal", ".0.0.1"]
     assert local_ports(rules) == ["5432"]
 
 

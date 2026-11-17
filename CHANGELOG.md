@@ -44,10 +44,6 @@
 
 **English summary.** `flywhl serve` no longer disables the Host allowlist on `0.0.0.0` and `::`, and `*` is refused by both `--allow-host` and `create_app`. Listening on a non-loopback address now requires `--expose` plus a token, and a manual `--token` there needs at least 16 characters. A wildcard listen trusts only loopback names and `--allow-host` entries, so remote browsers get 403 until you add the address, and the printed link uses a loopback address. `--no-token` is refused when commands the agent runs can reach the console port, because they could otherwise approve their own human gate: sandbox off, `sandbox_network = "allow"`, or an allowlist rule for that loopback port, globally or on a single hook or MCP server. `access.any_host` is gone from `/api/settings`.
 
-### 修复
-
-**出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和地址字面相同就放行，`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在这类条目启动时报错，要连本机端口写 `localhost:端口`。
-
 **会话库默认按断电耐久落盘。** 新配置项 `durability` 默认 `full`：`synchronous=FULL`，加上 `fullfsync` 和 `checkpoint_fullfsync`。
 之前是 `NORMAL`，断电可能丢掉最后几次提交，其中可能有执行前写的工具 intent，恢复时看不到记录，非幂等调用会再执行一次。
 保证只覆盖会话库，影子 git 和工作区文件不在内。
@@ -57,6 +53,17 @@
 数字只代表那台机器的那种磁盘，见[压测记录](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/evidence/sqlite-durability-2026-11-06.md)。
 
 要回到之前的行为，写 `durability = "normal"`。它放宽了保证，写在项目配置里要先信任才生效。取值写错时加载就报错。
+
+**出站白名单里写成 IP 的条目，连不到的地址加载配置时就报错。**
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| 报“出站白名单条目连不到：… 是回环、链路本地、保留或云元数据地址” | 代理从来不放行这些地址。以前规则写成 IP 时字面相同就放行（见“修复”），现在和域名规则走同一个判定，加载时说清楚 | `network_allow` 里连本机端口写 `localhost:端口`。`127.0.0.2` 这类回环别名、`169.254.x.y` 的链路本地设备没有放行写法，确实要连只能 `sandbox_network = "allow"`；`web.fetch_allow` 只放公网地址 |
+| 报“像 IP 地址，但不是标准的点分十进制” | `127.1`、`0x7f.0.0.1`、`2130706433` 连接时会被解析成别的地址，规则和实际连到的地方对不上 | 写成 `10.0.0.5` 这样的标准写法 |
+
+全局 `permissions.network_allow`、单条 hook 和 MCP 服务器的 `network_allow`、`web.fetch_allow` 都这样校验。
+
+**English summary.** IP-literal entries in `network_allow` and `web.fetch_allow` that the egress check never connects to (`0.0.0.0`, loopback addresses other than `127.0.0.1`, link-local, reserved, multicast and cloud metadata addresses) now fail when the config loads, and so do non-canonical IPv4 forms such as `127.1` or `0x7f.0.0.1`. Use `localhost:PORT` for local ports; loopback aliases and link-local devices can only be reached with `sandbox_network = "allow"`.
 
 ### 新增
 
@@ -85,6 +92,8 @@
 - `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
 
 ### 修复
+
+**出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和解析出的地址字面相同就放行：`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在写成 IP 的规则和域名规则走同一个判定，这类条目加载时报错，见“行为变化”。
 
 **`git push --receive-pack`、`--upload-pack`、`--exec`、`ext::` 这类地址不再被 allow 规则覆盖。** 它们指定了要运行的程序，`allow:bash(git push*)` 按文本匹配时看不见，现在按“实际程序不在命令文本里”处理，要人确认。
 长选项的缩写（`--rece=x`）、`--repo=ext::x`、`git clone` 的 `-c`、`--config`、`--template`，`git pull` 的 `-s`、`--strategy` 同样处理。
