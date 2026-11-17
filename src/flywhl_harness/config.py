@@ -148,8 +148,8 @@ class WebConfig:
     default: str = "off"                       # 新会话默认能力
     backends: list[str] = field(default_factory=lambda: ["deepseek"])
     fetch_backend: str = "deepseek"            # deepseek（服务端抓取）| direct（本机直连）
-    max_searches_per_run: int = 20
-    max_fetches_per_run: int = 10
+    max_searches_per_run: int = 60             # 调研类长任务一次运行要查几十次、翻几十页公告：20 / 10 不够用
+    max_fetches_per_run: int = 30
     max_results: int = 8                       # 单次搜索返回条数上限
     result_chars: int = 6000                   # 单次搜索交给模型的总字符上限
     fetch_chars: int = 20000                   # 单页正文交给模型的字符上限

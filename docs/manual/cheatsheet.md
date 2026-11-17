@@ -46,7 +46,7 @@
 | `permissions.mode` / `on_ask` / `approval_timeout` | `default` / `wait` / 600 秒 |
 | `permissions.sandbox` / `sandbox_network` / `strip_secret_env` | `auto` / `auto`（有沙箱时是空白名单的 `allowlist`）/ true |
 | `web.enabled` / `default` / `fetch_scope` | false / `off` / `ask` |
-| `web.backends` / `fetch_backend` / `max_searches_per_run` / `max_fetches_per_run` | `["deepseek"]` / `deepseek` / 20 / 10 |
+| `web.backends` / `fetch_backend` / `max_searches_per_run` / `max_fetches_per_run` | `["deepseek"]` / `deepseek` / 60 / 30 |
 
 ## 规则语法
 

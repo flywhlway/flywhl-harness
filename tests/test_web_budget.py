@@ -19,7 +19,7 @@ async def test_counters_land_in_checkpoint_result_and_usage_snapshots(ws):
     snaps = [e.data for e in res.events if e.type == "usage"]
     after_tools = [s for s in snaps if s.get("web_searches")]
     assert after_tools[0]["web_searches"] == 1 and after_tools[-1]["web_searches"] == 2   # 每个工具批次之后都更新
-    assert after_tools[-1]["max_web_searches"] == 20 and after_tools[-1]["max_web_fetches"] == 10
+    assert after_tools[-1]["max_web_searches"] == 60 and after_tools[-1]["max_web_fetches"] == 30
 
 
 async def test_search_cost_counts_toward_max_cost(ws):
