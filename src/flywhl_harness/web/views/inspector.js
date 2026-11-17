@@ -75,6 +75,34 @@ function meter(label, val, max, { text, tone, marks = [] } = {}) {
     <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="${esc(label)}"><i class="${cls}" style="width:${pct}%"></i>${m}</div></div>`;
 }
 
+const clipText = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
+const tokText = (u) => `${fmt.k(fmt.tokIn(u))} 入${u.cache_read_tokens ? `（缓存 ${fmt.k(u.cache_read_tokens)}）` : ""} · ${fmt.k(u.output_tokens)} 出`;
+
+/** 一次运行的计数。取值顺序：实时 usage 事件 → result（结束时写入）→ checkpoint.budget（每轮结束写入，运行中也有，
+ *  旧版本留下的 Run 只有它记了工具次数）。实时 usage 只有页面开着时才收得到，运行结束后才打开时退回到落盘的数据。 */
+function runCounts(r, live) {
+  const u = live || {};
+  const res = r?.result || {};
+  const ck = r?.checkpoint?.budget || {};
+  const pick = (k) => u[k] ?? res[k] ?? ck[k];
+  const usage = u.usage || (fmt.tokTotal(r?.usage) ? r.usage : ck.usage) || {};
+  return {
+    turns: Number(pick("turns") || 0), tools: Number(pick("tool_calls") || 0),
+    searches: Number(pick("web_searches") || 0), fetches: Number(pick("web_fetches") || 0),
+    toolCost: Number(pick("tool_cost_usd") || 0), web: pick("web_searches") != null, usage,
+  };
+}
+
+function addCounts(a, b) {
+  const sum = (k) => (a.usage[k] || 0) + (b.usage[k] || 0);
+  return {
+    turns: a.turns + b.turns, tools: a.tools + b.tools, searches: a.searches + b.searches, fetches: a.fetches + b.fetches,
+    toolCost: a.toolCost + b.toolCost, web: a.web || b.web,
+    usage: { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_read_tokens: sum("cache_read_tokens"),
+             cache_write_tokens: sum("cache_write_tokens"), cost_usd: sum("cost_usd") },
+  };
+}
+
 const FSM = {
   created: [6, 8], queued: [6, 40], running: [92, 40], waiting_human: [92, 8], paused: [6, 98], interrupted: [92, 98],
   cancelling: [92, 156], completed: [214, 8], incomplete: [214, 32], failed: [214, 56], budget_exhausted: [214, 80],
@@ -120,29 +148,46 @@ function renderOverview(p, V, app) {
   if (r && V.trailFor !== r.id && !V.running) loadTrail(V).then((ok) => ok && renderOverview(p, V, app));
   // 实时 usage 事件只有页面开着时才收得到。运行结束后才打开、或运行中途打开时，退回到落盘的数据：
   // result（结束时写入）→ checkpoint.budget（每轮结束写入，运行中也有，旧版本留下的 Run 只有它记了工具次数）
-  const u = V.usage || {};
-  const res = r?.result || {};
-  const ck = r?.checkpoint?.budget || {};
-  const usage = u.usage || (fmt.tokTotal(r?.usage) ? r.usage : ck.usage) || {};
-  const budget = app.info?.budget || {};
+  // 实时 usage 只属于它到达时正在看的那次运行：换了运行（新任务、重试）之后不能再拿来顶替
+  const u = (V.usage && V.usageFor === r?.id && V.usage) || {};
+  const c = runCounts(r, u);
+  const usage = c.usage;
+  // 上限取这次运行开跑时的配置（落在 run.config.replay 里），不取服务现在的配置：改过上限之后，旧运行的分母不能跟着变
+  const replay = r?.config?.replay || {};
+  const rb = { ...(app.info?.budget || {}), ...(replay.budget || {}) };
+  const rw = replay.web || {};
   const visited = new Set(V.trail.flatMap((x) => [x.from, x.to]));
   const last = V.trail[V.trail.length - 1];
   const runs = V.detail?.runs || [];
   const tokens = fmt.tokTotal(usage);
-  const maxTok = u.max_total_tokens || budget.max_total_tokens || 0;
-  const maxCost = u.max_cost_usd || budget.max_cost_usd || 0;
-  // 联网计数：开了联网的会话才有。取值顺序同上：实时 usage → result → checkpoint.budget
-  const pick = (k) => u[k] ?? res[k] ?? ck[k];
+  const maxTok = u.max_total_tokens || rb.max_total_tokens || 0;
+  const maxCost = u.max_cost_usd || rb.max_cost_usd || 0;
   const webCap = V.detail?.session?.meta?.capabilities?.web || "off";
-  const webOn = webCap !== "off" || pick("web_searches") != null;
+  const webOn = webCap !== "off" || c.web;
   const lim = app.info?.capabilities?.web?.limits || {};
-  const toolCost = Number(pick("tool_cost_usd") || 0);
   const modelCost = Number(usage.cost_usd || 0);
   const webMeters = webOn ? `
-      ${meter("联网搜索", pick("web_searches") || 0, u.max_web_searches ?? lim.searches)}
-      ${webCap === "fetch" || pick("web_fetches") ? meter("网页读取", pick("web_fetches") || 0, u.max_web_fetches ?? lim.fetches) : ""}` : "";
-  const costText = toolCost ? `模型 ${fmt.money(modelCost)} + 联网 ${fmt.money(toolCost)}${maxCost ? " / " + fmt.money(maxCost) : ""}`
+      ${meter("联网搜索", c.searches, u.max_web_searches ?? rw.max_searches_per_run ?? lim.searches)}
+      ${webCap === "fetch" || c.fetches ? meter("网页读取", c.fetches, u.max_web_fetches ?? rw.max_fetches_per_run ?? lim.fetches) : ""}` : "";
+  const costText = c.toolCost ? `模型 ${fmt.money(modelCost)} + 联网 ${fmt.money(c.toolCost)}${maxCost ? " / " + fmt.money(maxCost) : ""}`
     : `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}`;
+  // 本会话累计：同一个任务常常跨几次运行（失败后发“继续”、追加要求），每次运行的预算从零算起。
+  // 只看最新一次运行，前面花掉的轮次、token、读取次数在概览里就消失了，和时间线对不上
+  const live = V.usageFor && V.usage ? { [V.usageFor]: V.usage } : {};
+  const total = runs.reduce((acc, x) => addCounts(acc, runCounts(x, live[x.id])), runCounts(null));
+  const totalSection = runs.length > 1 ? `
+    <div class="panel-section">
+      <div class="panel-title">本会话累计<span class="aside tnum">${runs.length} 次运行</span></div>
+      <dl class="kv tnum">
+        <dt>轮次</dt><dd>${fmt.int(total.turns)}</dd>
+        <dt>工具调用</dt><dd>${fmt.int(total.tools)}</dd>
+        <dt>Token</dt><dd>${tokText(total.usage)}</dd>
+        <dt>费用</dt><dd>${total.toolCost ? `模型 ${fmt.money(total.usage.cost_usd)} + 联网 ${fmt.money(total.toolCost)}` : fmt.money(total.usage.cost_usd)}</dd>
+        ${total.web || webOn ? `<dt>联网搜索</dt><dd>${fmt.int(total.searches)} 次</dd><dt>网页读取</dt><dd>${fmt.int(total.fetches)} 次</dd>` : ""}
+      </dl>
+      <p class="muted" style="font-size:var(--fs-xs);margin:8px 0 0">预算上限按每次运行计算：新任务（包括失败后发送的“继续”）重新计数，“重试”接着原来的计数。</p>
+    </div>` : "";
+  const runLabel = r ? (r.prompt ? `“${clipText(r.prompt, 14)}”` : "恢复执行") : "";
 
   p.innerHTML = `
     <div class="panel-section">
@@ -156,12 +201,12 @@ function renderOverview(p, V, app) {
         <dt>创建于</dt><dd>${esc(fmt.time(r.created_at))}</dd></dl>` : `<p class="muted" style="font-size:var(--fs-sm)">这个会话还没有运行。</p>`}
     </div>
     <div class="panel-section">
-      <div class="panel-title">预算</div>
-      ${meter("轮次", u.turns ?? res.turns ?? ck.turns ?? 0, u.max_turns ?? budget.max_turns)}
-      ${meter("工具调用", u.tool_calls ?? res.tool_calls ?? ck.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
-      ${meter("Token", tokens, maxTok, { text: `${fmt.k(fmt.tokIn(usage))} 入${usage.cache_read_tokens ? `（缓存 ${fmt.k(usage.cache_read_tokens)}）` : ""} · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
-      ${meter("费用", modelCost + toolCost, maxCost, { text: costText })}${webMeters}
-    </div>
+      <div class="panel-title">本次运行预算${runLabel ? `<span class="aside" title="${esc(r?.prompt || "")}">${esc(runLabel)}</span>` : ""}</div>
+      ${meter("轮次", c.turns, u.max_turns ?? rb.max_turns)}
+      ${meter("工具调用", c.tools, u.max_tool_calls ?? rb.max_tool_calls)}
+      ${meter("Token", tokens, maxTok, { text: `${tokText(usage)}${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
+      ${meter("费用", modelCost + c.toolCost, maxCost, { text: costText })}${webMeters}
+    </div>${totalSection}
     <div class="panel-section">
       <div class="panel-title">状态流转<span class="aside">CAS 迁移，含原因</span></div>
       ${V.trail.length ? `<ol class="steps">${V.trail.map((x, i) => `<li class="${i === V.trail.length - 1 ? "cur" : ""}"><span class="node" aria-hidden="true"></span>

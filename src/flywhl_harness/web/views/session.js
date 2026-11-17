@@ -338,7 +338,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
     if (!r) return;
     try {
       const nr = await api.post(`/api/runs/${r.id}/${r.status === "failed" ? "retry" : "resume"}`);
-      V.run = nr; V.trail = []; V.trailFor = nr.id;
+      V.run = nr; V.trail = []; V.trailFor = nr.id; V.usage = null;   // 上一次运行的实时用量不能顶替重试这次的
       setRunning(true);
       connect(nr.id, nr.last_seq);
       toast(r.status === "failed" ? "从已保存的历史继续，不会重复已成功的步骤。" : "已从暂停处继续。", { title: r.status === "failed" ? "开始重试" : "继续运行", tone: "success" });
@@ -450,7 +450,7 @@ export function mountSession(root, app, sid, { pendingPrompt = null } = {}) {
       add(T.compactionDivider({ tokens_before: d.tokens_before, tokens_after: d.tokens_after, summary: d.summary, summarized_messages: d.summarized }));
     },
     notice(d) { add(T.noticeItem(d)); },
-    usage(d) { V.usage = d; renderComposerStatus(); },
+    usage(d, ev) { V.usage = d; V.usageFor = ev?.run_id || V.run?.id; renderComposerStatus(); },
     error(d) { add(T.noticeItem({ level: "error", text: "运行时错误：" + d.error })); },
     async run_end(d) {
       setRunning(false);
