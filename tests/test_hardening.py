@@ -872,9 +872,12 @@ async def test_a_hook_that_makes_the_output_longer_still_gets_the_tail_cut(ws):
     ("includeIf.hasconfig:remote.*.url:https://u:canary-key-4@git.example.invalid/**.path", "x.inc"),
     ("credential.helper", "!f() { echo password=canary-key-5; }; f"),
     ("credential.https://git.example.invalid.helper", "  !echo password=canary-key-6"),
-], ids=["smtppass", "smtppass-identity", "imap-pass", "url-in-key", "inline-helper", "inline-helper-url"])
+    ("credential.helper", "my-helper --token=canary-key-7"),
+    ("credential.helper", "/opt/canary-key-8/helper"),
+], ids=["smtppass", "smtppass-identity", "imap-pass", "url-in-key", "inline-helper", "inline-helper-url",
+        "helper-with-args", "helper-path"])
 def test_credential_git_config_is_stripped_from_both_env_channels(monkeypatch, key, value):
-    """值本身是口令的键、内联命令写的凭证助手、键中间带口令的网址：GIT_CONFIG_KEY_<n> 和 GIT_CONFIG_PARAMETERS 两条通道都去掉。
+    """值本身是口令的键、不止写了名字的凭证助手、键中间带口令的网址：GIT_CONFIG_KEY_<n> 和 GIT_CONFIG_PARAMETERS 两条通道都去掉。
     只写助手名字的 credential.helper 留着。"""
     from flywhl_harness.tools.shell import _clean_env
 

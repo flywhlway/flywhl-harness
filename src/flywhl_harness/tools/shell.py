@@ -56,6 +56,7 @@ OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)")
 # 键里任意位置的带口令网址：url.<base>.insteadOf、http.<url>.*、includeIf.hasconfig:remote.*.url:<url>.path 都把网址写在键中间
 _URL_PASSWORD_IN_KEY = re.compile(r"://[^/\s:@]*:[^/\s@]+@")
+_BARE_HELPER = re.compile(r"[A-Za-z0-9_-]*")   # 凭证助手只写名字（git 补成 git-credential-<名字>），或者为空
 
 
 def _secret_git_entry(key: str, value: str | None) -> bool:
@@ -63,14 +64,15 @@ def _secret_git_entry(key: str, value: str | None) -> bool:
 
     - 值本身就是凭证的键：``http.extraHeader`` 与 ``http.<url>.extraHeader``（额外请求头几乎都用来带认证：
       Authorization、PRIVATE-TOKEN、Cookie），``sendemail[.<身份>].smtpPass``，``imap.pass``；
-    - ``credential[.<url>].helper`` 写成 ``!`` 开头的内联命令：令牌常直接写在命令里。只写助手名字（store、osxkeychain）的保留；
+    - ``credential[.<url>].helper`` 除了空值（清空助手列表）和只写助手名字的（store、osxkeychain）都去掉：
+      ``!`` 开头的内联命令、带参数的写法（``my-helper --token=…``）都可能把令牌直接写在里面；
     - 键里任意位置、或值开头是带口令的网址。"""
     k = key.strip().lower()
     if k.startswith("http.") and k.endswith(".extraheader"):
         return True
     if k == "imap.pass" or (k.startswith("sendemail.") and k.endswith(".smtppass")):
         return True
-    if k.startswith("credential.") and k.endswith(".helper") and (value or "").lstrip().startswith("!"):
+    if k.startswith("credential.") and k.endswith(".helper") and not _BARE_HELPER.fullmatch((value or "").strip()):
         return True
     return bool(_URL_PASSWORD_IN_KEY.search(key) or (value is not None and _URL_WITH_PASSWORD.match(value)))
 

@@ -135,7 +135,7 @@
 - 崩溃恢复时对账补出来的结果，现在和执行出来的结果一样经过 `post_tool_use` hook、`<system-reminder>` 转义、大结果外置和污点标记。
 - `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` 传进来的 `http.extraHeader`（包括 `http.<url>.extraHeader`）现在从 bash、hook、MCP 的子进程环境里剥离，其余配置重新连续编号。
 - `GIT_CONFIG_PARAMETERS`（`git -c` 传给子进程的配置）现在逐条检查，带凭证的条目去掉，其余原样保留；git 认不出的格式整个去掉。
-- 两条通道里都按条目剥离的 git 配置：`http[.<url>].extraHeader`、`sendemail[.<身份>].smtpPass`、`imap.pass`、写成 `!` 开头内联命令的 `credential[.<url>].helper`，以及键里任意位置或值开头是带口令网址的条目。
+- 两条通道里都按条目剥离的 git 配置：`http[.<url>].extraHeader`、`sendemail[.<身份>].smtpPass`、`imap.pass`、除了空值和只写助手名字以外的 `credential[.<url>].helper`，以及键里任意位置或值开头是带口令网址的条目。
 
 ### 修复
 
