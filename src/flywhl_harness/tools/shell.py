@@ -10,7 +10,8 @@ bash 是最强也最危险的工具。这里的工程要点：
   排在 PostToolUse hook 之后：hook 拿到的是完整输出，句柄里存的也是 hook 处理过的版本。
 - **密钥不可见**：默认从子进程环境中剥离看起来像凭据的变量——名字含 KEY/TOKEN/SECRET/PASSWORD 等字样，
   或以 ``_PWD``、``_PASS``、``_PAT``、``_DSN`` 结尾（``MYSQL_PWD``、``SMTP_PASS``、``GITHUB_PAT``），
-  或值是带口令的 URL（``postgres://u:p@host/db``）。模型即使执行 ``env`` 也看不到原始凭据。
+  或值是带口令的 URL（``postgres://u:p@host/db``）。经 ``GIT_CONFIG_KEY_<n>``、``GIT_CONFIG_PARAMETERS`` 传进来的 git 配置
+  逐条看：``http.extraHeader`` 和带口令的网址去掉，其余保留。模型即使执行 ``env`` 也看不到原始凭据。
   这只管得了子进程自己的环境：``ps eww -p $PPID`` 读的是 harness 进程的环境，由命令分析按凭证位置拒绝。
 - **动态副作用等级**：由命令分析器决定（``ls`` 是只读，``git push`` 是外部操作）。
 - **系统沙箱**：默认 ``sandbox="auto"``，命令跑在 sandbox-exec / bubblewrap 里，凭证位置不可读、写操作限制在工作区与临时目录，
@@ -82,12 +83,87 @@ def _renumber_git_config(env: dict[str, str], n: int) -> int:
     return len(pairs)
 
 
+_C_SPACE = " \t\n\v\f\r"
+
+
+def _sq_dequote_step(s: str, i: int) -> tuple[str, int] | None:
+    """git 的 ``sq_dequote_step``：从 ``s[i]`` 的单引号开始取一段，返回 (内容, 结束位置)，格式不对返回 None。
+    引号外只认 ``\\'``、``\\!`` 两种转义，而且后面必须紧接着重新进入单引号（``sq_quote`` 写出来就是这样）。"""
+    if i >= len(s) or s[i] != "'":
+        return None
+    out: list[str] = []
+    i += 1
+    while True:
+        if i >= len(s):
+            return None   # 单引号没闭合
+        if s[i] != "'":
+            out.append(s[i])
+            i += 1
+            continue
+        i += 1
+        if s[i:i + 1] == "\\" and i + 2 < len(s) and s[i + 1] in "'!" and s[i + 2] == "'":
+            out.append(s[i + 1])
+            i += 3
+            continue
+        return "".join(out), i
+
+
+def _git_config_parameters(raw: str) -> list[tuple[str, str, str | None]] | None:
+    """按 git 的 ``parse_config_env_list`` 解析 ``GIT_CONFIG_PARAMETERS``，返回 [(原文片段, 键, 值)]；git 认不出的返回 None。
+    新写法 ``'键'='值'``，旧写法 ``'键=值'``，``'键'=`` 和不带等号的旧写法是隐式布尔真（值为 None）。"""
+    entries: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(raw):
+        start = i
+        step = _sq_dequote_step(raw, i)
+        if step is None:
+            return None
+        key, i = step
+        value: str | None = None
+        if i >= len(raw) or raw[i] in _C_SPACE:
+            key, eq, rest = key.partition("=")
+            value = rest if eq else None
+        elif raw[i] == "=":
+            i += 1
+            if raw[i:i + 1] == "'":
+                step = _sq_dequote_step(raw, i)
+                if step is None:
+                    return None
+                value, i = step
+                if i < len(raw) and raw[i] not in _C_SPACE:
+                    return None
+            elif i < len(raw) and raw[i] not in _C_SPACE:
+                return None
+        else:
+            return None
+        entries.append((raw[start:i], key, value))
+        while i < len(raw) and raw[i] in _C_SPACE:
+            i += 1
+    return entries
+
+
+def _strip_git_parameters(raw: str) -> str | None:
+    """``git -c`` 的配置经 ``GIT_CONFIG_PARAMETERS`` 传给子进程，和 ``GIT_CONFIG_KEY_<n>`` 一样要剥：凭证类的键，
+    键或值是带口令的网址，这几条去掉，其余原样保留。git 认不出的格式整个去掉，它本来就会让所有 git 命令报错退出。"""
+    entries = _git_config_parameters(raw)
+    if entries is None:
+        return None
+    kept = [text for text, key, value in entries
+            if not (_credential_git_key(key) or _URL_WITH_PASSWORD.match(key)
+                    or (value is not None and _URL_WITH_PASSWORD.match(value)))]
+    return " ".join(kept) or None
+
+
 def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
     """``keep`` 是剥离之后要留下的变量名，只给人批准过的沙箱外命令用。"""
     env = dict(os.environ)
     if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
                if k in keep or not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+        if "GIT_CONFIG_PARAMETERS" in env:
+            params = _strip_git_parameters(env.pop("GIT_CONFIG_PARAMETERS"))
+            if params is not None:
+                env["GIT_CONFIG_PARAMETERS"] = params
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"

@@ -1038,6 +1038,40 @@ def test_git_extra_headers_from_the_environment_are_stripped_and_the_rest_renumb
     r = subprocess.run(["git", "config", "--get-regexp", "."], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert r.returncode == 0 and "user.name flywhl" in r.stdout and "extraheader" not in r.stdout.lower(), r.stderr
 
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="需要 git")
+def test_git_config_parameters_lose_credential_entries_and_keep_the_rest(monkeypatch, tmp_path):
+    """``git -c`` 的配置经 GIT_CONFIG_PARAMETERS 传给子进程。新旧两种写法都要认：认证头、带口令的网址去掉，
+    其余条目原样留下，值里的单引号转义（``'\\''``）不能弄坏。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", " ".join([
+        "'http.extraHeader'='Authorization: Bearer canary-param-1'",
+        "'user.name'='fly'\\''whl'",
+        "'HTTP.https://git.example.invalid/.EXTRAHEADER=PRIVATE-TOKEN: canary-param-2'",   # 旧写法：整条一个引号
+        "'url.https://u:canary-param-3@git.example.invalid/.insteadOf'='https://mirror.invalid/'",
+        "'core.editor'='true'",
+        "'url.https://mirror.invalid/.insteadOf'='https://u:canary-param-4@git.example.invalid/'",
+        "'core.quotePath'=",   # 隐式布尔
+    ]))
+    env = _clean_env(True)
+
+    assert "canary-param" not in str(env) and "mirror.invalid" not in str(env)
+    r = subprocess.run(["git", "config", "--get-regexp", "."], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "user.name fly'whl" in r.stdout and "core.editor true" in r.stdout and "core.quotepath" in r.stdout
+
+
+@pytest.mark.parametrize("raw", ["garbage canary-param-5", "'user.name'='a' 'x=canary-param-5", "'k'x'canary-param-5'"],
+                         ids=["no-quote", "unterminated", "junk-after-quote"])   # 参数进了用例 id，PYTEST_CURRENT_TEST 里会有它
+def test_git_config_parameters_git_cannot_read_are_dropped_whole(monkeypatch, raw):
+    """git 认不出的格式会让所有 git 命令报错退出，看不清里面有什么，整个去掉。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", raw)
+    env = _clean_env(True)
+    assert "GIT_CONFIG_PARAMETERS" not in env and "canary-param" not in str(env)
+
 async def test_proxy_names_the_error_when_the_exception_has_no_text():
     from flywhl_harness.tools.egress import EgressProxy, parse_rules
 
