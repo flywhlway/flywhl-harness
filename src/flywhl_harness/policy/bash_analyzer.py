@@ -67,7 +67,7 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcs
 _FOREIGN_SHELLS = {"fish", "csh", "tcsh"}   # 语法和 sh 不同：按 sh 切分看不准，判出来的只读不算数
 # 包装命令：真正执行的是后面那条命令。值为“带一个参数值的选项”
 WRAPPERS: dict[str, set[str]] = {
-    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-t"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n"},
     "nohup": set(), "time": set(), "command": set(), "exec": {"-a"}, "stdbuf": {"-i", "-o", "-e"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"}, "xargs": {"-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"},
     "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U"}, "doas": {"-u", "-C"}, "caffeinate": {"-t", "-w"},
@@ -793,9 +793,13 @@ def _prefix(word: str, a: CommandAnalysis) -> None:
     known: str | None = None if "$(" in value or "`" in value or value.endswith("$") else value
     if name.endswith("+"):
         name = name[:-1]
-        old = a.vars.get(name) or []
-        if known is not None and old:   # 旧值不唯一、值未知或不一定赋过：结果不知道，内层按外层的取值分析
-            known = old[0] + known if len(old) == 1 and old[0] is not None and name in a.sure else None
+        if name in a.prefix:   # 同一条命令里前面已经赋过：D=/ D+=* 接在 / 后面
+            prev = a.prefix[name]
+            known = None if prev is None or known is None else prev + known
+        else:
+            old = a.vars.get(name) or []
+            if known is not None and old:   # 旧值不唯一、值未知或不一定赋过：结果不知道，内层按外层的取值分析
+                known = old[0] + known if len(old) == 1 and old[0] is not None and name in a.sure else None
     a.prefix[name] = known
 
 
@@ -1543,22 +1547,32 @@ def _command_index(seg: list[str]) -> int | None:
 
 def _classify(seg: list[str], a: CommandAnalysis, stdin: list[str] | None = None) -> None:
     # 花括号展开发生在命令执行之前、作用于每个词：rm -rf {~,build} 实际执行的是 rm -rf ~ build
-    expanded: list[str] = []
-    programs = _program_words(seg)
-    for k, w in enumerate(seg):
-        words, complete = ([w], True) if k in programs else _expand_braces(w)
-        if not complete:
-            a.bump("external", "花括号展开的结果过多，无法静态分析")
-        expanded.extend(words)
+    def expand(keep: set[int]) -> list[str]:
+        out: list[str] = []
+        for k, w in enumerate(seg):
+            words, complete = ([w], True) if k in keep else _expand_braces(w)
+            if not complete:
+                a.bump("external", "花括号展开的结果过多，无法静态分析")
+            out.extend(words)
+        return out
+
+    variants = [expand(set())]
+    if programs := _program_words(seg):
+        # sed / awk 的程序写在引号里时 shell 不展开里面的花括号，没加引号时照常展开（awk {-f,x.awk} 就是 awk -f x.awk），
+        # shlex 去掉引号后分不出是哪种：两种读法都分析，取更严的。程序词的位置是在展开前的词上找的，照常展开的那份不依赖它
+        kept = expand(programs)
+        if kept != variants[0]:
+            variants.append(kept)
     # 然后是变量展开：命令里赋过值的按每种取值各分析一遍（C=rm; $C -rf ~ 实际执行的是 rm -rf ~）
-    todo: list[tuple[list[str], str | None]] = [(w, None) for w in _substitute(expanded, a)]
+    todo: list[tuple[list[str], str | None]] = [(w, None) for v in variants for w in _substitute(v, a)]
     if _DRIFT in (a.vars.get("IFS") or ()):
         seen = [w for w, _ in todo]
-        for sep in _drift_seps(expanded, a):
-            for w in _substitute(expanded, a, drift=sep):
-                if w not in seen:
-                    seen.append(w)
-                    todo.append((w, sep))
+        for v in variants:
+            for sep in _drift_seps(v, a):
+                for w in _substitute(v, a, drift=sep):
+                    if w not in seen:
+                        seen.append(w)
+                        todo.append((w, sep))
     for words, sep in todo:
         a.budget[0] -= 1
         if a.budget[0] < 0:
@@ -1629,6 +1643,10 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
             break
 
     plain = _no_redirects(args)
+    if cmd in SHELLS:
+        rcfiles: list[str] = []
+        if "i" in _shell_opts(plain, cmd, rcfiles)[0] and rcfiles:   # 交互式 shell 先执行 --rcfile 指定的文件，再执行 -c
+            a.bump("external", f"{cmd} -i 会先执行 {rcfiles[-1]}，内容无法静态分析")
     if cmd in SHELLS and _reads_stdin(plain, cmd):    # sh <<< '...'、sh <<EOF、echo ... | sh：标准输入就是脚本
         for text in stdin or ():
             if text.strip():
@@ -2152,19 +2170,22 @@ def _requote(words: list[str]) -> str:
 
 
 # 带值的长选项。不在表里的一律当作不带值：bash --norc x.sh -c ls 执行的是 x.sh，-c ls 只是它的参数，
-# 把 x.sh 当成 --norc 的值就会只看 ls。sh 在不少系统上就是 bash，按 bash 查
-_SHELL_LONG_VALUED = {"bash": {"--rcfile", "--init-file"}, "sh": {"--rcfile", "--init-file"}, "zsh": {"--emulate"},
+# 把 x.sh 当成 --norc 的值就会只看 ls。sh 不在表里：dash、busybox ash 的长选项都不带值，sh --rcfile x.sh -c ls
+# 执行的是 x.sh；sh 是 bash 时按不带值算只会判严
+_SHELL_LONG_VALUED = {"bash": {"--rcfile", "--init-file"}, "zsh": {"--emulate"},
                       "fish": {"--debug", "--debug-output", "--debug-stack-frames", "--features", "--profile",
                                "--profile-startup"}}
 
 
-def _shell_opts(args: list[str], cmd: str = "") -> tuple[set[str], list[str]]:
+def _shell_opts(args: list[str], cmd: str = "", rcfiles: list[str] | None = None) -> tuple[set[str], list[str]]:
     """拆开 shell 的选项，返回 (短选项字母, 选项之后的参数)。短选项可以合写（``-lc``、``-ec``、``-xc``）；
-    ``-o``/``-O`` 带一个值，长选项是否带值查 _SHELL_LONG_VALUED。fish 的 ``--command``、``--init-command`` 就是 ``-c``，
-    可以缩写，脚本放到返回的参数最前面。单独一个 ``-`` 和 ``--`` 一样结束选项：``sh -`` 从标准输入读脚本。"""
+    ``-o`` 带一个值，``-O`` 只在 bash、sh 里带值（zsh 的 -O 是开关），长选项是否带值查 _SHELL_LONG_VALUED。
+    fish 的 ``--command``、``--init-command`` 就是 ``-c``，可以缩写，脚本放到返回的参数最前面。
+    单独一个 ``-`` 和 ``--`` 一样结束选项：``sh -`` 从标准输入读脚本。传了 rcfiles 时，``--rcfile``、``--init-file`` 的值记进去。"""
     letters: set[str] = set()
     scripts: list[str] = []
     valued = _SHELL_LONG_VALUED.get(cmd, set())
+    big_o = cmd in ("", "bash", "sh")
     i = 0
     while i < len(args):
         x = args[i]
@@ -2180,12 +2201,16 @@ def _shell_opts(args: list[str], cmd: str = "") -> tuple[set[str], list[str]]:
                     val = args[i]
                     i += 1
                 scripts.append(val)
-            elif name in valued and not eq:
-                i += 1
+            elif name in valued:
+                if not eq:
+                    val = args[i] if i < len(args) else ""
+                    i += 1
+                if rcfiles is not None and name in ("--rcfile", "--init-file"):
+                    rcfiles.append(val)
         elif len(x) > 1 and x[0] in "-+":
             if x[0] == "-":
                 letters |= set(x[1:])
-            i += 2 if x[-1] in "oO" else 1
+            i += 2 if x[-1] == "o" or (x[-1] == "O" and big_o) else 1
         else:
             break
     return letters, scripts + args[i:]
@@ -2532,10 +2557,17 @@ def _git_rewrites_remote(sub: str, args: list[str]) -> bool:
 
 
 def _git_clean_deletes(args: list[str]) -> bool:
-    """git clean 真的会删：写了 -f，又不是空跑。-e 带值，``-en``、``-e -n`` 里的 n 是排除模式，不是 ``-n``。"""
-    opts, _ = _getopt(args, "e", "", {"--exclude": "e", "--force": "f", "--dry-run": "n"})
-    letters = {c for c, _, _ in opts}
-    return "f" in letters and "n" not in letters
+    """git clean 真的会删：写了 -f 或 -i（交互模式不用 -f），最后又不是空跑。按顺序看，``--no-dry-run`` 取消前面的 -n。
+    -e 带值，``-en``、``-e -n`` 里的 n 是排除模式，不是 ``-n``。"""
+    opts, _ = _getopt(args, "e", "", {"--exclude": "e", "--force": "f", "--dry-run": "n", "--no-dry-run": "N",
+                                      "--interactive": "i"})
+    force = dry = False
+    for c, _, _ in opts:
+        if c in ("f", "i"):
+            force = True
+        elif c in ("n", "N"):
+            dry = c == "n"
+    return force and not dry
 
 
 def _git_long(flags: set[str], name: str) -> bool:

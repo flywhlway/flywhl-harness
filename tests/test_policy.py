@@ -616,7 +616,7 @@ def test_data_files_of_sed_and_awk_stay_paths(cmd):
     "gawk --re-interval '{print}' f", "gawk --posix '{print}' f", "gawk -F'\\t' '{print $2}' f",
     "ps aux", "ps -ef", "ps --forest", "ps --format etime", "ps --format=etime", "ps --sort etime", "ps --sort=-etime",
     "ps --user ed", "ps --pid 1", "ps -o pid,etime", "ps -eo pid,etime", "ps --ppid 1 --format pid,etime",
-    "sed '1,3{s/a,b/c/}' f", "sed 's/a/b/' < f", "sed 2>/dev/null 's/a/b/' f", "sed <f 's/a/b/'",
+    "sed 's/a/b/' < f", "sed 2>/dev/null 's/a/b/' f", "sed <f 's/a/b/'",
     "awk 'BEGIN{print \"a\", \"b\"}' f", "date +%F", "date -u", "date '+%Y-%m-%d %H:%M'", "date -I", "cut -d/ -f2 f", "sort -t/ -k2 f", "ls -d/",
     "awk -F/ '{print $2}' f", "cut -d~ -f1 f", "grep -c x f", "head -n1 f", "ls -la", "du -sh .", "wc -l f",
 ])
@@ -840,3 +840,77 @@ def test_whole_command_in_one_argument_expands_single_quoted_variables(cmd):
 def test_git_clean_dry_run_is_not_read_out_of_exclude_patterns(cmd, level):
     a = analyze(cmd)
     assert a.level == level, (cmd, a.reasons)
+
+
+# ---------------------------------------------------------------- 第二次复审补的反例：同样只调用 analyze()
+
+@pytest.mark.parametrize("cmd", [
+    "awk {-f,x.awk} f",                   # 程序词没加引号，shell 照样展开：实际是 awk -f x.awk f
+    "awk {-lfoo,} f",
+    "timeout 5 awk {-f,x.awk} f",
+    "nice -n 5 awk {-f,x.awk} f",
+    "env -u X awk {-f,x.awk} f",
+])
+def test_an_unquoted_program_word_is_still_brace_expanded(cmd):
+    a = analyze(cmd)
+    assert a.level == "external", (cmd, a.reasons)
+
+
+@pytest.mark.parametrize("cmd", [
+    "env -u{X,} awk {rm,-rf,~}",          # 展开成 env -uX -u awk rm -rf ~：awk 是 -u 的值
+    "env -u {X,-u} awk {rm,-rf,~}",
+    "ionice -t rm -rf awk {~,x}",         # ionice 的 -t 不带值
+])
+def test_a_wrapper_whose_options_shift_after_expansion_cannot_hide_a_catastrophe(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+def test_awk_behind_a_wrapper_is_located_on_the_whole_program():
+    """只有程序完整才判得出的写法：定位错了程序词就会漏掉 getline。"""
+    a = analyze("timeout 5 awk 'BEGIN{print \"a\", \"b\"; getline x < \"/etc/passwd\"}' f")
+    assert a.level == "external", a.reasons
+
+
+@pytest.mark.parametrize("cmd", [
+    "sh --rcfile x.sh -c ls",             # dash、busybox ash 的长选项都不带值：执行的是 x.sh
+    "sh --init-file x.sh -c ls",
+    "bash --rcfile x.sh -ic ls",          # 交互式 bash 先执行 rcfile
+    "bash --init-file x.sh -i -c ls",
+    "zsh -O x.sh -c ls",                  # zsh 的 -O 是开关，x.sh 是脚本
+    "zsh +O x.sh -c ls",
+    "ionice -t touch cat marker",
+])
+def test_shell_and_wrapper_options_that_take_no_value_do_not_read_as_read(cmd):
+    a = analyze(cmd)
+    assert a.level != "read", (cmd, a.reasons)
+
+
+@pytest.mark.parametrize("cmd, level", [
+    ("bash --rcfile x.sh -c ls", "read"),  # 不是交互式：不读 rcfile
+    ("bash -O extglob -c ls", "read"),
+    ("ionice -c 3 cat f", "read"),
+    ("timeout 5 awk '{print $1, $2}' f", "read"),
+])
+def test_the_same_options_used_normally_still_read(cmd, level):
+    a = analyze(cmd)
+    assert a.level == level, (cmd, a.reasons)
+
+
+def test_prefix_append_after_a_prefix_in_the_same_command():
+    assert analyze("D=/ D+=* sh -c 'rm -rf $D'").catastrophic
+
+
+@pytest.mark.parametrize("cmd, level", [
+    ("git clean -fn --no-dry-run", "dangerous"),   # --no-dry-run 取消前面的 -n
+    ("printf c | git clean -id", "dangerous"),      # 交互模式不用 -f 也会删
+    ("git clean -f --no-dry-run -n", "write"),
+])
+def test_git_clean_no_dry_run_and_interactive_delete(cmd, level):
+    a = analyze(cmd)
+    assert a.level == level, (cmd, a.reasons)
+
+
+def test_a_sed_block_with_a_comma_is_read_both_ways():
+    """花括号里有逗号：写在引号里是一个块；没加引号时 shell 展开成 1,3s/a 和 1,3b/c/，sed 程序认不出。
+    分词之后分不出是哪种，两种读法取更严的，要人确认。"""
+    assert analyze("sed '1,3{s/a,b/c/}' f").level == "external"
