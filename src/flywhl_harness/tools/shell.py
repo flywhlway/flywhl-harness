@@ -51,6 +51,21 @@ _NOT_SECRET_ENV = re.compile(r"GIT_CONFIG_KEY_\d+|GIT_AUTHOR_(NAME|EMAIL|DATE)")
 # 人批准过的沙箱外命令要用 ssh-agent 才 push 得了。它是能力不是秘密：命令能用私钥签名，读不到私钥。
 # GH_TOKEN、*_API_KEY 这类值本身就是凭证，沙箱外照样剥离
 OUTSIDE_KEEP_ENV = ("SSH_AUTH_SOCK",)
+_GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)")
+
+
+def _renumber_git_config(env: dict[str, str], n: int) -> int:
+    """值被当成密钥剥掉之后，键和 GIT_CONFIG_COUNT 还在，git 会报错退出：去掉这一对，其余的重新编号，返回剩下的对数。
+    键被剥掉、值还在的也一并去掉。git 只认不带前导零的编号，``GIT_CONFIG_KEY_01`` 这类写法它不读，这里也不动。"""
+    seen = {int(m[1]) for m in map(_GIT_CONFIG_PAIR.fullmatch, list(env)) if m and int(m[1]) < n}
+    pairs = []
+    for i in sorted(seen):
+        key, value = env.pop(f"GIT_CONFIG_KEY_{i}", None), env.pop(f"GIT_CONFIG_VALUE_{i}", None)
+        if key is not None and value is not None:
+            pairs.append((key, value))
+    for i, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
+    return len(pairs)
 
 
 def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
@@ -67,6 +82,8 @@ def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
         n = max(0, int(env.get("GIT_CONFIG_COUNT", "0")))   # 接在用户已有的 GIT_CONFIG_* 后面
     except ValueError:
         n = 0
+    if strip:
+        n = _renumber_git_config(env, n)
     for i, (key, value) in enumerate(_GIT_HARDENING, start=n):
         env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
     env["GIT_CONFIG_COUNT"] = str(n + len(_GIT_HARDENING))
@@ -98,7 +115,8 @@ async def _reap_group(pgid: int, grace: float = 1.0) -> None:
 
 async def _terminate(proc: asyncio.subprocess.Process, grace: float = 2.0) -> None:
     """先 SIGTERM，宽限期后 SIGKILL；作用于整个进程组。"""
-    if proc.returncode is not None:
+    if proc.returncode is not None:     # shell 已经退出，还占着 stdout 的是它留下的后台进程
+        await _reap_group(proc.pid)
         return
     try:
         pgid = os.getpgid(proc.pid)
@@ -108,10 +126,8 @@ async def _terminate(proc: asyncio.subprocess.Process, grace: float = 2.0) -> No
     try:
         await asyncio.wait_for(proc.wait(), grace)
     except asyncio.TimeoutError:
-        try:
+        with contextlib.suppress(ProcessLookupError, PermissionError):   # 进程组刚好走完：macOS 报 PermissionError
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
         await proc.wait()
 
 

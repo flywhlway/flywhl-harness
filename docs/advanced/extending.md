@@ -197,7 +197,7 @@ async def protect_migrations(inp):
 | `HookOutput.decision` | `pre_tool_use`：allow / ask / deny（**只能收紧**，hook 说 allow 绕不过规则的 ask / deny）；其它事件只有 block 有意义。取值由 `normalize_decision` 统一：`pre_tool_use` 的 `block` 等同 deny、`approve` 等同 allow，其它事件的 `deny` 视同 block；无法识别的取值被忽略并记入 `HookOutput.warnings`，所有事件的警告都会作为 `hook_warning` 通知发出，而不是静默失效 |
 | `updated_input` / `updated_result` | 改写参数（会重新做 schema 校验与权限判定）/ 改写给模型看的结果（如脱敏） |
 | `additional_context` | 以 system-reminder 的形式注入；`stop` hook 不 block 时，这段文字作为提醒落盘，留给本会话的下一次 Run |
-| `stop_run` | 立即终止整个 Run |
+| `stop_run` | 下一回合开始时终止整个 Run，本轮剩余的调用照常执行 |
 
 审批人在批准时改了参数，执行器会用新参数重新做权限判定、**再跑一遍** `pre_tool_use`——守卫类 hook 表达的是不变量，人工批准也绕不过它。
 
