@@ -26,6 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false   # 不把令牌留在 .git/config：没有步骤需要用 git 推送
           fetch-depth: 0          # lastUpdated 需要完整 git 历史
       - uses: actions/setup-node@v4
         with:
