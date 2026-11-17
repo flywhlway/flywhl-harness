@@ -374,6 +374,40 @@ async def test_pages_of_a_seen_url_are_read_in_order_without_asking(ws):
     assert fetches(net) == [NOTICE + "&pageIndex=2", NOTICE + "&pageIndex=3"]
 
 
+def batch(*calls: dict) -> dict:
+    """同一条 assistant 消息里的几个工具调用：只读调用并行执行，预检都跑在任何结果落盘之前。"""
+    return {"tool_calls": [c for x in calls for c in x["tool_calls"]]}
+
+
+async def test_a_parallel_batch_cannot_try_several_page_names(ws):
+    """同一批里先放行的页立即算已读：一批同时试几种参数名，挑哪几个就能带出信息。"""
+    net = web_net([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}])
+    script = [search_call("先普科技 公开转让说明书"),
+              batch(fetch_call(NOTICE + "&pageIndex=2"), fetch_call(NOTICE + "&pn=1"), fetch_call(NOTICE + "&page=2")),
+              batch(fetch_call(NOTICE + "&pageIndex=3"), fetch_call(NOTICE + "&pageIndex=4")), "好"]
+    h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch")
+    first, pn, page, p3, p4 = tool_results((await h.run("调研先普科技")).events, "web_fetch")
+    assert not first["is_error"] and pn["status"] == "rejected" and page["status"] == "rejected"
+    assert not p3["is_error"] and not p4["is_error"]   # 同一批里一页接一页照样免确认
+    assert fetches(net) == [NOTICE + "&pageIndex=2", NOTICE + "&pageIndex=3", NOTICE + "&pageIndex=4"]
+
+
+async def test_failed_pages_count_as_read_and_rejected_ones_do_not(ws):
+    """发出过的读取失败了也算已读：对方的站点可以故意让每一页都失败，不算的话每失败一次就能重新挑一次。
+    被拒绝的跳页没发出，不能算：算了的话它的下一页就免确认了。"""
+    net = (Net().on("POST", DS_SEARCH, ds_search([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}]))
+           .on("POST", DS_FETCH, [httpx.Response(404, json={"error": {"message": "not found"}}),
+                                  httpx.Response(200, json=fixture("deepseek", "fetch"))]))
+    script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=2"), fetch_call(NOTICE + "&pn=1"),
+              fetch_call(NOTICE + "&pageIndex=24"), fetch_call(NOTICE + "&pageIndex=25"), fetch_call(NOTICE + "&pageIndex=3"), "好"]
+    h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch")
+    failed, pn, jump, after_jump, p3 = tool_results((await h.run("调研先普科技")).events, "web_fetch")
+    assert failed["is_error"] and failed["status"] == "error"   # 发出去了，只是读取失败
+    assert pn["status"] == "rejected" and jump["status"] == "rejected" and after_jump["status"] == "rejected"
+    assert not p3["is_error"]
+    assert fetches(net) == [NOTICE + "&pageIndex=2", NOTICE + "&pageIndex=3"]
+
+
 async def test_out_of_order_pages_say_why(ws):
     net = web_net([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}])
     script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=5"), "好"]

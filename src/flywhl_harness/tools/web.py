@@ -113,12 +113,33 @@ def seen_urls(rc: "RunContext") -> set[str]:
     return out
 
 
+# 执行器在发出请求之前就结束的调用：参数不对、被拒绝、没轮到执行。其余状态（成功、失败、超时、取消）都可能已经发出
+_NOT_SENT = frozenset({"invalid", "denied", "rejected", "skipped"})
+
+
+def _page_claims(rc: "RunContext | None") -> dict[str, str]:
+    budget = getattr(rc, "budget", None)
+    return budget.root().web_pages if budget is not None else {}
+
+
 def fetched_urls(rc: "RunContext") -> set[str]:
-    """本会话（及父会话链）读成功过的网址，``url_key`` 形式。顺序翻页靠它知道已经翻到了第几页。"""
+    """本会话（及父会话链）发出过的读取，不论成败，``url_key`` 形式；加上本次运行里已放行、结果还没落盘的翻页。
+    顺序翻页靠它知道已经翻到了第几页。
+
+    失败的也要算：对方的站点可以故意让每一页都失败，只算成功的话，模型每失败一次就能重新选一次参数名和起始页。
+    没发出的不能算，否则被拒绝的跳页（比如第 24 页）也会变成已读，下一页（第 25 页）就免确认了。"""
     from ..net.search import url_key
 
-    return {url_key(u) for _, m in _chain_messages(rc)
-            if m.role == "tool" and m.tool_name == FETCH_TOOL and not m.is_error and (u := (m.details or {}).get("url"))}
+    asked: dict[str, str] = {}
+    out: set[str] = set()
+    for _, m in _chain_messages(rc):
+        if m.role == "assistant":
+            asked.update((c.id, str((c.arguments or {}).get("url") or "")) for c in m.tool_calls if c.name == FETCH_TOOL)
+        elif m.role == "tool" and m.tool_name == FETCH_TOOL and (m.details or {}).get("status") not in _NOT_SENT:
+            # 成功和读取服务报错时结果里有发出的规范网址；超时、取消、重试用尽时没有，就用调用参数里的网址
+            if u := (m.details or {}).get("url") or asked.get(m.tool_call_id or ""):
+                out.add(url_key(str(u)))
+    return out | set(_page_claims(rc))
 
 
 # 表示“第几页 / 从第几条开始”的查询参数（按原文小写比对，不解码：%70age 不算）
@@ -157,7 +178,7 @@ def _paging(url: str, seen: set[str], fetched: Iterable[str] = ()) -> bool | Non
     - 原网址没有页码参数：在末尾加一个。第一次加时参数名只认 ``PAGE_NAMES`` 里的写法，之后只能沿用翻过的那个。
 
     取值是不超过 4 位、没有前导零的数字，而且只能是下一页（``_is_next``）。已知页码是出现过的网址里的页码，
-    加上本会话读成功过的同一网址的其他页（``fetched``）。
+    加上本会话发出过读取的同一网址的其他页（``fetched``，不论成败，见 ``fetched_urls``）。
 
     为什么可以不问人：出现过的网址本来就能读，下一页的页码由读过的页定死，模型没有可选的余地，借它带不出信息。
     只有第一次给某个网址加页码时能选参数名和 1 还是 2，约 6 比特，之后每一页都没得选。跳页、往回翻、再读一遍照旧要确认。
@@ -442,9 +463,14 @@ class WebFetchTool(_WebTool):
         if denied_host(host, self.cfg.deny_domains):
             return "deny", f"{host} 在 [web] deny_domains 里", None
         known = seen_urls(rc)
-        seen = url_key(url) in known
-        # 按顺序翻到下一页按出现过处理：页码是定死的，长随机串也是原网址里本来就有的
-        page = None if seen else _paging(url, known, fetched_urls(rc))
+        key = url_key(url)
+        seen = key in known
+        # 按顺序翻到下一页按出现过处理：页码是定死的，长随机串也是原网址里本来就有的。
+        # 放行就登记，同一批里后面的调用把它当已读；hook 改写参数后重新判定时，已登记、还没发出的照旧放行
+        claims = _page_claims(rc)
+        page = None if seen else (True if claims.get(key) == "pending" else _paging(url, known, fetched_urls(rc)))
+        if page:
+            claims.setdefault(key, "pending")
         if why := leaked(url, heuristics=not (seen or page)):
             return "deny", f"网址{why}，可能是在把数据带出去，已拦截", "web_exfil"
         if seen:
@@ -460,7 +486,7 @@ class WebFetchTool(_WebTool):
             return "allow", "fetch_scope = public", None
         unseen = ("这个网址没在本会话里出现过（不是用户给的，也不在搜索结果里）" if page is None else
                   "这是本会话出现过的网址的另一页，但不是已读页之后的下一页：免确认的翻页只能一页接一页地读，"
-                  "跳页、往回翻、重读、换页码参数名，或同一批并行调用里的后几页，都按没出现过处理")
+                  "跳页、往回翻、重读、换页码参数名都按没出现过处理")
         if scope == "cited":
             return "deny", f"{unseen}，fetch_scope = cited 只读出现过的网址。请先 web_search 找到它，或请用户把网址发过来", None
         return "ask", f"{unseen}，读取前要用户确认", None
@@ -483,6 +509,7 @@ class WebFetchTool(_WebTool):
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         from ..net.client import WebError, canonical_url
         from ..net.exfil import leaked
+        from ..net.search import url_key
 
         try:   # 发给读取服务的是规范网址：与 precheck 判定的是同一个主机
             url, scheme, _host, _port = canonical_url(str(args["url"]).strip())
@@ -494,6 +521,9 @@ class WebFetchTool(_WebTool):
             return ToolResult.error(f"网址{why}，已拦截")
         if (limit := self._reserve(ctx)) is not None:
             return ToolResult.error(limit, web={"op": "fetch", "counted": False, "cost_usd": 0.0}, limit=True)
+        claims = _page_claims(ctx.run)
+        if claims.get(key := url_key(str(args["url"]))) == "pending":
+            claims[key] = "sent"   # 发出之后再读一遍就是重读，要确认
         try:
             out = await self.service.fetch(url, in_scope=self._scope(url, ctx.run))
         except TransientToolError:
