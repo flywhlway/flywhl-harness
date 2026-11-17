@@ -17,6 +17,8 @@
 7. **模型侧联网**：请求带了 ``native_search`` 且声明与本端点对得上时，追加 ``web_search`` server tool。
    响应里的 ``server_tool_use`` / ``web_search_tool_result`` 存为 ``ServerBlock`` 原样回传（只回同一端点、
    且调用与结果成对时才回传），搜索次数、来源与被引用的网址整理进 ``meta["native_web"]``。
+8. **不发采样参数**：API 版本 ``2026-10-21`` 拒绝 ``temperature`` / ``top_p`` / ``top_k``。配置了 ``temperature``
+   时请求照常发出、不带它，每个 Run 提示一次（warn 级 notice）。
 """
 
 from __future__ import annotations
@@ -175,8 +177,8 @@ class AnthropicProvider(Provider):
             kw["tools"] = [*kw.get("tools", []), *server_tools(spec, req.native_opts)]
         if info.supports_thinking and self.thinking:
             kw["thinking"] = {"type": "adaptive", "display": self.thinking_display}
-        elif req.temperature is not None:
-            kw["temperature"] = req.temperature  # 新一代模型不接受采样参数，只在非 thinking 模型上传
+        # temperature / top_p / top_k 一律不发：API 版本 2026-10-21 对所有模型都用 400 拒绝采样参数，
+        # SDK 2.x 的 messages.create() 也删掉了这几个参数，传了直接 TypeError。配置了 temperature 时 stream() 给提示
         if self.effort:
             kw["output_config"] = {"effort": self.effort}
         betas: list[str] = []
@@ -222,6 +224,13 @@ class AnthropicProvider(Provider):
         cited: list[str] = []
         try:
             yield StreamEvent("start")
+            if req.temperature is not None:
+                # 每次请求都会带上；once 让 Loop 在一个 Run 里只转发第一条
+                yield StreamEvent("notice", info={
+                    "code": "temperature_ignored", "level": "warn", "once": True,
+                    "text": f"配置的 temperature={req.temperature} 对 Anthropic 不生效：API 版本 2026-10-21 不接受采样参数，"
+                            "请求里已不带它",
+                })
             async for ev in cancel.iterate(raw.__aiter__()):
                 t = ev.type
                 if t == "message_start":

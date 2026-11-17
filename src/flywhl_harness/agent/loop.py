@@ -80,6 +80,7 @@ class AgentLoop:
         self._overflow_retries = 0
         self._stop_note: str | None = None   # Stop hook 不阻止结束时给出的补充信息
         self._hook_warnings: list[str] = []
+        self._once_notices: set[str] = set()   # provider 标了 once 的提示：一个 Run 只转发一次
 
     # ================================================================== 外层：保证一定以明确状态结束
     async def run(self, prompt: str | None = None) -> AsyncIterator[Event]:
@@ -394,7 +395,12 @@ class AgentLoop:
                         text_acc.clear()
                     yield self._ev(E.MODEL_RETRY, message_id=mid, **sev.info)
                 elif t == "notice":
-                    yield self._ev(E.NOTICE, level="info", **sev.info)
+                    info = dict(sev.info)
+                    if info.pop("once", False):
+                        if info.get("code") in self._once_notices:
+                            continue
+                        self._once_notices.add(info.get("code"))
+                    yield self._ev(E.NOTICE, **{"level": "info", **info})
                     if native and sev.info.get("code") == "fallback" and not sev.info.get("native_kept"):
                         yield self._ev(E.NOTICE, level="warn", code="native_web_lost",
                                        text="已降级到备用模型：模型侧联网只对声明过的模型生效，这次回答没有联网")

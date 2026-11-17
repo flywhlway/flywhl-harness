@@ -75,6 +75,17 @@
 
 **English summary.** When one argument of a writing or unknown command is itself a whole catastrophic command (`python3 tool.py 'rm -rf ~'`), the call is refused in every mode, bypass included, because such commands may hand the argument to a shell (`script -c`, `flock f -c`). Known commands such as `echo`, `git commit -m` and `gh … --body` are not affected.
 
+**Anthropic provider 不再发送 `temperature`。** 以前只在开着 thinking 时不发。用非思考模型或关掉 `thinking` 时，它会传给 SDK，anthropic 2.x 直接抛 `TypeError`，Run 以失败结束。升级 SDK 之前就有这个问题。
+现在一律不发。DeepSeek、OpenAI 兼容等其他供应商照常发送。
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| 配了 `temperature` 的 Run，第一次调用 Anthropic 时多一条 warn 级 `notice`（`code=temperature_ignored`），一个 Run 只有一条 | Anthropic API 版本 `2026-10-21` 对所有模型都用 400 拒绝 `temperature`、`top_p`、`top_k`，SDK 2.x 的 `messages.create()` 也删掉了这几个参数 | 只用 Anthropic 时删掉 `temperature`，提示随之消失。降级链里还有别家时可以留着，对别家照常生效 |
+
+项目登记的 Claude 模型本来就不接受非默认的采样值，输出不受影响。自己配置的旧模型（如 Claude Sonnet 4.6）调低 `temperature` 的效果没有了，也没有替代参数。
+
+**English summary.** The Anthropic provider no longer sends `temperature`. API version `2026-10-21` rejects `temperature`, `top_p` and `top_k` on every model with a 400, and anthropic SDK 2.x removed them from `messages.create()`, so a configured `temperature` with a non-thinking model (or with `thinking` off) used to fail the run with a `TypeError`. The request now goes out without it, and each run emits one warn-level `notice` with `code=temperature_ignored`. DeepSeek and other OpenAI-compatible providers still send it. Remove `temperature` if Anthropic is your only provider; keep it if a fallback provider uses it.
+
 ### 新增
 
 **联网工具 `web_search` 与 `web_fetch`，默认关闭。** 在用户配置里写 `[web] enabled = true` 后，每个会话在开工前选“关闭 / 仅搜索 / 搜索并读取”，

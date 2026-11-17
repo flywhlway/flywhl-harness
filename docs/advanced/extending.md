@@ -408,7 +408,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `provider` / `model` / `base_url` | `"auto"` / `None` / `None` | `model` 写成 `<供应商>:<模型>`；auto 按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter 选第一个有密钥的，都没有时用 mock |
 | `api_key` / `api_key_env` | `None` / `None` | 密钥（不建议写进文件）/ 从指定环境变量读密钥 |
 | `fallback_models` | `[]` | 降级链，每项可写 `<供应商>:<模型>`（跨供应商） |
-| `max_tokens` / `temperature` | `8192` / `None` | 单次输出上限 |
+| `max_tokens` / `temperature` | `8192` / `None` | 单次输出上限 / 采样温度。`temperature` 只发给 OpenAI 兼容的供应商，Anthropic 不接受，配置了每个 Run 提示一次 |
 | `thinking` / `reasoning_effort` | `None` / `None` | 思考开关（`enabled` / `disabled`）与强度，按供应商翻译成各自的字段 |
 | `extra_body` | `{}` | 原样并入 OpenAI 兼容请求体的厂商私有参数 |
 | `request_timeout` / `max_retries` | `300.0` / `4` | 模型请求超时；`RetryPolicy.max_attempts`（含首次） |
