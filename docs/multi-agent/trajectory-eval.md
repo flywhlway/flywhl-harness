@@ -24,11 +24,14 @@ def context_fingerprint(req: ModelRequest) -> str:
 
     工具取名字 + 描述 + 参数 schema 的哈希：只改了一句工具描述，模型的行为也可能改变，回放必须能指出来。
     """
-    return short_hash({
+    fp: dict = {
         "system": req.system,
         "tools": [[t["name"], short_hash(t.get("description", "")), short_hash(t.get("parameters", {}))] for t in req.tools],
         "messages": [[m.role, m.text, [c.name for c in m.tool_calls], m.tool_call_id] for m in req.messages],
-    })
+    }
+    if req.native_search:   # 只在开了模型侧联网时出现：没开的请求指纹与以前相同
+        fp["native_search"] = req.native_search
+    return short_hash(fp)
 ```
 
 指纹在 `AgentLoop._call_model()` 里计算，计算对象是**即将发给模型的那个 `ModelRequest`**——已经过工具结果清理（`apply_clearing`）之后的消息列表：
@@ -52,6 +55,7 @@ yield self._ev(E.MESSAGE_START, message_id=mid, role="assistant", context=stats.
 | 只改工具的 description 或参数 schema | 是 | 每个工具贡献 `[名字, 描述哈希, 参数 schema 哈希]` |
 | 改工具结果的截断 / 外置规则 | 是 | tool 消息的 `m.text` 变了 |
 | 改压缩策略、清理阈值、reminder 注入 | 是 | 消息列表变了 |
+| 开关模型侧联网 | 是 | 开启时请求的 `native_search` 进哈希 |
 | 改 temperature、max_tokens、模型名 | 否 | 请求参数不在哈希内 |
 | thinking 块内容、图片 | 否 | 只取 `m.text` 与工具调用名 |
 
@@ -67,11 +71,15 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
     # ...
     session = store.get_session(run.session_id)
     events = store.list_events(run_id)
-    entries = [e for e in store.path(run.session_id) if e.run_id == run_id] or \
+    path = store.path(run.session_id)
+    entries = [e for e in path if e.run_id == run_id] or \
               [e for e in store.list_entries(run.session_id) if e.run_id == run_id]
+    # 同一会话里前几次 Run 留下的条目：它们是这次 Run 的上下文，回放时要先铺好
+    first = next((i for i, e in enumerate(path) if e.run_id == run_id), 0)
+    history = [{"id": e.id, "kind": e.kind, "payload": e.payload} for e in path[:first] if e.kind in ("message", "compaction")]
     messages = [e.payload for e in entries if e.kind == "message"]
     # 指纹与回放时的模型调用一一对齐：只保留最终落盘为有效 assistant 消息的那些调用
-    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的确定性摘要）
+    # （出错 / 被中止的调用在回放时不会重演；压缩调用走单独的摘要序列）
     replayable = {m.get("id") for m in messages if m.get("role") == "assistant"
                   and m.get("stop_reason") not in ("error", "aborted")}
     fingerprints = [ev.data["fingerprint"] for ev in events
@@ -82,8 +90,10 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
         "format": "flywhl-trajectory/1",
         "run": run.to_dict(),
         "session": {"id": session.id, "title": session.title, "workspace": session.workspace,
-                    "system_prompt": session.meta.get("system_prompt"), "model": session.meta.get("model"),
+                    "system_prompt": session.meta.get("system_prompt"), "project_context": session.meta.get("project_context"),
+                    "model": session.meta.get("model"),
                     "tools": session.meta.get("tools")} if session else None,
+        "history": history,
         "messages": messages,
         "compactions": [e.payload for e in entries if e.kind == "compaction"],
         "steps": [s.__dict__ for s in store.list_steps(run_id)],
@@ -98,7 +108,7 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
 |---|---|---|
 | `format` | `flywhl-trajectory/1` | 版本号：轨迹会被长期保存、被不同版本的工具读取 |
 | `run` | 状态、版本、尝试次数、usage、结果，`config.replay` 里是当时的水位、预算等设置 | 结局与成本；回放时重建设置 |
-| `session` | 冻结的系统提示、模型、工具名列表 | 回放时用它重建同样的设定 |
+| `session` | 冻结的系统提示、项目上下文、模型、工具名列表 | 回放时用它重建同样的设定 |
 | `history` | 同一会话里前几次 Run 留下的条目 | 这次 Run 的上下文，回放时先铺好 |
 | `messages` | 本 Run 写入的消息 | 回放的数据源：assistant 消息 = 模型输出，tool 消息 = 工具结果 |
 | `compactions` | 本 Run 中的压缩条目 | 解释上下文为什么突然变短；模型写的摘要回放时要用 |
@@ -122,7 +132,7 @@ def export_trajectory(store: Store, run_id: str, *, include_children: bool = Tru
 |---|---|---|
 | 目的 | 调试、回归：harness 改了之后行为变没变 | 评测：同样的前缀，换新模型 / 新提示词会怎么走 |
 | 模型输出 | 全部来自录制（`ReplayProvider`） | 前 k 次来自录制，之后切到 live provider（`HybridProvider`） |
-| 工具结果 | 全部来自录制（`RecordedTool`） | 前 k 次调用产生的工具结果来自录制；之后执行真实工具 |
+| 工具结果 | 全部来自录制（`RecordedTool`），联网结果也是 | 前 k 次调用产生的工具结果来自录制；之后执行真实工具。联网工具先复用录制里同参数的结果，没有就默认不联网（CLI `--allow-web`、库 `allow_web=True` 才真的联网） |
 | 外部副作用 | 不执行 | EXTERNAL 级工具一律 dry-run |
 | 工作区 | 复制到临时目录 | 复制到临时目录，分叉后的写操作落在副本上 |
 | 判定 | 指纹全部一致 + 工具序列一致 + 最终答案一致 | 看新路径的产物与评测结果 |
@@ -148,7 +158,9 @@ rp = ReplayProvider(assistant, fps, summaries=[c["summary"] for c in traj.get("c
 provider = HybridProvider(rp, live, fork_at)
 model = live_model or traj["session"]["model"] or "replay"
 h = Harness(cfg, provider=provider, model=model, tools=registry, store=Store(":memory:"))
-s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass")
+s = h.create_session("回放", workspace=ws, system_prompt=traj["session"]["system_prompt"], mode="bypass",
+                     project_context=traj["session"].get("project_context"),   # 模型当时看到的，从轨迹里取
+                     capabilities=_recorded_web(settings, session_tools))      # 联网能力取录制时的
 # ... 把 history 铺进新会话
 run = await h.start_run(s.id, prompt)
 rp.on_turn = feed                          # 第 i 条录制回复结束时，把这之后进来的外部输入交给 steer
@@ -191,7 +203,7 @@ async def stream(self, req: ModelRequest, cancel: CancelToken) -> AsyncIterator[
 - **只记第一次分叉**：第一处不一致之后，后面的指纹几乎必然都不一致，记录它们没有信息量；
 - **分叉后继续吐录制**：即使上下文变了，返回的仍是录制的输出。这意味着工具序列与最终答案往往**仍然一致**——下文的实验会证明这一点，指纹是确定性回放里唯一可靠的“行为变了”的信号；
 - **录制耗尽就抛异常**：新的 harness 逻辑让 Loop 多调用了一次模型（例如新增的 Stop 验收注入了缺口），回放会以失败结束，这本身就是一个明确的回归信号；
-- **压缩请求不消耗录制**：压缩调用不在录制的 assistant 序列里，用确定性摘要代替，保证同一份轨迹每次回放的压缩结果相同。
+- **压缩请求不消耗 assistant 录制**：压缩调用按发生顺序取录制的压缩摘要；录制里没有（比如改了压缩阈值、回放时多压缩了一次）才用确定性摘要，保证同一份轨迹每次回放的压缩结果相同。
 
 ### RecordedTool 与 HybridProvider
 
@@ -200,6 +212,14 @@ async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     rec = self.recorded.get(ctx.call_id)
     if rec is not None:
         return ToolResult(rec.text, rec.is_error, {**(rec.details or {}), "replayed": True})
+    if self.egress:
+        # 分叉之后：录制里有同参数的结果就复用；否则默认不联网，--allow-web 才真的去搜
+        same = self.by_args.get(_args_key(self.name, args))
+        if same is not None:
+            return ToolResult(same.text, same.is_error, {**(same.details or {}), "replayed": True, "reused": True})
+        if not self.allow_web or self.fallback is None:
+            return ToolResult(f"[dry-run] {self.name} —— 分叉回放默认不联网（加 --allow-web 才真的联网）",
+                              details={"dry_run": True})
     if self.fallback is None:
         return ToolResult.error(f"[回放] 没有 {self.name} 的录制结果，且无可用的真实工具")
     if self.dry_run_external and self.fallback.effect_in(args, str(ctx.workspace.root)) == Effect.EXTERNAL:
@@ -208,7 +228,7 @@ async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return await self.fallback.execute(args, ctx)
 ```
 
-按 `call_id` 匹配录制结果之所以可行，是因为回放的 assistant 消息是录制消息的原样拷贝，工具调用 ID 与录制时相同。分叉之后模型产生新的调用 ID，查不到录制，就走真实工具；若真实工具是 EXTERNAL 级（发通知、调外部 API），返回 dry-run 说明而不执行。
+按 `call_id` 匹配录制结果之所以可行，是因为回放的 assistant 消息是录制消息的原样拷贝，工具调用 ID 与录制时相同。分叉之后模型产生新的调用 ID，查不到录制，就走真实工具；若真实工具是 EXTERNAL 级（发通知、调外部 API），返回 dry-run 说明而不执行。联网工具（`web_search` / `web_fetch`）另有一层：先按“工具名 + 参数”找录制里的同款结果，找不到且没开 `allow_web` 就返回 dry-run。
 
 `HybridProvider` 只做一件事：数调用次数（压缩调用不计），前 `switch_at` 次走录制，之后走 live。`fork_at=N` 的含义是“**前 N 次模型调用使用录制，第 N+1 次起换成 live**”；同时只保留前 N 个指纹和前 N 次调用对应的工具结果。
 
@@ -233,7 +253,7 @@ async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 ```text
 » 工具序列一致=True，最终答案一致=True，分叉=None，外部通知数 1 → 1（没有重放副作用）
-» 分叉：{'step': 0, 'expected': '…', 'actual': '…'}；['第 0 次模型调用的上下文与录制时不一致：harness 行为发生了变化']
+» 分叉：{'step': 0, 'expected': '…', 'actual': '…'}；['第 1 次模型调用的上下文与录制时不一致：harness 行为发生了变化']
 ```
 
 第一次回放什么都没改：三个指纹全部一致，外部通知服务的计数保持 1 不变——`send_notification` 的结果来自录制，没有真的再发一次。`test_deterministic_replay` 断言的就是这三点。
@@ -262,6 +282,7 @@ CLI 与 Web UI 的对应入口：
 flywhl trace <run_id> -o traj.json        # 导出轨迹（含 span）
 flywhl replay <run_id>                    # 确定性回放，输出 ReplayReport JSON
 flywhl replay <run_id> --fork-at 1        # 前 1 次模型调用用录制，之后改用当前配置的模型
+flywhl replay <run_id> --fork-at 1 --allow-web   # 分叉后录制里没有同参数结果的联网调用真的去联网
 ```
 
 Web UI 检查器的“概览”页签（“本会话的运行”一节）提供轨迹下载（`GET /api/runs/{rid}/trajectory`）与确定性回放按钮（`POST /api/runs/{rid}/replay`）。

@@ -240,7 +240,7 @@ if task in done:
     r = task.result()
     return r, ("error" if r.is_error else "ok")
 if rc.cancel.cancelled:
-    if tool.interruptible_for(args):
+    if tool.interruptible_in(args, self._root):   # 转调工具覆盖的 interruptible_for
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
@@ -310,7 +310,7 @@ bash 的副作用等级是动态的：`ls` 是只读，`git push` 是外部写�
 
 ```python
 # src/flywhl_harness/tools/shell.py · BashTool.interruptible_for
-def interruptible_for(self, args: dict[str, Any]) -> bool:
+def interruptible_for(self, args: dict[str, Any], workspace: str | None = None) -> bool:
     # 已经发出的外部操作（git push、curl POST、部署……）半途打断会留下“不知道成没成功”的状态：
     # 给它宽限期跑完，超时才标记为结果未知；本地命令可以直接杀进程组
     return self.effect_for(args, workspace) != Effect.EXTERNAL

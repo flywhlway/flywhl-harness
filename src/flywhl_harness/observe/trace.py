@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..events import E, Event
 from ..runtime.store import Store
@@ -104,6 +105,7 @@ def to_otel_spans(run: dict[str, Any], events: list[Event], session_meta: dict[s
                     "gen_ai.response.finish_reasons": [m.get("stop_reason")],
                     "gen_ai.usage.input_tokens": u.get("input_tokens", 0), "gen_ai.usage.output_tokens": u.get("output_tokens", 0),
                     "gen_ai.usage.cache_read.input_tokens": u.get("cache_read_tokens", 0),
+                    **_native_attrs((m.get("meta") or {}).get("native_web")),
                 },
             })
         elif ev.type == E.TOOL_START:
@@ -117,12 +119,39 @@ def to_otel_spans(run: dict[str, Any], events: list[Event], session_meta: dict[s
             }
             if ev.data.get("is_error"):
                 attrs["error.type"] = ev.data.get("status") or "tool_error"
+            attrs.update(_web_attrs(ev.data.get("details")))
             spans.append({
                 "trace_id": trace_id, "span_id": _sid(run["id"], ev.data["call_id"]), "parent_span_id": root_id,
                 "name": f"execute_tool {ev.data.get('name')}", "start_ns": int((st.ts if st else ev.ts) * 1e9),
                 "end_ns": int(ev.ts * 1e9), "attributes": attrs,
             })
     return spans
+
+
+def _web_attrs(d: Any) -> dict[str, Any]:
+    """联网工具 span 的属性：后端、条数、是否命中缓存、读取的主机与状态码。不放查询词和正文：它们可能带用户数据。"""
+    if not isinstance(d, dict) or not isinstance(d.get("web"), dict):
+        return {}
+    out: dict[str, Any] = {}
+    if d.get("backend"):
+        out["flywhl.web.backend"] = str(d["backend"])
+    if isinstance(d.get("hits"), list):
+        out["flywhl.web.hits"] = len(d["hits"])
+    if "cached" in d:
+        out["flywhl.web.cached"] = bool(d["cached"])
+    if host := urlsplit(str(d.get("final_url") or "")).hostname:
+        out["server.address"] = host
+    if isinstance(d.get("status"), int):
+        out["http.response.status_code"] = d["status"]
+    return out
+
+
+def _native_attrs(nw: Any) -> dict[str, Any]:
+    """模型侧联网发生在模型调用里：记在 chat span 上（声明名、搜索次数、来源条数）。"""
+    if not isinstance(nw, dict):
+        return {}
+    return {"flywhl.web.backend": f"native:{nw.get('spec')}", "flywhl.web.searches": int(nw.get("searches") or 0),
+            "flywhl.web.hits": len(nw.get("sources") or [])}
 
 
 def trajectory_messages(traj: dict[str, Any]) -> list[Message]:

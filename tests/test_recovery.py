@@ -239,8 +239,12 @@ def _holding_tool():
     return hold, gate, entered
 
 
-@pytest.mark.parametrize(("path", "final"), [(["interrupted"], "interrupted"),
-                                             (["interrupted", "queued", "running"], "running")])
+@pytest.mark.parametrize(("path", "final"), [
+    ([("interrupted", "w-new")], "interrupted"),
+    ([("interrupted", "w-new"), ("queued", "w-new"), ("running", "w-new")], "running"),
+    # resume() 迁到 queued 时不换 worker_id，要等新 Worker 认领：这之前旧 Worker 跑完了，也不能写结果
+    ([("interrupted", None), ("queued", None)], "queued"),
+])
 async def test_a_worker_that_lost_the_run_does_not_finish_it(ws, path, final):
     hold, gate, entered = _holding_tool()
     h = make_harness(ws, [{"tool_calls": [{"name": "hold", "args": {}}]}, "旧 Worker 的结论"], heartbeat_seconds=60)
@@ -249,13 +253,14 @@ async def test_a_worker_that_lost_the_run_does_not_finish_it(ws, path, final):
     run = await h.start_run(s.id, "x")
     await _until(lambda: entered)
 
-    for to in path:     # 别的 Worker 接管：心跳下一次醒来才会发现
-        h.state.transition(run.id, to, worker_id="w-new")
+    for to, worker in path:     # 别的 Worker 接管：心跳下一次醒来才会发现
+        h.state.transition(run.id, to, **({"worker_id": worker} if worker else {}))
     gate.set()
     await _until(lambda: run.id not in h._active)
 
     rec = h.store.get_run(run.id)
-    assert (rec.status, rec.worker_id, rec.result) == (final, "w-new", None)
+    assert (rec.status, rec.result) == (final, None)
+    assert rec.worker_id == (path[-1][1] or h.worker_id)
 
 
 async def test_cancel_beating_completion_is_recorded_as_cancel(ws):

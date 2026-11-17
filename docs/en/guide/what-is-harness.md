@@ -31,7 +31,7 @@ The chapter splits a harness into eight dimensions, each mapped to a group of mo
 | State | What is the source of truth? | `runtime/store.py`, `runtime/session.py` |
 | Lifecycle | Pause, resume, cancel, retry, crash | `runtime/state.py`, `cancel.py`, `runtime/manager.py` |
 | Policy | What may run, what needs a person, what never runs? | `policy/`, `agent/budget.py` |
-| Execution environment | Where do tools run? | `runtime/workspace.py`, `runtime/dispatch.py` |
+| Execution environment | Where do tools run? | `runtime/workspace.py`, `tools/sandbox.py`, `runtime/dispatch.py` |
 | Measurement | Did it work, and why? | `observe/` |
 
 Two layers cut across these. The capability-compensation layer covers what current models do badly (forced planning, format-repair retries, aggressive summaries) and should shrink as models improve. The governance layer (permissions, audit, idempotency, persistence, quotas) does not depend on how smart the model is. The chapter's argument is that the first layer should be switchable and removable, which [28 Evolving harness](/en/advanced/evolving-harness) takes up.

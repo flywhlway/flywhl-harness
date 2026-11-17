@@ -181,6 +181,18 @@ export function mountApprovals(root, app) {
 }
 
 // ====================================================================== 工具目录
+const WEB_TOOLS = new Set(["web_search", "web_fetch"]);
+
+/** 联网工具的可用性：没注册的工具不在表里，这里说明原因 */
+function webNote(w) {
+  if (!w) return "";
+  const row = (name, ok, why) => `<li>${icon(ok ? "checkCircle" : "ban", "sm")}<span class="mono">${name}</span><span>${ok ? "可用" : `不可用：${esc(why || "未启用")}`}</span></li>`;
+  const backends = w.backends.length ? `后端 ${esc(w.backends.join("、"))}；` : "";
+  return `<div class="callout info web-note"><span class="ic">${icon("globe")}</span><div class="callout-text">
+    <p>联网工具由会话的「联网」开关控制：开工前选择，开工后只能收紧。${backends}结果按不可信内容处理。</p>
+    <ul class="plain-list">${row("web_search", w.available, w.reason)}${row("web_fetch", w.fetch_available, w.reason)}</ul></div></div>`;
+}
+
 export function mountTools(root, app) {
   const { inner } = pageShell(root, { title: "工具", iconName: "wrench" });
   const tools = app.info.tools;
@@ -191,6 +203,7 @@ export function mountTools(root, app) {
     <div class="stat-cards">
       ${Object.entries(EFFECT).map(([k, v]) => `<div class="stat"><span class="k">${effectBadge(k)}</span><span class="v">${count(k)}</span><span class="muted" style="font-size:var(--fs-xs)">${esc(v.hint)}</span></div>`).join("")}
     </div>
+    ${webNote(app.info.capabilities?.web)}
     <div class="filters">
       <div class="segmented" role="radiogroup" aria-label="按副作用筛选" id="tl-fx"></div><span class="grow"></span>
       <div class="search-input">${icon("search")}<label class="sr-only" for="tl-q">搜索工具</label><input class="input" id="tl-q" type="search" placeholder="搜索名称或说明"></div>
@@ -206,7 +219,7 @@ export function mountTools(root, app) {
   function render() {
     const rows = tools.filter((t) => (S.fx === "all" || t.effect === S.fx) && (!S.q || (t.name + " " + t.description).toLowerCase().includes(S.q)));
     $("#tl-table", inner).innerHTML = rows.length ? `<table class="table responsive"><thead><tr><th>工具</th><th>副作用</th><th>说明</th></tr></thead><tbody>${rows.map((t) => `<tr>
-      <td style="white-space:nowrap"><span style="display:inline-flex;gap:8px;align-items:center">${icon(toolIcon(t.name))}<span class="mono" style="font-weight:600">${esc(t.name)}</span>${t.name.startsWith("mcp__") ? '<span class="badge square info">MCP</span>' : ""}</span></td>
+      <td style="white-space:nowrap"><span style="display:inline-flex;gap:8px;align-items:center">${icon(toolIcon(t.name))}<span class="mono" style="font-weight:600">${esc(t.name)}</span>${t.name.startsWith("mcp__") ? '<span class="badge square info">MCP</span>' : ""}${WEB_TOOLS.has(t.name) ? '<span class="badge square info" title="会出网：要会话开了联网才能用">联网</span>' : ""}</span></td>
       <td>${effectBadge(t.effect)}</td><td style="color:var(--text-2);line-height:1.6;min-width:280px">${esc(t.description)}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty-state"><span class="ic">${icon("search", "lg")}</span><h3>没有匹配的工具</h3></div>`;
   }

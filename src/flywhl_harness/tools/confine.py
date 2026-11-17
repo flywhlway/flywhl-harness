@@ -119,7 +119,7 @@ class Confinement:
             level, problem = found.level or "off", "" if found.level else found.reason
         if network == "auto":
             network = "allow" if level == "off" and not problem else "allowlist"
-        return cls(level, network, parse_rules(allow or []), pin_sockets(sockets),   # 套接字启动时定下真实位置，之后不再解析
+        return cls(level, network, parse_rules(allow or [], key="permissions.network_allow"), pin_sockets(sockets),   # 套接字启动时定下真实位置，之后不再解析
                    requested=sandbox, problem=problem, protected=protected)
 
     @classmethod

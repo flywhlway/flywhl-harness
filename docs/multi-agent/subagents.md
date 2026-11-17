@@ -207,8 +207,13 @@ async def run_subagent(self, parent: RunContext, *, description: str, prompt: st
                        max_turns: int, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
     ps = self._session(parent.session_id)
     sp = SUBAGENT_PROMPT.replace("{workspace}", str(parent.workspace.root))
+    # ……（略）cap：子代理继承父会话当前的联网能力；派生时用 tools 去掉 web_* 就是再收紧一级
     child_s = self.create_session(f"子代理：{description}", workspace=str(parent.workspace.root),
-                                  mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp)
+                                  mode=ps.meta.get("mode"), parent_session_id=parent.session_id, system_prompt=sp,
+                                  capabilities=cap)
+    if parent.tainted:   # 任务简报是父代理写的：污点不往下传，提示注入就能靠 task 绕开升级
+        self.store.update_session(child_s.id, meta={**child_s.meta, "tainted": True})
+        child_s = self._session(child_s.id)
     child_tools = parent.tools.subset(tools, exclude=["task"] if parent.depth + 1 >= self.config.subagent_max_depth else [])
     budget = parent.budget.child(BudgetConfig(max_turns=max_turns, max_tool_calls=max_turns * 4))
     cancel = parent.cancel.child()  # 父取消 → 子取消
@@ -304,6 +309,7 @@ def run_usage(self) -> Usage:
 ```
 
 父 Run 被标记污点，并写进父会话的元数据（之后在这个会话里新建的 Run 也会继承 `tainted`），后续的副作用操作按污点规则升级审批。只把子 Run 标成污点是不够的：隔离挡住了原文，挡不住经过转述的指令。
+反方向同样成立：派生时父 Run 已带污点，子会话一开局就标记 `tainted`（见上面 `run_subagent()` 开头）；简报里的网址也不算用户给出的网址：`web_fetch` 判断“出现过的网址”时，用户消息只认根会话里用户亲手输入的那些（`tools/web.py` 的 `seen_urls()`）。
 
 ### 事件透传：UI 看得见，父模型看不见
 
@@ -314,7 +320,7 @@ def run_usage(self) -> Usage:
 父模型上下文： [assistant: 调用 task] → [tool: 子代理「…」回传（status=ok）：{契约 JSON}]
 ```
 
-`EPHEMERAL_EVENTS` 是 `message_update` 与 `tool_update`，所以子代理的文本增量不会被透传，避免父事件流被刷屏。Web UI 收到 `update.subagent` 时把它们嵌套在 task 卡片下展示（`web/app.js` 的 `subagentLine()`：工具调用、工具结果、审批请求、子代理结束）；CLI 只渲染其中的 `tool_start`，在 task 那一行下面打印 `↳ [描述] 子代理调用的工具`。子代理进度只走这一条通道，没有单独的“子代理事件”类型。关键在于这些事件**只是事件**——事件不是上下文，父模型永远只读到 `ToolResult.content`。
+`EPHEMERAL_EVENTS` 是 `message_update` 与 `tool_update`，所以子代理的文本增量不会被透传，避免父事件流被刷屏。Web UI 收到 `update.subagent` 时把它们嵌套在 task 卡片下展示（`web/views/timeline.js` 的 `subagentLine()`：工具调用、工具结果、审批请求、子代理回复的前 120 字、子代理结束）；CLI 只渲染其中的 `tool_start`，在 task 那一行下面打印 `↳ [描述] 子代理调用的工具`。子代理进度只走这一条通道，没有单独的“子代理事件”类型。关键在于这些事件**只是事件**——事件不是上下文，父模型永远只读到 `ToolResult.content`。
 
 ### 违约修正：同一个子会话里再来一次
 

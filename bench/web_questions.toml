@@ -1,0 +1,42 @@
+# 联网工具效果评测的题目：答案会随时间变化，只能联网才答得对。评测不判对错，量三件事，见 bench/web_eval.py。
+# 题目要能在公开网页上找到一手来源（官网、官方博客、发布页），不选需要登录或付费的信息。
+
+[[q]]
+id = "python-latest"
+text = "Python 当前最新的稳定版本号是多少？是哪天发布的？"
+
+[[q]]
+id = "httpx-pypi"
+text = "httpx 在 PyPI 上的最新版本号是多少？"
+
+[[q]]
+id = "node-lts"
+text = "Node.js 当前处于 Active LTS 阶段的是哪个大版本？"
+
+[[q]]
+id = "rust-stable"
+text = "Rust 最新的稳定版本号是多少？这个版本有什么主要变化？"
+
+[[q]]
+id = "linux-mainline"
+text = "Linux 内核最新的主线（mainline）版本号是多少？"
+
+[[q]]
+id = "postgres-major"
+text = "PostgreSQL 最新的大版本号是多少，什么时候发布的？"
+
+[[q]]
+id = "k8s-minor"
+text = "Kubernetes 最新发布的次版本（v1.x）是哪一个？"
+
+[[q]]
+id = "fastapi-release"
+text = "FastAPI 最近一次发布的版本号是多少？"
+
+[[q]]
+id = "deepseek-models"
+text = "DeepSeek API 官方文档里目前列出了哪些可调用的模型？"
+
+[[q]]
+id = "github-blog"
+text = "GitHub 官方博客（github.blog）最新一篇文章的标题是什么？"

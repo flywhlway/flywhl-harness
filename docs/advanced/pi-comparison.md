@@ -30,7 +30,7 @@ pi-web-ui 已于 2026-05-20 从仓库中移除。分层的方式与 flywhl 相�
 | steering 时机 | 开跑前、每轮工具执行完后、`prepareNextTurn` 之后 | 每轮开头的安全点（工具批次全部完成之后、下一次模型调用之前） |
 | 队列模式 | one-at-a-time / all | `Inbox` 同样支持 `one_at_a_time` 与 `all`（默认 `all`） |
 | 取消 | `AbortSignal` 贯穿 streamFn、transformContext、tool.execute；provider 把 stopReason 标为 aborted | `CancelToken` 协作式传递；流中途取消保留已生成文本并标记 `ABORTED`；不可中断工具有宽限期；运行时先 CAS 到 `cancelling` 决出取消与完成的竞争 |
-| 默认工具集 | read / bash / edit / write（只读组 read / grep / find / ls） | read / write / edit / bash / ls / grep / todo_write / read_ref / search_ref / task（+ 演示工具） |
+| 默认工具集 | read / bash / edit / write（只读组 read / grep / find / ls） | read / write / edit / bash / ls / grep / todo_write / read_ref / search_ref / task（`[web] enabled` 时另有 web_search / web_fetch，默认关闭；+ 演示工具） |
 | 截断 | 2000 行或 50KB；read 保头、bash 保尾，完整输出写临时文件并给出路径 | read：2000 行 / 50KB 保头；bash：400 行 / 30KB 保尾，完整输出写入 `BlobStore` 并给出句柄（`full_output_ref`），用 `read_ref` / `search_ref` 回查 |
 | edit | 支持多处替换，模糊匹配兜底 | 精确匹配；不唯一时报出所有出现行号；`replace_all`；未命中时提示首行在哪些行附近出现（不做模糊替换） |
 | 工具并行 | 默认并行（`Promise.all`），结果按原序发出；`executionMode: "sequential"` 退回串行；同一文件的写入按真实路径串行 | 只有只读工具并行：连续的只读调用组成一批，有界并发（`parallel_tool_limit`）；写工具逐个执行；结果按原序落盘 |
@@ -154,7 +154,7 @@ pi 作者在 2025-11-30 的博客中系统地解释了这些取舍（以下为�
 | start / update / end 的事件命名 | `events.py` |
 | 孤立工具调用补合成结果 | `llm/base.py` 的 `prepare_history` |
 | 输出截断时整批工具调用判失败 | `AgentLoop._body` 的 `StopReason.MAX_TOKENS` 分支 |
-| read 保头、bash 保尾，完整输出外置并给出位置 | `tools/fs.py`（`MAX_LINES`、`MAX_BYTES`）；`tools/shell.py`（`truncate_tail` 与 `full_output_ref`） |
+| read 保头、bash 保尾，完整输出外置并给出位置 | `tools/fs.py`（`MAX_LINES`、`MAX_BYTES`）；`tools/shell.py`（调用 `_utils.py` 的 `truncate_tail`，配合 `full_output_ref`） |
 | 工具结果 content / details 分离 | `tools/base.py` 的 `ToolResult` |
 | 压缩触发公式、切点规则、增量摘要、读写文件清单 | `agent/compaction.py` 的 `find_cut_index`、`Compactor.compact`；`runtime/session.py` 的 `render_summary` |
 | 会话树只追加、分支只移动指针 | `runtime/store.py` 的 `entries.parent_id`；`SessionLog.branch` |

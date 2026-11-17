@@ -71,8 +71,23 @@ export const modeOf = (id) => MODES.find((m) => m.id === id) || MODES[0];
 const TOOL_ICONS = {
   read: "file", write: "filePlus", edit: "filePen", ls: "folder", grep: "search", bash: "terminal",
   todo_write: "listChecks", read_ref: "fileSearch", search_ref: "fileSearch", task: "bot",
-  send_notification: "send", sleep: "timer",
+  send_notification: "send", sleep: "timer", web_search: "globe", web_fetch: "external",
 };
+
+/** 会话联网能力：建会话时选定，开工后只能收紧 */
+export const WEB_LEVELS = [
+  { id: "off", label: "关闭", short: "关闭", desc: "不注册联网工具，模型只能用工作区里的信息。" },
+  { id: "search", label: "仅搜索", short: "搜索", desc: "可以联网搜索；不能读取网页正文。" },
+  { id: "fetch", label: "搜索并读取网页", short: "搜索+读取", desc: "可以搜索，也能读取用户给的或搜索结果里的网页。" },
+];
+export const webLevel = (id) => WEB_LEVELS.find((l) => l.id === id) || WEB_LEVELS[0];
+export const webRank = (id) => Math.max(0, WEB_LEVELS.findIndex((l) => l.id === id));
+
+/** 网址的“域名/路径”短写，给卡片标题用 */
+export function shortUrl(u) {
+  try { const x = new URL(u); return (x.host + x.pathname).replace(/\/$/, "") + (x.search ? "?…" : ""); }
+  catch { return String(u || ""); }
+}
 export const toolIcon = (name) => (name?.startsWith("mcp__") ? "plug" : TOOL_ICONS[name] || "wrench");
 
 /** 工具调用的一行摘要：让人不展开也能看懂“它要做什么” */
@@ -83,6 +98,8 @@ export function callSummary(name, a = {}) {
   if (name === "send_notification") return `${a.to || ""}：${a.message || ""}`;
   if (name === "todo_write") return `更新计划（${(a.todos || []).length} 项）`;
   if (name === "sleep") return `等待 ${a.seconds}s`;
+  if (name === "web_search") return `"${a.query || ""}"${a.site ? "  ·  site:" + a.site : ""}${a.freshness && a.freshness !== "any" ? "  ·  " + a.freshness : ""}`;
+  if (name === "web_fetch") return shortUrl(a.url);
   if (name === "edit" && a.path) return a.path;
   if (a.path) return a.path + (a.offset ? `  ·  从第 ${a.offset} 行` : "");
   if (a.ref) return a.ref;
@@ -102,6 +119,7 @@ export const DEMO_TEMPLATES = [
   { prompt: "压缩演示", icon: "database", title: "上下文压缩", desc: "水位、清理与结构化摘要" },
   { prompt: "循环测试", icon: "repeat", title: "循环检测", desc: "重复调用先提醒、再终止" },
   { prompt: "错误演示", icon: "alert", title: "错误处理", desc: "失败如何变成模型可读的结果" },
+  { prompt: "联网搜索 httpx 最新版本", icon: "globe", title: "联网搜索", desc: "开工前打开「联网」：来源卡片与污点" },
   { prompt: "帮助", icon: "info", title: "帮助", desc: "查看演示模型支持的指令" },
 ];
 export const REAL_TEMPLATES = [

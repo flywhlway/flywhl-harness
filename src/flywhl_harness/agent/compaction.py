@@ -27,16 +27,19 @@ from ..cancel import CancelToken
 from ..config import ContextConfig
 from ..llm.base import ModelRequest, Provider
 from ..llm.mock import deterministic_summary
-from ..prompts import COMPACTION_PROMPT, COMPACTION_SYSTEM, COMPACTION_UPDATE_HINT
+from ..prompts import COMPACTION_PROMPT, COMPACTION_SOURCES_HINT, COMPACTION_SYSTEM, COMPACTION_UPDATE_HINT
 from ..runtime.session import ContextView, SessionLog, render_summary  # noqa: F401（render_summary 供外部复用）
 from ..tools.extra import latest_todos
-from ..types import Message, MsgKind, Usage, user_message
+from ..types import Message, MsgKind, ServerBlock, Usage, user_message
 
 
 def message_tokens(m: Message) -> int:
     n = estimate_tokens(m.text) + estimate_tokens(m.thinking) + 4
     for c in m.tool_calls:
         n += estimate_tokens(c.name) + estimate_tokens(json.dumps(c.arguments, ensure_ascii=False)) + 8
+    for c in m.content:
+        if isinstance(c, ServerBlock):   # 模型侧联网的搜索结果会原样回传，同样占上下文
+            n += estimate_tokens(json.dumps(c.data, ensure_ascii=False)) + 8
     return n
 
 
@@ -126,7 +129,7 @@ class Compactor:
     async def compact(
         self, log: SessionLog, view: ContextView, cancel: CancelToken, *, tokens_before: int,
         extra_instructions: str | None = None, run_id: str | None = None, force: bool = False,
-        window: int | None = None,
+        window: int | None = None, keep_sources: bool = False,
     ) -> CompactionResult | None:
         msgs = view.messages
         start = 1 if view.compaction else 0
@@ -145,6 +148,8 @@ class Compactor:
         transcript = serialize_transcript(to_sum)
         previous = COMPACTION_UPDATE_HINT.format(summary=prev["summary"]) if prev.get("summary") else ""
         prompt = COMPACTION_PROMPT.format(previous=previous, conversation=transcript)
+        if keep_sources:
+            prompt += COMPACTION_SOURCES_HINT
         if extra_instructions:
             prompt += f"\n\n额外要求（来自 pre_compact hook）：\n{extra_instructions}"
         req = ModelRequest(model=self.model, system=COMPACTION_SYSTEM, messages=[user_message(prompt)],

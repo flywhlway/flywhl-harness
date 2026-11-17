@@ -59,7 +59,7 @@ harness 里的每个组件都隐含着一个判断：“模型自己做不到这
 | CAS 状态机 | `RunStateMachine`、`Store.cas_run` | 治理 | — |
 | 预算硬上限 | `Budget.check` 的 `hard` | 治理 | — |
 | 影子 git 快照 | `ShadowGit` + `snapshots` | 治理（可回滚） | — |
-| 污点升级 | `PermissionPolicy.evaluate` 中的 `tainted`（写入会话元数据，子代理污点上传父 Run） | 治理（安全） | — |
+| 污点升级 | `PermissionPolicy.evaluate` 中的 `tainted`（写入会话元数据，子代理污点上传父 Run，父 Run 的污点在派生时下传子代理） | 治理（安全） | — |
 | bash 命令分析 | `policy/bash_analyzer.analyze` | 治理（安全） | —（剥包装命令、递归分析 `sh -c`；`catastrophic` 在任何模式下都拒绝，`bypass` 也不例外） |
 | 熔断与探测名额归还 | `CircuitBreaker`（`allow` / `release`） | 治理（可用性） | — |
 | DAG 调度的租户 / 全局名额 | `DagScheduler`（先租户后全局） | 治理（配额） | — |

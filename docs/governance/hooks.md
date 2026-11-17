@@ -105,7 +105,7 @@ class HookInput:
 | `updated_input` | 替换工具参数 | `pre_tool_use` |
 | `updated_result` | 替换模型看到的工具结果 | `post_tool_use` |
 | `additional_context` | 以 system-reminder 注入下一轮上下文（`pre_compact` 中作为压缩指令） | `session_start`、`user_prompt_submit`、`pre_tool_use`、`post_tool_use`、`pre_compact`；`stop` 中 block 时并入验收缺口，不 block 时在 Run 完成时落盘为 reminder |
-| `stop_run` | 下一回合开始时终止整个 Run，不打断当前调用（对应 Claude Code 的 `continue: false`） | `pre_tool_use`、`stop` |
+| `stop_run` | 下一回合开始时终止整个 Run，不打断当前调用，同一条消息里排在后面的调用也照常执行（对应 Claude Code 的 `continue: false`） | `pre_tool_use`、`stop` |
 | `warnings` | 由 HookBus 填充：fail-open 时被忽略的错误、无法识别的决策取值 | — |
 
 ## HookBus 精读
@@ -120,10 +120,9 @@ async def run(self, event: str, inp: HookInput) -> HookOutput:
         try:
             out = await asyncio.wait_for(h.fn(inp), h.timeout)
         except Exception as e:  # 含超时
-            msg = f"hook {h.name} 失败：{type(e).__name__}: {e}"
             if h.fail_closed:
-                return self._closed(event, msg + "（fail-closed，按阻断处理）", agg)
-            agg.warnings.append(msg + "（fail-open，忽略）")
+                return self._closed(event, h.name, e, agg)
+            agg.warnings.append(f"hook {h.name} 失败：{type(e).__name__}: {e}（fail-open，忽略）")
             continue
         if out is None:
             continue
@@ -316,7 +315,8 @@ if dec.edited_args:
 `rm -rf ~` 并直接执行，灾难性命令的拒绝、凭证位置、deny 规则都管不到它。回归测试：`tests/test_hardening.py::test_hook_rewrite_after_approval_is_rechecked`。
 
 `stop_run` 不会打断当前这次调用——它只设置 `rc.stop_requested`，`AgentLoop` 在下一回合开始时检查并以
-`Outcome("cancelled", ..., by="hook")` 结束。想同时阻止当前调用，需要再返回 `decision="deny"`。
+`Outcome("cancelled", ..., by="hook")` 结束。模型一次发出多个调用时，排在后面的也照常执行，它不是急停开关。
+想同时阻止当前调用，需要再返回 `decision="deny"`。
 
 `post_tool_use` 的处理更简单：`updated_result` 替换内容但保留 `tainted` 标记（脱敏不等于变可信）；
 `block` 把原因以 `[PostToolUse 反馈]` 附加到结果末尾并置 `is_error=True`，模型会把它当作一次需要修正的失败。
@@ -337,6 +337,8 @@ hook 自己会出错：脚本有 bug、依赖的服务超时、JSON 解析失败
 fail-closed 的实现是 **立即返回** 阻断结果。`pre_tool_use` 的调用不会执行，前面 hook 积累的改写和上下文都被丢弃。
 `post_tool_use` 不一样：工具已经执行过，`block` 只是把原因附到结果后面，结果本身还会交给模型。所以这里保留前面 hook 的
 `updated_result`；没有 hook 替换过结果时，原文换成一句占位文字。否则脱敏 hook 一出错，要隐藏的内容反而原样进了上下文。
+附在后面的原因也只写 hook 名和异常类型：脱敏脚本在某一行崩溃时，异常文本（命令 hook 是 stderr 的前 300 字）里往往就是那一行原文。
+完整的异常信息作为 `hook_warning` 发给人看。
 两种情况下，前面 fail-open 留下的警告都保留。
 fail-open 不是“静默忽略”：错误进入 `warnings`，调用方把它们发布成 `code="hook_warning"` 的 notice 事件，应当接入告警。
 `HookBus.run` 只负责收集，发不发布由各挂载点决定，这一点曾经出过问题：早期只有 `pre_tool_use` 会发布，Stop 等事件里 fail-open 的异常、
@@ -381,24 +383,25 @@ flowchart LR
 
 ### 超时要杀掉整个进程组
 
-`wait_for` 取消的只是 `CommandHook.__call__` 协程，`asyncio.create_subprocess_shell` 启动的进程不会随之终止。
+`wait_for` 取消的只是 `CommandHook.__call__` 协程，它启动的子进程不会随之终止。
 早期版本里一个超时的 `sleep` hook 会继续在后台运行，卡住的 hook 每次工具调用都泄漏一个进程。现在的写法：
 
 ```python
-proc = await asyncio.create_subprocess_shell(
-    self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-    env=self.child_env(inp.event), start_new_session=True,
-)
-try:
-    out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
-except BaseException:
-    # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(proc.wait(), 2)
-    raise
+box = self.confinement or Confinement.resolve()
+async with box.enter(["/bin/sh", "-c", self.command], base, self.child_env(inp.event)) as run:   # 进沙箱
+    proc = await asyncio.create_subprocess_exec(
+        *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, cwd=base, env=run.env, start_new_session=True,
+    )
+    try:
+        out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
+    except BaseException:
+        # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 2)
+        raise
 ```
 
 三个细节缺一不可：`start_new_session=True` 让 shell 成为新进程组的组长，`killpg` 才能连同它派生的子进程（`sleep 30 &`、
@@ -538,7 +541,8 @@ Claude Code 的 Stop hook 输入中有类似作用的 `stop_hook_active` 字段�
 
 ## hook 本身是供应链风险点
 
-hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，文件系统上的凭证它仍然读得到。
+hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，默认的系统沙箱也挡住了凭证清单里的位置；
+但清单之外的文件、用户配置里关掉了沙箱的 hook，照样读得到。
 这意味着：
 
 - **克隆一个仓库就可能执行它的代码。** 如果无条件加载项目配置，`flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。

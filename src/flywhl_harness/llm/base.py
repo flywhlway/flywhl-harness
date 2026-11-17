@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator
 
 from .._utils import new_id, safe_json_loads
 from ..cancel import CancelToken
-from ..types import Message, StopReason, TextBlock, ThinkingBlock, ToolCall, Usage
+from ..types import Message, ServerBlock, StopReason, TextBlock, ThinkingBlock, ToolCall, Usage
 from .models import ModelInfo, get_model_info
 
 
@@ -39,6 +39,9 @@ class ModelRequest:
     tool_choice: str = "auto"
     purpose: str = "turn"  # turn | wrap_up | compaction | subagent
     metadata: dict[str, Any] = field(default_factory=dict)
+    # 模型侧联网：llm/native.py 里声明的键。provider 核对声明与自己对得上才带上联网参数（降级到别家时不带）
+    native_search: str | None = None
+    native_opts: dict[str, Any] = field(default_factory=dict)   # max_uses（剩余搜索次数）、deny_domains
 
 
 @dataclass
@@ -141,9 +144,10 @@ class MessageBuilder:
     解析失败时保留原文与错误，交给执行层回给模型修正。
     """
 
-    def __init__(self, provider: str, model: str):
+    def __init__(self, provider: str, model: str, origin: str = ""):
         self.provider = provider
         self.model = model
+        self.origin = origin   # 端点主机：供应商侧工具块只回传给同一端点
         self._blocks: dict[int, dict[str, Any]] = {}
 
     def text(self, index: int, delta: str) -> None:
@@ -178,6 +182,28 @@ class MessageBuilder:
             err, args = "工具参数必须是 JSON 对象", None
         return ToolCall(b["id"], b["name"], args or {}, raw_arguments=b["json"] if err else None, parse_error=err)
 
+    def server(self, index: int, data: dict[str, Any]) -> None:
+        """供应商侧执行的工具块：原样保存。``server_tool_use`` 的 input 以 partial JSON 增量到达，见 ``server_delta``。"""
+        self._blocks[index] = {"type": "server", "data": dict(data), "json": ""}
+
+    def server_delta(self, index: int, partial: str) -> bool:
+        b = self._blocks.get(index)
+        if b is None or b["type"] != "server":
+            return False
+        b["json"] += partial
+        return True
+
+    def server_blocks(self) -> list[dict[str, Any]]:
+        return [self._server_data(b) for _, b in sorted(self._blocks.items()) if b["type"] == "server"]
+
+    @staticmethod
+    def _server_data(b: dict[str, Any]) -> dict[str, Any]:
+        data = dict(b["data"])
+        if b["json"]:
+            args, err = safe_json_loads(b["json"])
+            data["input"] = args if err is None and isinstance(args, dict) else {}
+        return data
+
     def drop_non_text(self) -> None:
         """丢弃非文本块（用于 server-side fallback 的边界：之前的 thinking/tool_use 不能回传）。"""
         self._blocks = {k: v for k, v in self._blocks.items() if v["type"] == "text"}
@@ -196,6 +222,8 @@ class MessageBuilder:
                 call = self.tool_call(idx)
                 if call:
                     content.append(call)
+            elif b["type"] == "server" and not partial:
+                content.append(ServerBlock(self._server_data(b), self.origin))
         return Message(
             role="assistant", content=content, stop_reason=stop_reason, usage=usage,
             model=self.model, provider=self.provider, error=error,
@@ -231,10 +259,22 @@ class Provider(ABC):
 
 
 # ====================================================================== 通用预处理
+def has_payload(m: Message) -> bool:
+    """assistant 消息里有没有能回传给模型的东西：正文、工具调用或供应商侧工具块。
+
+    思考模型的输出预算（``max_tokens``）把思考也算在内。思考一长，输出在思考阶段就被截断，
+    留下一条只有思考的消息。它在 OpenAI 兼容协议里是 ``content=null`` 且没有 ``tool_calls``，
+    DeepSeek 直接 400（``content or tool_calls must be set``）。这条消息又留在历史里，重试、继续都会再撞一次，
+    会话就再也跑不下去。思考本身被截断了，不完整，丢掉它，让模型重新想。
+    """
+    return bool(m.text or m.tool_calls or any(isinstance(c, ServerBlock) for c in m.content))
+
+
 def prepare_history(messages: list[Message]) -> list[Message]:
     """发送前的通用修补：保证消息结构合法（tool_call 与 tool_result 严格配对）。
 
     - 跳过 error / refusal 的 assistant 消息（它们没有可复用的内容）；
+    - 跳过只有思考、没有正文和工具调用的 assistant 消息（见 ``has_payload``）；
     - aborted 的 assistant 只保留文本（构建时已丢弃半截 thinking 与工具调用）；
     - 孤立的 tool 结果（找不到对应调用）直接丢弃；
     - 不在末尾却缺少结果的工具调用，补一条合成的错误结果（pi 的做法），避免 API 直接 400。
@@ -254,7 +294,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
         if m.role == "assistant":
             if m.stop_reason in (StopReason.ERROR, StopReason.REFUSAL):
                 continue
-            if not m.content:
+            if not has_payload(m):
                 continue
             flush_pending()
             out.append(m)

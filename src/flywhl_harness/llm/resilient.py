@@ -18,12 +18,22 @@ from ..cancel import CancelToken
 from ..runtime.retry import CircuitBreaker, RetryPolicy
 from .base import ErrorKind, ModelRequest, Provider, ProviderError, StreamEvent
 from .models import ModelInfo
+from .native import NATIVE_SPECS, matches
 
 # 这些错误换一个模型也许能成功；上下文超长/参数非法换模型也没用（上下文超长交给 Loop 去压缩）
 _FALLBACK_KINDS = {ErrorKind.RATE_LIMIT, ErrorKind.OVERLOADED, ErrorKind.SERVER, ErrorKind.TIMEOUT, ErrorKind.NETWORK,
                    ErrorKind.NOT_FOUND, ErrorKind.BILLING}
 # 鉴权失败是“这一家”的问题：同一家换模型没用，换到另一家（另一把密钥）才有意义
 _CROSS_PROVIDER_KINDS = {ErrorKind.AUTH}
+
+
+def _fallback_max_tokens(req: ModelRequest, provider: Provider, model: str) -> int:
+    """备用模型的输出上限。Loop 在截断后提高过 ``max_tokens``（``metadata["max_tokens_base"]`` 是配置值）时，
+    按备用模型登记的最大输出收回提高的部分，但不低于配置值：配置值是用户写的，原来就这样发。"""
+    base = req.metadata.get("max_tokens_base")
+    if base is None:
+        return req.max_tokens
+    return max(int(base), min(req.max_tokens, provider.model_info(model).max_output))
 
 
 def _can_fallback(err: ProviderError, cur: Provider, nxt: Provider | None) -> bool:
@@ -62,9 +72,13 @@ class ResilientProvider(Provider):
             if not breaker.allow():
                 last = ProviderError(ErrorKind.OVERLOADED, f"{provider.name}/{model} 熔断中", provider=provider.name)
                 continue
+            sub = req if i == 0 else replace(req, model=model, max_tokens=_fallback_max_tokens(req, provider, model))
             if i > 0:
-                yield StreamEvent("notice", info={"code": "fallback", "text": f"降级到 {provider.name}/{model}"})
-            sub = req if i == 0 else replace(req, model=model)
+                info = {"code": "fallback", "text": f"降级到 {provider.name}/{model}"}
+                if req.native_search:   # 备用的一家对得上同一份声明（同一端点上的另一个已确认模型）时，联网照常
+                    spec = NATIVE_SPECS.get(req.native_search)
+                    info["native_kept"] = spec is not None and matches(spec, provider, model)
+                yield StreamEvent("notice", info=info)
             attempt = 0
             while True:
                 emitted = False

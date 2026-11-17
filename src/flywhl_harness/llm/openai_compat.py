@@ -31,6 +31,7 @@ from .base import (
     ErrorKind, MessageBuilder, ModelRequest, Provider, ProviderError, StreamEvent, classify_http_error, prepare_history,
 )
 from .models import ModelInfo, compute_cost, get_model_info
+from .native import NATIVE_SPECS, matches
 from .profiles import PROFILES, ProviderProfile
 
 _FINISH = {
@@ -57,6 +58,10 @@ def to_openai_messages(system: str, messages: list[Message], *, echo: str = "non
             text = m.text
             if echo == "inline" and thinking:
                 text = f"{_THINK_OPEN}\n{thinking}\n{_THINK_CLOSE}\n\n{text}"
+            if not text and not m.tool_calls:
+                # 这里不认供应商侧工具块（降级前 Anthropic 留下的 server 块）：只剩它们时同样是 content=null
+                # 且没有 tool_calls，兼容服务会 400。prepare_history 已滤掉只有思考的消息，这里兜住其余情况
+                continue
             msg: dict[str, Any] = {"role": "assistant", "content": text or None}
             if echo == "field":
                 msg["reasoning_content"] = thinking
@@ -167,6 +172,10 @@ class OpenAICompatProvider(Provider):
             body["temperature"] = req.temperature
         if self.name == "openrouter" and req.model.startswith("anthropic/"):
             body["cache_control"] = {"type": "ephemeral"}    # 别家由服务端自动缓存，Claude 不带这个标记就不缓存
+        spec = NATIVE_SPECS.get(req.native_search or "")
+        if spec is not None and matches(spec, self, req.model):
+            # 模型侧联网：并入声明的请求字段（百炼 enable_search）。降级到别家时声明对不上，不带
+            body.update(json.loads(json.dumps(spec.request)))
         body.update(self.options)
         return body
 

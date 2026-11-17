@@ -27,11 +27,11 @@ Each round of `AgentLoop._body()` runs in a fixed order, and the order is the de
 5. **Reminders.** Budget warnings, loop warnings and plan recitation are merged into one persisted user message.
 6. **Model call.** Streaming, with retries and fallback handled in the provider layer. The loop only sees `retry` events.
 7. **Persist the assistant message.** This is the checkpoint anchor. Whatever crashes later, recovery can find the unfinished calls from this message.
-8. **Branch.** With tool calls, `executor.run_batch()` runs them and the loop guard observes the results. With none, queued input goes first, then `_stop_gaps()` decides whether the run has really finished.
+8. **Branch.** With tool calls, `executor.run_batch()` runs them and the loop guard observes the results. With none, queued input goes first, then `_stop_gaps()` decides whether the run has really finished. A reply cut off by `max_tokens` raises this run's output limit to 4x (capped by the model's registered max output and 65536); a cut-off reply with only thinking is never sent back, and three in a row end the run as `incomplete`.
 
 `max_turns` counts model calls, not conversation rounds: a turn here is one `_call_model()` plus the tools after it, the same definition as pi. Codex's "turn" is closer to a whole run.
 
-The loop is an async generator because it can then yield events at the point they happen, stay independent of the UI, and hand control back at every step. The outer `run()` guarantees an explicit end state whatever `_body()` does: any exception ends the run as `failed` with the traceback kept. When a run is cancelled with tool calls unanswered, `_pair_dangling()` writes synthetic results, so the pairing invariant holds for the next request.
+The loop is an async generator because it can then yield events at the point they happen, stay independent of the UI, and hand control back at every step. The outer `run()` guarantees an explicit end state whatever `_body()` does: any unexpected exception ends the run as `failed` with the traceback kept, while `GeneratorExit` and `CancelledError` are deliberately left to propagate. When a run is cancelled with tool calls unanswered, `_pair_dangling()` writes synthetic results, so the pairing invariant holds for the next request.
 
 ## Key code
 

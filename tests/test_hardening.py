@@ -717,8 +717,16 @@ def request_text(req) -> str:
     return str([m.text for m in req.messages])
 
 
+READ_B = [{"tool_calls": [{"name": "read", "args": {"path": "b.txt"}}]}, "结束"]
+
+
+def hook_warnings(events) -> list[str]:
+    return [e.data["text"] for e in events if e.data.get("code") == "hook_warning"]
+
+
 async def test_fail_closed_post_hook_does_not_undo_an_earlier_redaction(ws):
-    provider = ScriptedProvider(WRITE_A)
+    (ws / "b.txt").write_text("密钥 sentinel", encoding="utf-8")
+    provider = ScriptedProvider(READ_B)
     h = make_harness(ws, provider, permissions__mode="bypass")
 
     @h.hooks.on(HookEvent.POST_TOOL_USE, priority=1)
@@ -732,22 +740,24 @@ async def test_fail_closed_post_hook_does_not_undo_an_earlier_redaction(ws):
     res = await h.run("x")
     end = tool_ends(res.events)[0]
     assert end["is_error"] and end["content"].startswith("[已脱敏]")
-    assert "sentinel" not in request_text(provider.requests[1]) and "a.txt" not in end["content"]
+    assert "sentinel" not in request_text(provider.requests[1]) and "sentinel" not in end["content"]
 
 
 async def test_fail_closed_post_hook_withholds_output_nobody_redacted(ws):
     (ws / "b.txt").write_text("密钥 sentinel", encoding="utf-8")
-    provider = ScriptedProvider([{"tool_calls": [{"name": "read", "args": {"path": "b.txt"}}]}, "结束"])
+    provider = ScriptedProvider(READ_B)
     h = make_harness(ws, provider, permissions__mode="bypass")
 
     @h.hooks.on(HookEvent.POST_TOOL_USE, fail_closed=True)
     async def redact(inp):
-        raise ValueError("脱敏服务不可用")
+        # 脱敏脚本在某一行崩溃时，异常文本里往往就是那一行原文
+        raise ValueError(f"脱敏服务不可用，卡在：{inp.tool_result['content']}")
 
     res = await h.run("x")
     end = tool_ends(res.events)[0]
-    assert end["is_error"] and WITHHELD_RESULT in end["content"] and "脱敏服务不可用" in end["content"]
-    assert "sentinel" not in request_text(provider.requests[1])
+    assert end["is_error"] and WITHHELD_RESULT in end["content"] and "ValueError" in end["content"]
+    assert "sentinel" not in end["content"] and "sentinel" not in request_text(provider.requests[1])
+    assert any("redact" in w and "sentinel" in w for w in hook_warnings(res.events)), "完整信息要发给人看"
 
 
 async def test_fail_open_warnings_survive_a_later_fail_closed_hook():
@@ -817,6 +827,7 @@ async def test_a_failed_reconcile_leaves_the_result_unknown(ws, tmp_path):
     msg = [m for m in h2.log(s.id).messages() if m.role == "tool"][0]
     assert len(calls) == 1 and msg.details["status"] == "unknown"
     assert "结果未知" in msg.text and "未执行" not in msg.text and rec.status == "completed"
+    assert "ConnectionError" in msg.text and "对账接口不可用" not in msg.text, "外部异常的原文只发给人看，不进上下文"
 
 
 async def test_cancelling_a_retry_of_an_external_tool_does_not_say_it_never_ran(ws):
@@ -874,6 +885,26 @@ def test_a_stripped_git_config_value_takes_its_key_with_it(monkeypatch, tmp_path
     r = subprocess.run(["git", "config", "user.name"], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert (r.returncode, r.stdout.strip()) == (0, "flywhl")
 
+
+
+def test_a_stripped_git_config_key_takes_its_value_and_odd_names_do_not_break_it(monkeypatch, tmp_path):
+    """凭证写在键里（insteadOf 的常见写法）时剥掉的是键，留下的值也要一起去掉；
+    GIT_CONFIG_KEY_01 这类 git 不读的写法不能让整个环境构造失败（bash、hook、MCP 都靠它启动）。"""
+    from flywhl_harness.tools.shell import _clean_env
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "3")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "url.https://u:sentinel@host/.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://mirror/")
+    monkeypatch.setenv("GIT_CONFIG_KEY_01", "core.pager")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_01", "less")
+    monkeypatch.setenv("GIT_CONFIG_KEY_2", "user.name")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_2", "flywhl")
+    env = _clean_env(True)
+
+    assert "sentinel" not in str(env) and "https://mirror/" not in env.values()
+    assert (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]) == ("user.name", "flywhl")
+    r = subprocess.run(["git", "config", "user.name"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert (r.returncode, r.stdout.strip()) == (0, "flywhl")
 
 async def test_proxy_names_the_error_when_the_exception_has_no_text():
     from flywhl_harness.tools.egress import EgressProxy, parse_rules

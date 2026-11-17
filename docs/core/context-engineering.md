@@ -229,7 +229,7 @@ flowchart LR
 ```python
 # src/flywhl_harness/agent/loop.py::AgentLoop._maybe_compact（节选）
 view = rc.log.context()
-stats = rc.context.estimate(view.messages, rc.system_prompt, rc.tools.specs())
+stats = rc.context.estimate(view.messages, self._prefix(), rc.tools.specs())   # 系统提示 + 项目指令
 if not force and not rc.context.should_compact(stats):
     return
 skipped_at = rc.state.get("compact_skipped_at")
@@ -237,8 +237,10 @@ if not force and skipped_at is not None and stats.tokens < skipped_at * 1.15:
     return  # 上次已确认“没有可压缩的历史”，水位没有明显增长前不再空转
 # ... PreCompact hook 可以追加额外的摘要要求
 res = await rc.compactor.compact(rc.log, view, rc.cancel, tokens_before=stats.tokens,
-                                 extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window)
+                                 extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window,
+                                 keep_sources=rc.budget.web is not None)   # 开了联网：要求摘要列出已查阅来源
 # ...
+rc.budget.charge_model(res.usage)  # 摘要调用本身也消耗 token，计入预算
 rc.clear_watermark = 0  # 消息下标在压缩后整体变化，清理水位线随之归零
 ```
 
@@ -387,12 +389,14 @@ tests/test_users.py
 try:
     out = await self.provider.complete(req, cancel)
     summary = out.text.strip()
-    if not summary:
-        raise ValueError("摘要为空")
+    if not _is_summary(summary):   # 少于两个 # 小节：模型没做摘要，而是顺着对话往下说
+        raise ValueError(f"模型输出的不是摘要：{summary[:80]!r}")
 except Exception as e:  # 取消要向上传播；其它失败退化为确定性摘要
     if isinstance(e, RunCancelled):
         raise
     summary, used_fallback = deterministic_summary(req), True
+    if prev.get("summary"):   # 上次的摘要原样带上，之前压缩保留下来的事实不丢
+        summary = f"{clip(prev['summary'], self.max_summary_tokens * 4)}\n\n# 这一段的进展（模型摘要不可用，由程序抽取）\n{summary}"
 ```
 
 `llm/mock.py::deterministic_summary` 不调用模型，从序列化文本里抽取第一条用户输入作为目标、最近 8 个工具调用作为进展、最后 6 行作为关键上下文。
@@ -560,7 +564,7 @@ Manus 的另一条经验：要限制模型能做什么时，不要从请求里�
 | 被推翻的探索过程、冗长推理 | 可丢 | — |
 | 保留段的 thinking | 必须丢 | 签名失效 |
 
-Claude Code 在压缩后会重新注入 `CLAUDE.md`、计划和最近访问的若干文件。本项目的对应关系是：规则文件本来就在系统提示里；
+Claude Code 在压缩后会重新注入 `CLAUDE.md`、计划和最近访问的若干文件。本项目的对应关系是：规则文件本来就在每次请求最前面的项目指令消息里；
 计划靠 todo 复述（注意上面的局限）；最近文件只保留路径清单，不重新注入内容，需要时由模型按路径重新读取——这正是 just-in-time 检索的思路。
 
 ## 常见坑
@@ -574,7 +578,7 @@ Claude Code 在压缩后会重新注入 `CLAUDE.md`、计划和最近访问的�
 | 切在 tool 结果处 | API 报配对错误 | 切点规则 |
 | 摘要改写了任务 | 关键约束丢失 | 原文由代码保存 |
 | 摘要调用失败 | 整个 Run 失败 | 退化为确定性摘要 |
-| 摘要调用的 token 去哪了 | 预算统计偏低 | 当前 `Compactor` 的调用没有计入 Run 的 `budget`，看成本时需要注意 |
+| 摘要调用的 token 去哪了 | 预算统计偏低 | `_maybe_compact` 用 `charge_model(res.usage)` 把摘要调用计入 Run 的 `budget` |
 
 ## 如何度量一次压缩丢了多少关键信息
 

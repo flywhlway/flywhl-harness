@@ -6,7 +6,7 @@
 
 > **Agent = Model + Harness.** 模型负责“想”，harness 负责其余的一切。
 
-一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 1.5 万行（其中大量是中文注释），
+一个用 Python 从零手写的最小 Agent Harness：核心不依赖任何 Agent 框架，约 1.9 万行 Python（其中大量是中文注释），
 把 harness 工程里最关键的机制都做成了 **可运行、可测试、可替换** 的代码，并配一个 Agent 控制台（Web UI）与一套系列教程。
 
 ```
@@ -19,13 +19,14 @@
 
 | 维度 | 机制 | 代码 |
 |---|---|---|
-| **Loop** | async generator 主循环；阶段化（整形→模型→落盘→工具→守卫→续跑）；插话 / 排队 | `agent/loop.py` |
+| **Loop** | async generator 主循环；阶段化（整形→模型→落盘→工具→守卫→续跑）；插话 / 排队；输出被长度上限截断时续写或分步重来，本次运行的输出上限按需提高 | `agent/loop.py` |
 | **模型接入** | 统一消息与流事件；`<供应商>:<模型>` 写法与供应商档案（DeepSeek 默认、百炼、Kimi、智谱、MiniMax、OpenRouter、Ollama、Anthropic 官方 SDK）；思考内容按各家规则回传；错误分类（含余额不足、模型不存在）、重试 + 全抖动、熔断、跨供应商降级链；`flywhl doctor` 接入自检 | `llm/` |
 | **工具** | 副作用三级（read/write/external）；schema 校验与可操作错误；只读并发、写操作串行、原序回填；大结果外置句柄；MCP 接入 | `tools/`、`agent/executor.py` |
+| **联网** | `web_search` / `web_fetch`，默认关闭；会话开工前选能力、开工后只能收紧；DeepSeek / 博查 / SearXNG 故障转移；读取范围按完整网址匹配（只放宽顺序翻页），外传检查；唯一的出站 HTTP 入口（只放行公网、连接钉在核过的 IP、每跳重新核验）；次数与费用进预算；可选的模型侧联网（Anthropic server tool） | `tools/web.py`、`net/`、`llm/native.py` |
 | **上下文** | 水位估算（真实 usage + 增量估算）；旧结果清理（水位线）；摘要压缩（不切开工具配对、增量更新、确定性保留原始任务）；计划复述 | `agent/context.py`、`agent/compaction.py` |
-| **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
+| **状态** | Session / Entry / Run / Step / Event 四层 + SQLite WAL，默认按断电耐久落盘（`durability = "full"`）；会话树与分支；只追加 | `runtime/store.py`、`runtime/session.py` |
 | **生命周期** | 14 态状态机 + CAS 迁移（接管时钉住观察到的版本）；协作式取消（可中断/不可中断/结果未知）；暂停恢复 + 漂移说明；失败重试；心跳租约 + 周期性崩溃接管（kill -9 后副作用恰好一次）；关闭服务时暂停、重启后继续 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` |
-| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；默认开启的系统沙箱（macOS sandbox-exec、Linux bubblewrap，bash、命令 hook、MCP 服务器、验收命令都在里面，网络默认只放行白名单，用不了时拒绝执行）；污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/` |
+| **策略** | 四种权限模式；deny>ask>allow 规则；命令风险分析（剥包装命令、递归分析 `sh -c`、工作区边界、灾难性命令任何模式都拒绝）；凭证位置在文件工具与 bash 里共用一份清单、任何模式都拒绝；默认开启的系统沙箱（macOS sandbox-exec、Linux bubblewrap，bash、命令 hook、MCP 服务器、验收命令都在里面，网络默认只放行白名单，用不了时拒绝执行）；沙箱外执行单独一道人工门（无人值守时只认 `--approve-outside` 写明的命令）；工作区信任与污点感知（跨暂停持久）；Hooks（含与 Claude Code 协议兼容的进程外 hook）；带变更预览的持久化人审 | `policy/`、`tools/sandbox.py` |
 | **执行环境** | 路径约束与逃逸检测；影子 git 快照 / 回滚；密钥不进子进程；端云幂等指令下发 | `runtime/workspace.py`、`runtime/dispatch.py` |
 | **多 Agent** | 子代理（隔离上下文 + 回传契约 + 违约修正）；DAG 调度（并发配额、失败策略、关键路径） | `agent/subagent.py`、`runtime/scheduler.py` |
 | **度量** | 轨迹导出 + OTel GenAI 风格 span；确定性回放 / 反事实分叉；评测（Wilson 区间、McNemar 检验、过早停止率） | `observe/` |
@@ -42,6 +43,7 @@ mkdir agent-demo
 flywhl serve -w agent-demo       # 打开终端打印的带令牌链接
 ```
 
+第一次在某个目录启动时，终端会问一次是否信任这个工作区：不信任也能用，只是读过文件之后的写操作和外部操作都要人确认（`--trust` 直接信任）。
 访问令牌默认开启：首次启动生成并保存到 `~/.flywhl/server_token`（权限 0600）。链接里的令牌在首次访问时换成 Cookie，之后用书签直接打开，重启服务也不失效。
 
 没有任何 API Key 时自动使用内置的 **flywhl-demo** 演示模型——点击开始页的演示场景即可体验审批、取消、压缩、子代理、
@@ -79,12 +81,13 @@ uv sync --all-extras                 # 或 python -m venv .venv && .venv/bin/pip
 ```bash
 flywhl serve                     # Web UI
 flywhl chat                      # 终端交互（Ctrl-C 取消当前运行）
-flywhl run "列出目录" --json      # 一次性执行，输出 JSONL 事件流
+flywhl run "列出目录" --json      # 一次性执行，输出 JSONL 事件流；无人值守，需要审批的一律拒绝
+flywhl run "跑测试" --json --approve 'bash(npm test*)'   # 只自动批准写明的操作；沙箱外命令另用 --approve-outside
 flywhl runs / sessions           # 查看运行与会话
 flywhl resume <run_id>           # 恢复暂停/中断的运行
 flywhl retry <run_id>            # 重试失败的运行（从历史继续，attempt + 1）
 flywhl recover                   # 接管崩溃的运行
-flywhl replay <run_id> [--fork-at N]   # 确定性回放 / 反事实分叉
+flywhl replay <run_id> [--fork-at N]   # 确定性回放 / 反事实分叉（分叉后默认不联网，--allow-web 放开）
 flywhl trace <run_id> -o t.json  # 导出轨迹与 span
 flywhl export <会话ID> -o s.md   # 会话导出为 Markdown 对话记录
 flywhl tools                     # 工具与副作用等级
@@ -138,7 +141,7 @@ asyncio.run(main())
 
 ```bash
 .venv/bin/python examples/11_kill9_cli_recover.py
-.venv/bin/python -m pytest -q          # 726 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
+.venv/bin/python -m pytest -q          # 约 1700 个离线测试，包含真实 kill -9 恢复测试与录制的各家真实 SSE 流
 ```
 
 `examples/11_kill9_cli_recover.py` 的输出节选（不需要 API Key，结果确定）：
@@ -173,19 +176,22 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 | 一次性 Linux 容器，Python 3.12 | 847 项通过，4 项跳过 | 20 项通过，13 项跳过 |
 
 干净安装验收（`scripts/sandbox_acceptance.py`：装 wheel、不写配置）在这两个环境都是 23 项通过。
+0.2.1 的[发布门禁](docs/quality-audit/evidence/release-gate-0.2.1.md)（2026-11-06，一次性 Linux 容器）：离线 878 项通过、3 项跳过，系统沙箱用例 21 项通过、12 项跳过。
+之后加入的联网工具、工作区信任等改动让离线用例增加到约 1700 个，还没有发版。
 
 ## 真实模型测试
 
-离线测试用脚本化模型验证 harness 的逻辑；协议细节与模型行为只有真实模型能回答。`tests/live/` 覆盖 33 个真实场景：
+离线测试用脚本化模型验证 harness 的逻辑；协议细节与模型行为只有真实模型能回答。`tests/live/` 覆盖 38 个真实场景：
 接入层（思考开关、前缀缓存、截断、错误分类、降级链与项目配置的降级链、多供应商、Anthropic 协议）、Agent 机制（多步工具、并行调用、审批与拒绝理由、
 Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算收尾、提示注入、大结果句柄、跨供应商续聊）、运行时（流式中途取消、插话、
-暂停恢复、kill -9 接管、真实轨迹回放、Web API 端到端）。默认不运行：
+暂停恢复、kill -9 接管、真实轨迹回放、Web API 端到端）、联网（DeepSeek 搜索与读取、本机直连读取、博查、带来源回答时效性问题）。默认不运行：
 
 ```bash
 .venv/bin/python -m pytest -m live tests/live                       # 读取 .env，没有密钥的用例自动跳过
 FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
 ```
 
+2026-11-06，0.2.1 的发布门禁只带 DeepSeek 密钥：25 项通过，8 项因缺其他供应商的密钥跳过（约 29 万 token、0.045 美元）。
 2026-11-05，候选版本 0.2.0 上 33 个用例全部通过（约 28 万 token、0.03 美元），记录见[发布门禁](docs/quality-audit/evidence/release-gate-0.2.0.md)。
 2026-10-16 复现：33 个用例全部通过（约 34 万 token、0.05 美元）。此前本机记录的 30 个失败逐项排查过：
 缺密钥 0 个（没有密钥只会跳过，不会失败）；当时的运行环境问题 29 个（同样的密钥重跑即通过）；真实缺陷 1 个。
@@ -197,7 +203,8 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live  
 
 ## 教程
 
-`docs/` 是一个可独立部署的 VitePress 站点：从“什么是 harness”到每个机制的原理、设计取舍与源码精读。
+`docs/` 是一个可独立部署的 VitePress 站点：从“什么是 harness”到每个机制的原理、设计取舍与源码精读，共 30 章，另有 7 页的精简手册。
+在线阅读：[中文教程](https://flywhlway.github.io/flywhl-harness/) · [English docs](https://flywhlway.github.io/flywhl-harness/en/)。
 
 ```bash
 cd docs && npm install && npm run dev    # 本地预览
@@ -208,14 +215,15 @@ npm run build                            # 输出到 docs/.vitepress/dist，可�
 
 ```
 src/flywhl_harness/
-  agent/      loop · executor · context · compaction · budget · inbox · subagent
-  llm/        base · profiles · models · openai_compat · anthropic · mock · replay · resilient · doctor
-  tools/      base · schema · registry · fs · shell · extra · demo · mcp
-  policy/     permissions · bash_analyzer · hooks · approvals
-  runtime/    manager · store · session · state · workspace · retry · scheduler · dispatch
-  observe/    trace · replay · evals
-  server/     FastAPI：REST + SSE（Last-Event-ID 续传）
-  web/        Agent 控制台（原生 ES 模块，无构建步骤）：app · lib/{api,dom,icons,meta,ui} · views/{session,timeline,inspector,pages}
+  agent/      loop · executor · context · compaction · budget · inbox · subagent · run_context
+  llm/        base · profiles · models · openai_compat · anthropic · native · mock · replay · resilient · doctor
+  tools/      base · schema · registry · fs · shell · extra · web · demo · mcp · sandbox · confine · egress · regex_search
+  net/        client（唯一出站入口）· search · exfil · extract · backends/{deepseek,bocha,searxng,direct}
+  policy/     permissions · bash_analyzer · sensitive · hooks · approvals · fatigue · supply_chain
+  runtime/    manager · store · session · state · workspace · retry · scheduler · dispatch · capabilities
+  observe/    trace · replay · evals · export
+  server/     FastAPI：REST + SSE（Last-Event-ID 续传）· exposure（serve 的网络暴露判定）
+  web/        Agent 控制台（原生 ES 模块，无构建步骤）：app · lib/{api,dom,icons,meta,ui} · views/{session,timeline,inspector,pages,settings}
   cli.py · config.py · prompts.py · types.py · events.py · cancel.py
 ```
 
