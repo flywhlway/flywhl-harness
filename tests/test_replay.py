@@ -8,6 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from pathlib import Path
+
+import pytest
 
 from flywhl_harness import ScriptedProvider, Store
 from flywhl_harness.llm.base import StreamEvent
@@ -168,3 +171,146 @@ async def test_recording_keeps_only_what_replay_needs(ws):
     settings = h.store.get_run(res.run_id).config["replay"]
     assert settings["verify"] is True and settings["context_window"] == h.model_info.context_window
     assert "不该出现在轨迹里" not in json.dumps(settings, ensure_ascii=False)
+
+
+async def test_changed_context_with_the_same_tool_sequence_is_reported_as_divergence(ws):
+    """回归：模型输出取自录制，工具序列和最终答案几乎总相同，分叉只能靠上下文指纹发现。
+
+    页面曾经只看 same_tool_sequence 和 same_final_text，这种情况会报“回放一致”。
+    """
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    traj = json.loads(dumps(export_trajectory(h.store, res.run_id)))
+    traj["session"]["system_prompt"] += "\n（改过的系统提示词）"
+    rep = await replay_trajectory(traj, keep_workspace=False)
+    assert rep.same_tool_sequence and rep.same_final_text
+    assert rep.divergence["step"] == 0 and not rep.deterministic
+    assert rep.notes == ["第 1 次模型调用的上下文与录制时不一致：harness 行为发生了变化"]
+
+
+async def test_workspace_copy_is_removed_when_not_kept_or_when_replay_fails(ws, tmp_path, monkeypatch):
+    """回放在工作区的临时副本里进行。页面上的回放不需要副本；出错时调用方拿不到路径，也必须当场删掉。"""
+    import tempfile
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    (ws / "a.txt").write_text("1\n")
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    traj = json.loads(dumps(export_trajectory(h.store, res.run_id)))
+
+    kept = await replay_trajectory(traj)
+    assert kept.workspace and (Path(kept.workspace) / "a.txt").is_file(), "默认保留副本，CLI 与基准据此检查文件"
+    shutil.rmtree(kept.workspace)
+
+    rep = await replay_trajectory(traj, keep_workspace=False)
+    assert rep.deterministic and rep.workspace == ""
+    assert not list(scratch.iterdir())
+
+    broken = {**traj, "session": {**traj["session"], "tools": 5}}   # 复制完工作区之后才会出错
+    with pytest.raises(TypeError):
+        await replay_trajectory(broken)
+    assert not list(scratch.iterdir())
+
+
+async def test_replay_endpoint_returns_the_report_and_leaves_no_copy(ws, tmp_path, monkeypatch):
+    import tempfile
+
+    import httpx
+
+    from flywhl_harness.server.app import create_app
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    h = make_harness(ws, [call("ls", path="."), "看完了。"])
+    res = await h.run("看看目录")
+    app = create_app(h, auto_recover=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765") as c:
+        r = await c.post(f"/api/runs/{res.run_id}/replay", json={})
+    assert r.status_code == 200
+    rep = r.json()
+    assert rep["deterministic"] is True and rep["original_tools"] == rep["replay_tools"] == ["ls"]
+    assert rep["workspace"] == "" and not list(scratch.iterdir())
+
+
+# ---------------------------------------------------------------------- 联网工具
+async def _web_run(ws):
+    import httpx
+
+    from .webkit import DS_FETCH, DS_SEARCH, Net, ds_search, fetch_call, fixture, make_web_harness, search_call
+
+    net = Net().on("POST", DS_SEARCH, ds_search()).on("POST", DS_FETCH, httpx.Response(200, json=fixture("deepseek", "fetch")))
+    h = make_web_harness(ws, [search_call("httpx"), fetch_call("https://pypi.org/project/httpx/"), "答案"], net,
+                         web__default="fetch")
+    res = await h.run("httpx 最新版本")
+    assert res.status == "completed"
+    return h, net, res, search_call
+
+
+async def test_web_runs_replay_deterministically_without_touching_the_network(ws):
+    from flywhl_harness import HarnessConfig
+
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    assert_same(await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools))
+    # 回放的机器没开联网：工具规格是静态的，从录制重建，指纹照样一致
+    assert_same(await replay_run(h.store, res.run_id, config=HarnessConfig.load(workspace=str(ws))))
+    assert len(net.requests) == sent
+    rec = export_trajectory(h.store, res.run_id)
+    assert rec["run"]["config"]["replay"]["web"] == {"capability": "fetch", "max_searches_per_run": 60,
+                                                     "max_fetches_per_run": 30}
+
+
+async def test_tightened_web_session_replays_deterministically(ws):
+    """开工前 fetch、跑之前收紧为 search：录制时两个工具规格都发给了模型，读取被执行门拒绝；回放要原样重现。"""
+    from .webkit import DS_SEARCH, Net, ds_search, fetch_call, make_web_harness, search_call, tool_results
+
+    net = Net().on("POST", DS_SEARCH, ds_search())
+    h = make_web_harness(ws, [search_call("httpx"), fetch_call("https://pypi.org/project/httpx/"), "答案"], net,
+                         web__default="fetch")
+    s = h.create_session("t")
+    h.set_capabilities(s.id, "search")
+    res = await h.run("httpx 最新版本", session_id=s.id)
+    assert res.status == "completed"
+    assert tool_results(res.events, "web_fetch")[0]["status"] == "denied"
+    sent = len(net.requests)
+    assert_same(await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools))
+    assert len(net.requests) == sent   # 回放不联网
+
+
+def _echo_last_tool(req):
+    return next(m.text for m in reversed(req.messages) if m.role == "tool")
+
+
+def _live_search(query: str) -> dict:
+    # 显式 id：脚本模型按请求序号编号，分叉后会和录制里的编号撞上（真实模型的编号不会）
+    return {"tool_calls": [{"id": "live_1", "name": "web_search", "args": {"query": query}}]}
+
+
+async def test_forked_web_calls_dry_run_unless_recorded_or_allowed(ws):
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    new = ScriptedProvider(["-", _live_search("别的查询"), _echo_last_tool])
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=new, fork_at=1)
+    assert rep.final_text.startswith("[dry-run] web_search") and "--allow-web" in rep.final_text
+    assert len(net.requests) == sent
+
+    same = ScriptedProvider(["-", _live_search("httpx"), _echo_last_tool])   # 与录制同参数：复用录制结果
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=same, fork_at=1)
+    assert rep.final_text.startswith("[联网搜索结果") and len(net.requests) == sent
+
+    allowed = ScriptedProvider(["-", _live_search("别的查询"), _echo_last_tool])
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=allowed, fork_at=1, allow_web=True)
+    assert rep.final_text.startswith("[联网搜索结果") and len(net.requests) == sent + 1
+
+
+async def test_forked_live_web_calls_still_go_through_fetch_scope(ws):
+    h, net, res, _ = await _web_run(ws)
+    sent = len(net.requests)
+    unseen = {"tool_calls": [{"id": "live_2", "name": "web_fetch", "args": {"url": "https://unseen.example/?d=1"}}]}
+    h.config.web.fetch_scope = "cited"
+    rep = await replay_run(h.store, res.run_id, config=h.config, base_tools=h.tools, live=ScriptedProvider(["-", unseen, _echo_last_tool]),
+                           fork_at=1, allow_web=True)
+    assert "fetch_scope = cited" in rep.final_text and len(net.requests) == sent

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 
+import pytest
+
 from flywhl_harness import HookEvent, ScriptedProvider, Store
 from flywhl_harness.events import E
 from flywhl_harness.llm.base import ErrorKind, ProviderError
@@ -156,7 +158,12 @@ async def test_fenced_worker_does_not_touch_the_new_owners_run(ws, tmp_path):
     a.tools.get("send_notification").latency = 2
     s = a.create_session("t")
     run = await a.start_run(s.id, "发通知")
-    await asyncio.sleep(0.3)  # 通知请求已发出，正在等回包
+    for _ in range(3000):      # 等通知请求发出：固定睡一段时间在机器忙时不够，接管时事件还在途，下面的断言就比错了
+        if any(e.type == E.TOOL_UPDATE for e in a.store.list_events(run.id)):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("通知一直没有发出")
     b = Store(db)              # 另一个 Worker 接管（模拟：心跳过期后的 interrupted → queued → running）
     for to, kw in (("interrupted", {}), ("queued", {}), ("running", {"worker_id": "w-new"})):
         a.state.__class__(b).transition(run.id, to, **kw)

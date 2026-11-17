@@ -22,7 +22,7 @@ from flywhl_harness.llm.base import Provider
 from flywhl_harness.observe.trace import dumps, export_trajectory
 
 from .common import Ledger, append_jsonl, read_jsonl
-from .taskset import Task, load_tasks, prepare, render_prompt, run_check, served
+from .taskset import Task, answers_hidden, load_tasks, prepare, render_prompt, run_check, served
 
 IDENTITY = {"GIT_AUTHOR_NAME": "bench", "GIT_AUTHOR_EMAIL": "bench@example.invalid",
             "GIT_COMMITTER_NAME": "bench", "GIT_COMMITTER_EMAIL": "bench@example.invalid"}
@@ -87,19 +87,20 @@ async def run_trial(task: Task, config_name: str, trial: int, plan: dict[str, An
             h = Harness(cfg, store=Store(base / "harness.db", durability=cfg.durability), **kw)
             started = time.monotonic()
             timed_out = False
-            async with h:
-                s = h.create_session(task.title)
-                run = await h.start_run(s.id, render_prompt(task, port=port, home=home))
-                try:
-                    async with asyncio.timeout(q2["timeout_seconds"]):
+            with answers_hidden(task.dir.parent):
+                async with h:
+                    s = h.create_session(task.title)
+                    run = await h.start_run(s.id, render_prompt(task, port=port, home=home))
+                    try:
+                        async with asyncio.timeout(q2["timeout_seconds"]):
+                            rec = await h.wait(run.id)
+                    except TimeoutError:
+                        timed_out = True
+                        await h.cancel(run.id, "超过基准的墙钟上限", by="bench")
                         rec = await h.wait(run.id)
-                except TimeoutError:
-                    timed_out = True
-                    await h.cancel(run.id, "超过基准的墙钟上限", by="bench")
-                    rec = await h.wait(run.id)
-                seconds = round(time.monotonic() - started, 2)
-                traj = json.loads(dumps(export_trajectory(h.store, run.id)))
-                events = h.store.list_events(run.id)
+                    seconds = round(time.monotonic() - started, 2)
+                    traj = json.loads(dumps(export_trajectory(h.store, run.id)))
+                    events = h.store.list_events(run.id)
             passed, note = run_check(task, ws, home=home, port=port)
     finally:
         shutil.rmtree(base, ignore_errors=True)

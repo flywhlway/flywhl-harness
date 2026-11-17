@@ -2,6 +2,8 @@
 # 加载顺序：默认值 → ~/.flywhl/config.toml → flywhl.toml → 环境变量（FLYWHL_*）→ 命令行参数。未知字段会直接报错。
 # 启动目录的配置可能来自不可信仓库：base_url、verify_command、allow 规则、hooks、mcp_servers 等设置要先信任才生效
 # （终端里逐项确认，或 flywhl --trust）；-c 指定的文件与 ~/.flywhl/config.toml 视为可信。
+# 工作区信任另外算：没信任过的工作区里，AGENTS.md 和读到的文件都算不可信内容，之后的写操作要人确认。
+# trust_workspace = true 信任所有工作区，只能写在用户配置或 -c 文件里，这个文件里写的会被丢弃。
 
 # 模型写成 "<供应商>:<模型>"。供应商：deepseek | dashscope | kimi | zhipu | minimax | openrouter | openai | ollama | anthropic | mock
 # 不填 model 时按 provider 选择；provider = "auto" 按 DeepSeek → Anthropic → OpenAI → 百炼 → Kimi → 智谱 → MiniMax → OpenRouter
@@ -51,6 +53,38 @@ max_tool_calls = 200
 soft_ratio = 0.8
 wrap_up_on_exhaust = true
 
+# 联网工具 web_search / web_fetch。默认关闭：不注册工具，请求与以前完全一样。
+# 这个文件（项目配置）里的 [web] 只能收紧：enabled、native 只能写 false，default、fetch_scope 只能更严，上限只能调低，
+# deny_domains 只增不减；backends、fetch_backend、fetch_allow、[web.backend.*] 一律丢弃，只认 ~/.flywhl/config.toml 或 -c 文件
+[web]
+enabled = false
+default = "off"                   # 新会话默认能力：off | search | fetch，会话开工前可以改，开工后只能收紧
+backends = ["deepseek"]           # 搜索后端，按顺序故障转移：deepseek | bocha | searxng
+fetch_backend = "deepseek"        # deepseek（服务端抓取）| direct（本机直连，经出站核验）
+fetch_scope = "ask"               # cited：只读出现过的网址 | ask：其他网址要确认 | public：任意公网网址
+# fetch_allow = ["docs.python.org", "*.readthedocs.io"]   # 不用确认就能读的主机，写法同 permissions.network_allow
+# deny_domains = ["example-content-farm.com"]           # 搜索结果过滤 + 禁止读取，含子域名
+max_searches_per_run = 60
+max_fetches_per_run = 30
+max_results = 8                   # 单次搜索最多返回几条
+result_chars = 6000               # 单次搜索交给模型的总字符数
+fetch_chars = 20000               # 单页正文交给模型的字符数
+cache_ttl = 600                   # 同会话同参数的搜索结果缓存秒数，0 关闭
+# native = true                   # 改用模型供应商自带的搜索（目前只有 Anthropic 官方 API 的 claude- 系列确认可用），主模型不适用时照常用内置工具
+
+# 后端选项：密钥只写环境变量名；price_per_call 是美元 / 次，计入 max_cost_usd
+# [web.backend.deepseek]
+# api_key_env = "DEEPSEEK_API_KEY"   # 默认就是它，与模型共用余额
+# price_per_call = 0.00075
+# send_question = false              # true 时把任务原文作为 ori_question 一起发给 DeepSeek 搜索
+# min_rerank_score = 1.0             # 低于这个质量分（0–3）的结果丢掉
+# [web.backend.bocha]
+# api_key_env = "BOCHA_API_KEY"
+# price_per_call = 0.0045            # 按你的套餐填写；不填时按 0 计，设置页会提示
+# [web.backend.searxng]
+# endpoint = "https://searx.internal.example/search"
+# allow_private = true               # 部署在内网时写明：只对这一个主机放行内网地址和 http
+
 [loop_guard]
 warn_repeats = 3
 stop_repeats = 5
@@ -66,6 +100,7 @@ sandbox = "auto"                  # auto（探测，用不了时拒绝执行）|
                                   # off 只在用户配置、-c 指定的文件里生效，项目配置写的会被丢弃
 sandbox_network = "auto"          # auto（沙箱开着时是 allowlist）| allow | deny | allowlist；后两档要求开启沙箱，否则 bash 拒绝执行
                                   # deny 禁止一切对外连接（含回环地址、DNS 查询与本机 Unix 套接字）
+                                  # allow 只在用户配置、-c 指定的文件里生效，项目配置写的会被丢弃
 # network_allow = ["pypi.org", "files.pythonhosted.org", "*.github.com"]   # allowlist 时经本机代理只放行这些主机
 # unix_sockets = ["/var/run/postgresql/.s.PGSQL.5432"]   # 沙箱里放行的本机 Unix 套接字（不能在工作区、临时目录里）；默认只放行 DNS，docker.sock、ssh-agent 都连不上
 # require_pinned = true          # hook / MCP 经 npx、uvx、docker run 临时拉取的包必须锁到确切版本（镜像带 @sha256:），否则拒绝启动

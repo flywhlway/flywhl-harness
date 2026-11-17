@@ -125,7 +125,8 @@ def bash(command: str) -> dict:
 async def stage_default(paths: Paths, r: Report, args: argparse.Namespace) -> None:
     """什么配置都没有。"""
     port = serve()
-    direct = (f"""{sys.executable} -I -S -c "import socket; socket.create_connection(('127.0.0.1', {port}), 3); print('CONNECTED')" 2>&1""")
+    # 判定词运行时才拼出来：Python 3.13 起报错时会打印 -c 的源码，写成字面量时连不上也算命中
+    direct = (f"""{sys.executable} -I -S -c "import socket; socket.create_connection(('127.0.0.1', {port}), 3); print('CONN' + 'ECTED')" 2>&1""")
     read, plain, written, outside, proxied, raw = await drive(paths, [
         bash("sh read_secret.sh"), bash("sh read_plain.sh"), bash("echo in > in.txt && cat in.txt"),
         bash(f'touch "{paths.outside}" 2>&1'), bash("curl -s -m 10 http://example.com/"), bash(direct)])

@@ -18,14 +18,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator
 
 from .._utils import clip, now, short_hash
 from ..cancel import RunCancelled
 from ..events import E, Event
+from ..policy.approvals import OUTSIDE_BY
 from ..policy.hooks import HookEvent, HookInput
-from ..policy.permissions import Decision, grant_for, strictest
+from ..policy.permissions import Decision, Mode, PermissionResult, grant_for, strictest
 from ..runtime.workspace import CredentialPath, PathEscape
 from ..tools.base import Effect, Tool, ToolContext, ToolResult, TransientToolError
 from ..tools.schema import format_errors, validate
@@ -184,8 +185,12 @@ class ToolExecutor:
                 publish(E.NOTICE, {"level": "info", "code": "recover_reexecute",
                                    "text": f"{call.name} 结果未知，但它是只读/幂等操作，将用同一幂等键重新执行"})
 
+        # ---- 会话能力位：联网关掉了就是“不存在”，不是“要审批”，所以在权限判定之前拒绝 ----
+        if tool.egress and (denied := self._capability_denied(tool)) is not None:
+            return done(ToolResult.error(denied), "denied")
+
         # ---- 权限 + PreToolUse hooks ----
-        perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+        perm = self._evaluate(tool, args, publish)
         decision, reason = perm.decision, perm.reason
         hook_asked = False
         if rc.hooks.has(HookEvent.PRE_TOOL_USE):
@@ -197,7 +202,7 @@ class ToolExecutor:
                 if errs:
                     return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                 args = new_args
-                perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 改写后必须重新判定
+                perm = self._evaluate(tool, args)  # 改写后必须重新判定
                 decision, reason = perm.decision, perm.reason
             if out.decision in ("allow", "ask", "deny"):
                 hook_asked = out.decision == "ask"      # 守卫要人确认：无人值守时也不按规则自动批准
@@ -213,9 +218,15 @@ class ToolExecutor:
         if decision == Decision.DENY:
             return done(ToolResult.error(f"权限拒绝：{reason}。请换一种不需要该权限的方式完成，或向用户说明需要什么权限。"), "denied")
         if decision == Decision.ASK:
-            if perm.human_only and getattr(rc.approvals, "on_ask", "wait") != "wait":
-                return done(ToolResult.error(f"权限拒绝：{reason}。这类操作必须由人当场确认，无人值守时一律拒绝。"
-                                             "请换一种在沙箱里能完成的方式，或向用户说明需要什么权限。"), "denied")
+            on_ask = getattr(rc.approvals, "on_ask", "wait")
+            outside_rule, outside_why = None, ""
+            if perm.human_only and on_ask != "wait":
+                if on_ask == "deny" and not hook_asked:   # --yes 放行不了人工门；守卫要人确认时也不按模式放行
+                    outside_rule, outside_why = rc.permissions.outside_approval(tool, args, perm, tainted=rc.tainted)
+                if outside_rule is None:
+                    why = f"（{outside_why}）" if outside_why else ""
+                    return done(ToolResult.error(f"权限拒绝：{reason}。这类操作必须由人当场确认，无人值守时一律拒绝{why}。"
+                                                 "请换一种在沙箱里能完成的方式，或向用户说明需要什么权限。"), "denied")
             preview = tool.preview(args, ctx)
             grant = str(grant_for(tool, args))      # “本会话始终允许”会添加的规则：审批卡片上展示，也是疲劳统计的键
             fatigue = getattr(rc.approvals, "fatigue", None)
@@ -230,10 +241,14 @@ class ToolExecutor:
                 on_created=lambda rec: self._on_approval_created(rec, publish, perm, preview,
                                                                  None if perm.human_only else grant, fatigue),
                 auto_rule=str(auto_rule) if auto_rule else None, auto_why=auto_why,
+                outside_rule=outside_rule.pattern if outside_rule else None,
             )
             await self._set_status("running", "审批已处理")
             publish(E.APPROVAL_RESOLVED, {"call_id": call.id, "approved": dec.approved, "by": dec.by,
                                           "reason": dec.reason, "remember": dec.remember})
+            if dec.by == OUTSIDE_BY:
+                publish(E.NOTICE, {"level": "warn", "code": "approve_outside",
+                                   "text": f"沙箱外执行：{tool.describe_call(args)}（--approve-outside {outside_rule.pattern}）"})
             if fatigue is not None:
                 for text in fatigue.observe(rc.session_id, approved=dec.approved, by=dec.by, key=grant, risk=perm.risk,
                                             waited=time.monotonic() - asked, remembered=dec.remember):
@@ -250,7 +265,7 @@ class ToolExecutor:
                 if errs:
                     return done(ToolResult.error("审批人修改后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                 args = new_args
-                recheck = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)  # 防 TOCTOU
+                recheck = self._evaluate(tool, args)  # 防 TOCTOU
                 if recheck.decision == Decision.DENY:
                     return done(ToolResult.error(f"修改后的参数被权限策略拒绝：{recheck.reason}"), "denied")
                 if recheck.human_only and not perm.human_only:   # 审批卡上没写的事不算批准过
@@ -267,12 +282,12 @@ class ToolExecutor:
                         if errs:
                             return done(ToolResult.error("PreToolUse hook 改写后的参数未通过校验：\n" + "\n".join(errs)), "invalid")
                         # 审批人看到的是改写之前的参数：改写后的版本同样要过权限策略，命中拒绝（灾难性命令、凭证、deny 规则）就不执行
-                        final = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+                        final = self._evaluate(tool, args)
                         if final.decision == Decision.DENY:
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数被权限策略拒绝：{final.reason}"), "denied")
                         if final.human_only:   # 人批准的是改写之前的那条命令
                             return done(ToolResult.error(f"PreToolUse hook 改写后的参数要过人工门，需要重新申请：{final.reason}"), "denied")
-            ctx.human_approved = perm.human_only
+            ctx.human_approved = perm.human_only   # 过了人工门：人当场确认的，或者人用 --approve-outside 提前写明的
             if dec.remember and not perm.human_only:   # 这一次的确认只管这一次
                 g = grant_for(tool, args)
                 rc.grants.append(g)
@@ -295,6 +310,7 @@ class ToolExecutor:
         approval_wait_ms = int((t_exec - t0) * 1000)
         result, status = await self._invoke(tool, args, ctx)
         exec_ms = int((time.monotonic() - t_exec) * 1000)
+        self._settle_web(call, result)
 
         # ---- PostToolUse hooks ----
         if rc.hooks.has(HookEvent.POST_TOOL_USE):
@@ -312,15 +328,72 @@ class ToolExecutor:
 
         # ---- 外置大结果 + 污点 ----
         result = rc.context.shape_tool_result(result, rc.store.blobs, rc.scope)
-        if (result.tainted or tool.untrusted_for(args)) and not rc.tainted:
+        foreign = tool.reads_workspace and not rc.workspace_trusted   # 没信任过的工作区：文件是仓库作者写的，不是用户写的
+        if (result.tainted or tool.untrusted_for(args) or foreign) and not rc.tainted:
             rc.tainted = True
             self._persist_session_meta(tainted=True)  # 污点属于会话：暂停恢复、崩溃接管之后依然有效
+            source = "没有信任过的工作区" if foreign else "不可信来源"
             publish(E.NOTICE, {"level": "info", "code": "tainted",
-                               "text": f"{call.name} 的输出来自不可信来源：之后的副作用操作将需要人工确认"})
+                               "text": f"{call.name} 的输出来自{source}：之后的副作用操作将需要人工确认"})
         msg = self._result_msg(call, result, status, exec_ms, snapshot, effect)
         if decision == Decision.ASK:
             msg.details["approval_wait_ms"] = approval_wait_ms  # type: ignore[index]
         return msg
+
+    # ================================================================== 联网工具
+    def _capability_denied(self, tool: Tool) -> str | None:
+        from ..config import web_rank
+        from ..runtime.capabilities import current_web
+
+        cap = current_web(self.rc.store, self.rc.session_id)
+        need = getattr(tool, "web_level", "search")
+        if web_rank(cap) >= web_rank(need):
+            return None
+        now_ = "已关闭联网" if cap == "off" else "只允许联网搜索、不能读取网页"
+        return (f"本会话{now_}，{tool.name} 不可用。联网能力要在开工前选择，开工后只能收紧：需要的话请告诉用户新建会话，"
+                "或者用已有信息继续。")
+
+    def _evaluate(self, tool: Tool, args: dict[str, Any], publish: Any = None) -> PermissionResult:
+        """权限判定，再叠加联网工具自己的范围与外传检查（只收紧：deny 直接拒绝，ask 把放行改成要确认）。"""
+        rc = self.rc
+        perm = rc.permissions.evaluate(tool, args, tainted=rc.tainted, grants=rc.grants)
+        pre = getattr(tool, "precheck", None) if tool.egress else None
+        if pre is None or perm.decision == Decision.DENY:
+            return perm
+        verdict, why, code = pre(args, rc)
+        if verdict == "deny":
+            if code and publish is not None:   # 不带参数：被拦下的正是参数里疑似密钥的那段，通知不能再抄一遍
+                publish(E.NOTICE, {"level": "warn", "code": code, "text": f"{tool.name} 调用被拦截：{why}"})
+            return replace(perm, decision=Decision.DENY, reason=why)
+        if verdict != "ask":
+            return perm
+        if rc.tainted and getattr(rc.approvals, "on_ask", "wait") == "allow":
+            # --yes 自动批准所有 ask。会话读过不可信内容后，没出现过的网址正是注入外传的通道，
+            # 自动批准就等于 fetch_scope = public；没读过不可信内容时照常按 --yes 放行
+            return replace(perm, decision=Decision.DENY,
+                           reason=f"{why}。会话读取过不可信内容，--yes 不自动批准这类读取：请先 web_search 找到它，或请用户把网址发过来")
+        if rc.permissions.mode == Mode.BYPASS and perm.decision == Decision.ALLOW:
+            # 完全放行：用户选了“不要停下来问我”，这里和 --yes 同一个口径，自己定、不挂起等人。
+            # 没读过不可信内容时没有注入来源，照常放行；读过之后拒绝并给出路（先搜索），长任务不会卡在一张审批卡上。
+            # 用户自己写的 ask 规则（perm 已是 ASK）照旧问人
+            if not rc.tainted:
+                return perm
+            return replace(perm, decision=Decision.DENY,
+                           reason=f"{why}。会话读取过不可信内容，完全放行模式也不自动放行这类读取（防止提示注入借网址把数据带出去）："
+                                  "请先 web_search 找到它，或请用户把网址发过来")
+        if perm.decision == Decision.ALLOW:
+            return replace(perm, decision=Decision.ASK, reason=why)
+        return perm
+
+    def _settle_web(self, call: ToolCall, result: ToolResult) -> None:
+        """联网工具的记账：按结果里的 ``details["web"]`` 计次数和费用，同时释放并行批里的占位。
+        回放时结果来自录制，按同样的数据记账，预算走向与录制时一致。"""
+        rc = self.rc
+        rc.budget.root().web_inflight.pop(f"{rc.run_id}:{call.id}", None)
+        web = (result.details or {}).get("web")
+        if isinstance(web, dict) and (web.get("counted") or web.get("cost_usd")):
+            rc.budget.charge_web(str(web.get("op") or "search"), counted=bool(web.get("counted")),
+                                 cost_usd=float(web.get("cost_usd") or 0.0))
 
     # ================================================================== 执行：超时 / 取消 / 瞬时重试
     async def _invoke(self, tool: Tool, args: dict[str, Any], ctx: ToolContext) -> tuple[ToolResult, str]:

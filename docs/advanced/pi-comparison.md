@@ -30,7 +30,7 @@ pi-web-ui 已于 2026-05-20 从仓库中移除。分层的方式与 flywhl 相�
 | steering 时机 | 开跑前、每轮工具执行完后、`prepareNextTurn` 之后 | 每轮开头的安全点（工具批次全部完成之后、下一次模型调用之前） |
 | 队列模式 | one-at-a-time / all | `Inbox` 同样支持 `one_at_a_time` 与 `all`（默认 `all`） |
 | 取消 | `AbortSignal` 贯穿 streamFn、transformContext、tool.execute；provider 把 stopReason 标为 aborted | `CancelToken` 协作式传递；流中途取消保留已生成文本并标记 `ABORTED`；不可中断工具有宽限期；运行时先 CAS 到 `cancelling` 决出取消与完成的竞争 |
-| 默认工具集 | read / bash / edit / write（只读组 read / grep / find / ls） | read / write / edit / bash / ls / grep / todo_write / read_ref / search_ref / task（+ 演示工具） |
+| 默认工具集 | read / bash / edit / write（只读组 read / grep / find / ls） | read / write / edit / bash / ls / grep / todo_write / read_ref / search_ref / task（`[web] enabled` 时另有 web_search / web_fetch，默认关闭；+ 演示工具） |
 | 截断 | 2000 行或 50KB；read 保头、bash 保尾，完整输出写临时文件并给出路径 | read：2000 行 / 50KB 保头；bash：400 行 / 30KB 保尾，完整输出写入 `BlobStore` 并给出句柄（`full_output_ref`），用 `read_ref` / `search_ref` 回查 |
 | edit | 支持多处替换，模糊匹配兜底 | 精确匹配；不唯一时报出所有出现行号；`replace_all`；未命中时提示首行在哪些行附近出现（不做模糊替换） |
 | 工具并行 | 默认并行（`Promise.all`），结果按原序发出；`executionMode: "sequential"` 退回串行；同一文件的写入按真实路径串行 | 只有只读工具并行：连续的只读调用组成一批，有界并发（`parallel_tool_limit`）；写工具逐个执行；结果按原序落盘 |
@@ -45,7 +45,7 @@ pi-web-ui 已于 2026-05-20 从仓库中移除。分层的方式与 flywhl 相�
 | 保留量 | keepRecentTokens 20000 | `keep_recent_tokens` 12000（且不超过窗口的 30%；强制压缩时 2000） |
 | 切点 | 绝不在 toolResult 处切 | 相同：优先切在 user 消息，其次 assistant，绝不切在 tool 结果处（`find_cut_index`） |
 | 摘要结构 | Goal / Constraints & Preferences / Progress / Key Decisions / Next Steps / Critical Context + read-files / modified-files；增量更新；作为 `<summary>` user 消息回灌 | 目标 / 约束与偏好 / 进展（已完成、进行中、受阻）/ 关键决策 / 关键上下文 / 下一步；增量更新；另由代码确定性保留原始任务原文、当前 todo、读写文件清单；同样以 `<summary>` user 消息回灌 |
-| 系统提示 | 分节 preamble / `<tools>` / `<rules>` / `<project_context>` / `<skills>` / `<cwd>` | `<rules>` / `<environment>` + `<project_context path>` + `<available_skills>`；工具用法写在工具描述里；会话创建时冻结 |
+| 系统提示 | 分节 preamble / `<tools>` / `<rules>` / `<project_context>` / `<skills>` / `<cwd>` | `<rules>` / `<environment>`；`AGENTS.md`、技能清单放在独立的 `<project-context trust>` 消息里；工具用法写在工具描述里；都在会话创建时冻结 |
 | AGENTS.md | 每个目录 AGENTS.override.md > AGENTS.md > CLAUDE.md，从全局到 cwd 逐级加载 | 每个目录 AGENTS.md > CLAUDE.md，从工作区向上到 git 根，祖先在前，总量上限 32 KiB（UTF-8 字节）；无全局文件 |
 | skills | 只放 name / description / location 清单，模型用 read 读 SKILL.md | 相同（`find_skills`） |
 | 扩展机制 | extension 可订阅数十种事件：tool_call 可 block、context 可替换消息、before_provider_request 可改请求、session_before_compact 可自定义摘要 | 8 个 hook 挂载点；pre_tool_use 可 allow/deny/ask 与改写参数，post_tool_use 可改写结果，stop 可 block，pre_compact 只能追加指令；另有进程外命令 hook（兼容 Claude Code 协议） |
@@ -154,7 +154,7 @@ pi 作者在 2025-11-30 的博客中系统地解释了这些取舍（以下为�
 | start / update / end 的事件命名 | `events.py` |
 | 孤立工具调用补合成结果 | `llm/base.py` 的 `prepare_history` |
 | 输出截断时整批工具调用判失败 | `AgentLoop._body` 的 `StopReason.MAX_TOKENS` 分支 |
-| read 保头、bash 保尾，完整输出外置并给出位置 | `tools/fs.py`（`MAX_LINES`、`MAX_BYTES`）；`tools/shell.py`（`truncate_tail` 与 `full_output_ref`） |
+| read 保头、bash 保尾，完整输出外置并给出位置 | `tools/fs.py`（`MAX_LINES`、`MAX_BYTES`）；`tools/shell.py`（调用 `_utils.py` 的 `truncate_tail`，配合 `full_output_ref`） |
 | 工具结果 content / details 分离 | `tools/base.py` 的 `ToolResult` |
 | 压缩触发公式、切点规则、增量摘要、读写文件清单 | `agent/compaction.py` 的 `find_cut_index`、`Compactor.compact`；`runtime/session.py` 的 `render_summary` |
 | 会话树只追加、分支只移动指针 | `runtime/store.py` 的 `entries.parent_id`；`SessionLog.branch` |

@@ -50,9 +50,13 @@ flywhl 的 MCP 客户端约 250 行，只依赖标准库与 asyncio，实现了 
 
 ```python
 # src/flywhl_harness/tools/mcp.py · MCPClient.start
+launch = self.confinement.enter([self.command, *self.args], self.workspace, {**_clean_env(True), **self.env},
+                                chdir=self.cwd)
+run = await launch.__aenter__()            # 沙箱不可用时报 MCPError，服务器不启动
+# ...
 self.proc = await asyncio.create_subprocess_exec(
-    self.command, *self.args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.DEVNULL, env={**_clean_env(True), **self.env}, cwd=self.cwd,
+    *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.DEVNULL, env=run.env, cwd=self.cwd,
 )
 self._reader = asyncio.create_task(self._read_loop())
 init = await self.request("initialize", {
@@ -64,7 +68,8 @@ await self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 ```
 
 - `PROTOCOL_VERSION = "2025-06-18"`；`capabilities` 为空，表示客户端不提供 sampling、roots 等能力；
-- **环境隔离**：子进程环境取自 `tools/shell.py` 的 `_clean_env(True)`——变量名匹配 `KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH`（不区分大小写）的一律去掉，再叠加配置里的 `env`。服务器需要的凭证必须在配置中显式给出，harness 进程里的 `ANTHROPIC_API_KEY` 之类不会被顺带继承；
+- **系统沙箱**：服务器进程和 `bash` 一样经 `tools/confine.py` 的 `Confinement` 启动，读不到凭证文件，有自己的临时目录与可写目录；网络默认跟随全局，可用 `sandbox_network`、`network_allow` 单独设，`sandbox = "off"` 只在用户配置里有效；
+- **环境隔离**：子进程环境取自 `tools/shell.py` 的 `_clean_env(True)`——变量名匹配 `KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE` 或带 `_PWD`、`_PASS`、`_PAT`、`_DSN` 片段（不区分大小写）、以及取值是带密码 URL 的一律去掉，再叠加配置里的 `env`。服务器需要的凭证必须在配置中显式给出，harness 进程里的 `ANTHROPIC_API_KEY` 之类不会被顺带继承；
 - 一个后台 `_read_loop` 逐行读 stdout，按 `id` 把响应派给 `_pending` 中等待的 future——同一个子进程上可以并发多个请求；
 - 解析失败的行被忽略（服务器往 stdout 打了日志也不至于崩溃）；服务器退出时，所有未完成的 future 被置为 `MCPError`；
 - `stderr` 被丢弃到 `DEVNULL`：调试服务器时看不到它的错误输出，需要临时改为管道或让服务器写日志文件。
@@ -183,7 +188,7 @@ return ToolResult("\n".join(parts) or "(空结果)", is_error=bool(res.get("isEr
 ```python
 # src/flywhl_harness/tools/mcp.py · load_mcp_tools
 for spec in sorted(await c.list_tools(), key=lambda s: s["name"]):  # 排序：保证工具顺序稳定
-    tools.append(MCPTool(c, spec))
+    tools.append(MCPTool(c, spec, trust_annotations=trust, read_only=any(fnmatchcase(spec["name"], p) for p in ro)))
 ```
 
 服务器返回工具的顺序没有保证。工具定义位于请求前缀里，顺序一变，前缀缓存就失效（见 [07 上下文工程](/core/context-engineering)）。`ToolRegistry` 按注册顺序输出，加上这里的排序，同一组服务器每次启动生成相同的工具列表。
@@ -219,7 +224,7 @@ read_only_tools = ["echo"]       # echo 自报的 readOnlyHint 不算数，只�
 rules = ["allow:mcp__demo__echo", "ask:mcp__demo__*"]
 ```
 
-`load_mcp_tools` 识别的键是 `command`、`args`、`env`、`cwd`、`read_only_tools`、`trust_annotations`。服务器子进程的工作目录默认是工作区根，所以 `add_note` 写的 `notes.txt` 出现在工作区里。`env` 叠加在去掉密钥类变量后的环境之上，是给服务器传凭证的唯一途径。
+`load_mcp_tools` 识别的键是 `command`、`args`、`env`、`cwd`、`read_only_tools`、`trust_annotations`，以及沙箱相关的 `sandbox`、`sandbox_network`、`network_allow`（未知键直接报错）。服务器子进程的工作目录默认是工作区根，所以 `add_note` 写的 `notes.txt` 出现在工作区里。`env` 叠加在去掉密钥类变量后的环境之上，是给服务器传凭证的唯一途径。
 
 **第 2 步：确认工具已注册。** `mcp_servers` 会启动子进程，allow 规则会放宽审批，这两项都要先信任这份配置：
 第一次运行时 `flywhl` 逐项列出并询问，也可以加 `--trust`（原因见 [19 安全](/governance/security)）。
@@ -291,7 +296,10 @@ for base in (workspace / ".flywhl" / "skills", workspace / "skills"):
     if not base.is_dir():
         continue
     for skill in sorted(base.glob("*/SKILL.md")):
-        head = skill.read_text(encoding="utf-8", errors="replace")[:2000]
+        text = _read_project_file(skill, root)     # 与 AGENTS.md 同一套读取规则，见下文
+        if text is None:
+            continue
+        head = text[:2000]
         m = re.match(r"^---\s*\n(.*?)\n---", head, re.S)
         meta = dict(re.findall(r"^(\w+):\s*(.+)$", m.group(1), re.M)) if m else {}
         out.append({
@@ -301,7 +309,7 @@ for base in (workspace / ".flywhl" / "skills", workspace / "skills"):
         })
 ```
 
-`build_system_prompt` 把清单渲染为：
+`build_project_context` 把清单渲染为：
 
 ```text
 <available_skills>
@@ -340,7 +348,7 @@ AGENTS.md 是跨工具的项目指令约定。各家实现的共同点是“分�
 
 | 维度 | flywhl（`find_project_context`） | pi | Codex |
 |---|---|---|---|
-| 查找方向 | 从工作区向上，直到 git 根（无 git 则到文件系统根） | 从全局配置到 cwd 逐级加载 | 全局文件 + 从项目根到 cwd |
+| 查找方向 | 从工作区向上，直到 git 根（无 git 则只看工作区本身） | 从全局配置到 cwd 逐级加载 | 全局文件 + 从项目根到 cwd |
 | 每个目录的文件优先级 | `AGENTS.md` > `CLAUDE.md`（只取一个） | `AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` | 支持 override 文件与可配置的后备文件名（以官方文档为准） |
 | 拼接顺序 | 祖先在前，工作区最后 | 全局在前，cwd 最后 | 根在前，越具体越靠后 |
 | 体积上限 | 总计 32 KiB（按 UTF-8 字节计） | 以 pi 仓库为准 | 默认 32 KiB |
@@ -351,14 +359,14 @@ AGENTS.md 是跨工具的项目指令约定。各家实现的共同点是“分�
 for d in [cur, *cur.parents]:
     for name in ("AGENTS.md", "CLAUDE.md"):
         f = d / name
-        if f.is_file():
-            text = f.read_text(encoding="utf-8", errors="replace")
+        text = _read_project_file(f, root)   # 是文件且 _may_load 放行才读；读不了的当作没有
+        if text is not None:
             size = len(text.encode("utf-8"))  # 按字节计：中文一个字 3 字节，按字符数会把上限放大约 3 倍
             if total + size <= max_bytes:
                 found.append((f, text))
                 total += size
             break
-    if (d / ".git").exists():
+    if d == root:
         break
 return list(reversed(found))
 ```
@@ -367,9 +375,9 @@ return list(reversed(found))
 
 1. **超限时保留近的、丢弃远的。** 遍历从工作区开始向上，预算先分给最近的目录；超出上限的祖先文件被跳过（但更远的小文件仍可能被收入）。最后 `reversed` 只是调整拼接顺序。
 2. **上限按 UTF-8 字节计。** 比较的是 `len(text.encode("utf-8"))`，与参数名 `max_bytes` 一致。若按字符数计，中文为主的文件（一个汉字 3 字节）实际能放进约 3 倍的体积；按字节计，32 KiB 大约是一万字的中文。
-3. **不在 git 仓库里时会一直走到文件系统根。** 工作区不是 git 仓库时，用户主目录下的 AGENTS.md 也会被加载——这有时符合预期（相当于全局指令），有时是意外。
+3. **边界是项目本身。** 工作区不在 git 仓库里时只看工作区这一层，上层目录不是这个项目的。符号链接只认项目之内：这些文件不经过权限层，指向项目之外或密钥位置的链接直接跳过，并给出警告。
 
-每个文件以 `<project_context path="...">` 包裹，模型可以知道指令来自哪一层。OpenAI 在《Harness engineering》中的建议值得借鉴：AGENTS.md 只做目录，指向 `docs/` 里的权威文档，而不是把所有规则堆进去——这与 32K 上限是一致的约束。
+每个文件以 `<file path="...">` 包裹，整体放进 `<project-context trust="...">` 消息，模型可以知道指令来自哪一层、工作区有没有被信任过。OpenAI 在《Harness engineering》中的建议值得借鉴：AGENTS.md 只做目录，指向 `docs/` 里的权威文档，而不是把所有规则堆进去——这与 32K 上限是一致的约束。
 
 ## A2A：Agent 找 Agent 协作
 
@@ -431,7 +439,7 @@ class RemoteAgentTool(Tool):
 
 协议让“接入”变便宜，同时也让“引入不可信代码与内容”变便宜：
 
-- **MCP 服务器就是在你机器上运行的代码**（`tools/mcp.py` 模块注释）：审查来源、锁定版本；harness 已去掉密钥类环境变量，配置的 `env` 里也只放该服务器必需的凭证；
+- **MCP 服务器就是在你机器上运行的代码**（`tools/mcp.py` 模块注释）：审查来源、锁定版本；harness 已去掉密钥类环境变量、把 stdio 服务器放进系统沙箱，配置的 `env` 里也只放该服务器必需的凭证；
 - **annotations 是服务器的自我声明**，对不可信服务器不能据此放宽权限；用 `deny:mcp__<server>__*` 或 `ask:` 规则兜底；
 - **工具描述本身也是输入**：恶意服务器可以在描述里写提示注入；描述截断能限制体积，但不能消除风险；
 - **远端 Agent 与开放世界工具的输出是污点**：读入后应升级后续副作用操作的审批级别；

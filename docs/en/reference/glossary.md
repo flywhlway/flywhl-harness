@@ -80,7 +80,7 @@ Terms as these docs use them, with the Chinese term used in the full tutorial an
 | **Workspace** | 工作区 | Where the agent works: files, dependencies, execution environment and metadata |
 | **OS sandbox** | 系统沙箱 | Kernel-enforced confinement: `sandbox-exec` on macOS, bubblewrap on Linux |
 | **Egress allowlist** | 出站白名单 | Hosts commands may reach through the local egress proxy. Empty by default |
-| **Human gate (`outside_sandbox`)** | 人工门 | The separate approval needed to run one command outside the sandbox. No mode, rule or session grant can pass it |
+| **Human gate (`outside_sandbox`)** | 人工门 | The separate approval needed to run one command outside the sandbox, or to write a path the sandbox keeps read-only. No mode, rule or session grant can pass it; in an unattended run only a `flywhl run --approve-outside` pattern can pre-approve a command |
 | **Shadow git** | 影子 git | A separate repository with `GIT_DIR` in the data directory and its work tree on the workspace, used for snapshots and rollback |
 | **Brain / hands / session** | 大脑 / 双手 / 会话 | Model plus harness (stateless), tools and sandbox (replaceable), and the append-only event log (source of truth) |
 

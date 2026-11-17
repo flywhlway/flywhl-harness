@@ -138,7 +138,7 @@ return ToolResult.error(f"工具执行超时（{timeout:.0f}s），已中止。�
 | 工具 | 超时状态 | 给模型的提示 |
 |---|---|---|
 | 只读、本地写 | `timeout` | 缩小范围后重试，或设置更长的超时 |
-| 外部但幂等（如 `send_notification`、`idempotentHint=true` 的 MCP 写工具） | `timeout` | 同上：同参数再调一次不会多出副作用 |
+| 外部但幂等（如 `send_notification`、配置了 `trust_annotations = true` 且声明 `idempotentHint=true` 的 MCP 写工具） | `timeout` | 同上：同参数再调一次不会多出副作用 |
 | 外部且非幂等（如未声明幂等的 MCP 写工具、自定义的付款工具） | `unknown` | 请求可能已经生效，先核实外部状态，不要直接重试 |
 
 `timeout` 的提示鼓励重试，对非幂等的外部调用就是在鼓励重复执行。`tests/test_cancel.py::test_external_timeout_is_unknown_not_plain_timeout`
@@ -177,7 +177,7 @@ except (asyncio.CancelledError, asyncio.TimeoutError):
 
 这条通知只能让服务器停掉还没做的部分，不改变结果状态的判定：非只读、非幂等的 MCP 工具超时依然是 `unknown`。
 另外，harness 的幂等键并不会传给 MCP 服务器；`idempotentHint=true` 表达的是服务器自己的承诺“同参数重复调用没有额外效果”，
-harness 据此才允许它在结果未知时重新执行。
+harness 只在该服务器配置了 `trust_annotations = true` 时采信它，据此才允许它在结果未知时重新执行。
 
 ## 预写 intent 与对账：副作用视角的完整链路
 

@@ -34,7 +34,8 @@ flowchart TB
       RES[resilient.py<br/>retry, breaker, fallback]
       PROV[openai_compat.py, anthropic.py<br/>mock.py, replay.py]
     end
-    TOOLS[tools/<br/>read, write, edit, bash, ls, grep<br/>todo, refs, mcp, demo]
+    TOOLS[tools/<br/>read, write, edit, bash, ls, grep<br/>todo, refs, web, mcp, demo, sandbox]
+    NET[net/<br/>single egress path, search backends]
     OBS[observe/<br/>trace, replay, evals]
 
     Clients --> H
@@ -43,6 +44,7 @@ flowchart TB
     LOOP --> CTX --> SL --> ST
     LOOP --> EX --> PERM & HOOK & APR
     EX --> TOOLS --> WS
+    TOOLS --> NET
     LOOP --> BG
     LOOP --> RES --> PROV
     SUB --> H
@@ -173,7 +175,7 @@ erDiagram
     EVENT { int seq string type json data }
 ```
 
-- **Session.meta** freezes the system prompt, the tool set and the model (version pinned), plus session-level grants and the clearing watermark.
+- **Session.meta** freezes the system prompt, the project context, the tool set and the model (version pinned), plus session-level grants and the clearing watermark.
 - **Entry** is the source of truth for context: a `message` or a `compaction`.
 - **Run** carries `version` (incremented on every transition, for optimistic locking), `attempt`, `heartbeat_at` (the lease) and `checkpoint` (the workspace manifest).
 - **Step** is a write-ahead log for a tool call: `started` is written before the side effect and the result after, so recovery can tell whether it happened.
@@ -190,18 +192,17 @@ src/flywhl_harness/
 +-- events.py            event types
 +-- cancel.py            CancelToken: cooperative cancellation
 +-- config.py            config dataclass tree (flywhl.toml + environment variables)
-+-- prompts.py           system prompt, AGENTS.md, skill list, compaction template
++-- prompts.py           system prompt, project channel (AGENTS.md, skill list), compaction template
 +-- agent/               loop, executor, context, compaction, budget, inbox, subagent, run_context
-+-- llm/                 base, models, openai_compat, anthropic, mock, replay, resilient
-+-- tools/               base, schema, registry, fs, shell, extra, demo, mcp
-+-- policy/              permissions, bash_analyzer, hooks, approvals
-+-- runtime/             manager, store, session, state, workspace, retry, scheduler, dispatch
-+-- observe/             trace, replay, evals
-+-- server/app.py        FastAPI: REST + SSE
-+-- web/                 index.html, app.js, md.js, style.css (no build step)
++-- llm/                 base, profiles, models, openai_compat, anthropic, native, mock, replay, resilient, doctor
++-- tools/               base, schema, registry, fs, shell, extra, web, demo, mcp, sandbox, confine, egress, regex_search
++-- net/                 client (the single egress path), search, exfil, extract, backends/
++-- policy/              permissions, bash_analyzer, sensitive, hooks, approvals, fatigue, supply_chain
++-- runtime/             manager, store, session, state, workspace, retry, scheduler, dispatch, capabilities
++-- observe/             trace, replay, evals, export
++-- server/              app.py (FastAPI: REST + SSE), exposure.py (network exposure checks for serve)
++-- web/                 index.html, app.js, boot.js, md.js, style.css, lib/, views/ (native ES modules, no build step)
 +-- cli.py               the flywhl command
 ```
-
-The directory listing is abridged: `tools/` also holds `confine.py`, `egress.py`, `sandbox.py` and `regex_search.py`, `policy/` holds `fatigue.py`, `sensitive.py` and `supply_chain.py`, `llm/` holds `profiles.py` and `doctor.py`, `observe/` holds `export.py`, and `web/` has `boot.js`, `lib/` and `views/`.
 
 For a suggested reading order of the source, see the [source map](/reference/source-map) (Chinese). Next: [04 The agent loop](/en/core/agent-loop). [Read the full chapter in Chinese](/guide/architecture).

@@ -1,6 +1,6 @@
 {
   "name": "flywhl-harness-docs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Agent Harness 系列教程与 flywhl-harness 源码讲解",
   "type": "module",

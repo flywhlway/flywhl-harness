@@ -7,7 +7,7 @@ English | [简体中文](https://github.com/flywhlway/flywhl-harness/blob/main/R
 
 > **Agent = Model + Harness.** The model does the thinking; the harness does everything else.
 
-flywhl-harness is an Agent Harness written by hand in Python, with no agent framework underneath: about 15,000 lines that implement the
+flywhl-harness is an Agent Harness written by hand in Python, with no agent framework underneath: about 19,000 lines of Python that implement the
 mechanisms a production harness needs as code you can run, test and replace. It comes with a web console and a 30-chapter tutorial.
 
 It is meant for two kinds of reader: engineers who want to see how a harness works all the way down, and developers who want a local
@@ -20,13 +20,14 @@ coding agent that can open an untrusted repository without being handed the keys
 
 | Area | What you get |
 |---|---|
-| Loop | Async-generator main loop with explicit phases; steering and queued follow-ups while a run is active |
+| Loop | Async-generator main loop with explicit phases; steering and queued follow-ups while a run is active; output cut off by the length limit is continued or redone in smaller steps, with the run's output limit raised as needed |
 | Models | Unified messages and stream events; provider profiles for DeepSeek, Alibaba Bailian, Kimi, Zhipu, MiniMax, OpenRouter, Ollama and Anthropic; error classification, jittered retries, circuit breaking, cross-provider fallback |
 | Tools | Three side-effect levels (read / write / external); concurrent reads, serialized writes, results returned in call order; oversized results moved behind handles; MCP client |
+| Web | `web_search` / `web_fetch`, off by default; each session picks its level before it starts and can only tighten it; DeepSeek, Bocha and SearXNG with failover; fetch scope matched on full URLs (sequential paging is the one relaxation) plus an exfiltration check; a single outbound HTTP path that allows public addresses only and pins the vetted IP; counts and cost go into the budget; optional vendor-side search for Anthropic models |
 | Context | Context usage estimates, clearing of stale tool results, summary compaction that never splits a tool call from its result and always keeps the original task |
-| State | Session / Entry / Run / Step / Event model on SQLite WAL; branching session tree; append-only history |
+| State | Session / Entry / Run / Step / Event model on SQLite WAL, synced for power-loss durability by default (`durability = "full"`); branching session tree; append-only history |
 | Lifecycle | 14-state run machine with compare-and-swap transitions; cooperative cancellation; pause and resume; heartbeat leases and crash takeover, so a `kill -9` still gives exactly-once external side effects |
-| Policy | Four permission modes; deny > ask > allow rules; bash risk analysis; credential locations denied in every mode; taint tracking; hooks compatible with the Claude Code protocol; durable human approval with diff previews |
+| Policy | Four permission modes; deny > ask > allow rules; bash risk analysis; credential locations denied in every mode; workspace trust and taint tracking; a separate human gate for running outside the sandbox; hooks compatible with the Claude Code protocol; durable human approval with diff previews |
 | Isolation | Default-on OS sandbox with an egress allowlist; path confinement; shadow-git snapshots and rollback; secrets stripped from child processes |
 | Multi-agent | Subagents with isolated context and a structured return contract; DAG scheduling with concurrency quotas |
 | Measurement | Trajectory export with OTel GenAI-style spans; deterministic replay and counterfactual forks; evaluation with Wilson intervals and McNemar tests |
@@ -61,6 +62,8 @@ For Anthropic's official SDK, install the extra with `pipx install 'flywhl-harne
 `--model anthropic:claude-opus-5-5`.
 
 The access token is on by default, even on loopback. It is stored in `~/.flywhl/server_token` and survives restarts.
+The first run in a directory asks once whether you trust the workspace. Saying no still works; writes and external actions after the
+agent has read files then need a person. `--trust` skips the question.
 
 ## Default security posture
 
@@ -75,6 +78,7 @@ The goal is that opening an untrusted repository is safe with no configuration. 
   blocked call names the host and how to allow it.
 - Local IPC that would bypass the sandbox: keychain, clipboard, `open`, launchd, Unix sockets.
 - A repository's own config turning any of this off. Only your user config, a file passed with `-c`, or `--sandbox off` can do that.
+- A repository's `AGENTS.md` gaining the authority of the system prompt. Project files run in a separate labelled message, and until you trust the workspace, what the agent reads there taints the session, so later writes need a person. The terminal asks once, `--trust` records it, and non-interactive runs stay untrusted.
 
 If no sandbox is available, the harness refuses to run commands. It does not quietly fall back.
 
@@ -92,12 +96,14 @@ flywhl chat --net-allow pypi.org --net-allow files.pythonhosted.org   # let the 
 ```
 
 Commands that need your credentials (`git push` over SSH, `gh`, `kubectl`) fail in the sandbox. Run them in your own terminal, or let the
-model request `outside_sandbox: true`, a separate human gate that always needs a person: `auto_approve`, rules and session grants cannot
-pass it, and unattended runs are refused. `.git/hooks` and `.git/config` are read-only in the sandbox, so `git add` and `git commit` work
-while `git config`, `git remote add` and `git push -u` do not.
+model request `outside_sandbox: true`, a separate human gate: `--yes`, `auto_approve`, rules and session grants cannot pass it. Unattended
+runs refuse it unless you name the command up front with `flywhl run --approve-outside '<pattern>'`. A command a person approved, on the
+spot or by pattern, keeps `SSH_AUTH_SOCK` so `git push` can reach your ssh-agent; tokens such as `GH_TOKEN` are still stripped.
+`.git/hooks` and `.git/config` are read-only in the sandbox, so `git add` and `git commit` work while `git config`, `git remote add` and
+`git push -u` do not.
 
 Details: [workspace and sandbox](https://flywhlway.github.io/flywhl-harness/en/governance/workspace-sandbox) ·
-[behavior changes in 0.2.0](https://github.com/flywhlway/flywhl-harness/blob/main/CHANGELOG.md)
+[behavior changes by version](https://github.com/flywhlway/flywhl-harness/blob/main/CHANGELOG.md)
 
 ## Use as a library
 
@@ -133,9 +139,10 @@ should not be exposed beyond loopback.
 
 - CI runs the offline suite on Linux (Python 3.11–3.13) and macOS, runs the sandbox tests for real on both, and installs the wheel into a
   clean environment to verify the sandbox boundaries end to end.
-- 33 live scenarios against real models live in `tests/live`. They cost money and need keys, so they run outside CI, in a disposable container.
-- Open security gaps are listed rather than hidden. Workspace files are not yet a taint source, and project instruction files still reach
-  the system prompt. See the [security chapter](https://flywhlway.github.io/flywhl-harness/en/governance/security) and the
+- 38 live scenarios against real models live in `tests/live`, including the web tools. They cost money and need keys, so they run outside CI, in a disposable container.
+- Open security gaps are listed rather than hidden. In a workspace you have trusted, outside content it holds (an exported issue, say) does
+  not count as tainted; trust is bound to the path, not the content; and the OS sandbox shares the host kernel. See the
+  [security chapter](https://flywhlway.github.io/flywhl-harness/en/governance/security) and the
   [readiness review](https://github.com/flywhlway/flywhl-harness/blob/main/docs/quality-audit/release-readiness.md).
 - The [first benchmark](https://flywhlway.github.io/flywhl-harness/en/benchmark/) covers 5 models and 30 small tasks at one commit. It is evidence for the harness mechanisms, not a claim about task success rates in real work.
 

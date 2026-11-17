@@ -3,7 +3,7 @@ import { api } from "../lib/api.js";
 import { $, $$, copyText, debounce, esc, fmt, h, store } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { RUN_STATUS, TERMINAL, eventGroup, statusBadge } from "../lib/meta.js";
-import { confirmDialog, toast } from "../lib/ui.js";
+import { confirmDialog, dialog, toast } from "../lib/ui.js";
 
 const TABS = [
   { id: "overview", label: "概览", icon: "activity" },
@@ -75,6 +75,34 @@ function meter(label, val, max, { text, tone, marks = [] } = {}) {
     <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="${esc(label)}"><i class="${cls}" style="width:${pct}%"></i>${m}</div></div>`;
 }
 
+const clipText = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
+const tokText = (u) => `${fmt.k(fmt.tokIn(u))} 入${u.cache_read_tokens ? `（缓存 ${fmt.k(u.cache_read_tokens)}）` : ""} · ${fmt.k(u.output_tokens)} 出`;
+
+/** 一次运行的计数。取值顺序：实时 usage 事件 → result（结束时写入）→ checkpoint.budget（每轮结束写入，运行中也有，
+ *  旧版本留下的 Run 只有它记了工具次数）。实时 usage 只有页面开着时才收得到，运行结束后才打开时退回到落盘的数据。 */
+function runCounts(r, live) {
+  const u = live || {};
+  const res = r?.result || {};
+  const ck = r?.checkpoint?.budget || {};
+  const pick = (k) => u[k] ?? res[k] ?? ck[k];
+  const usage = u.usage || (fmt.tokTotal(r?.usage) ? r.usage : ck.usage) || {};
+  return {
+    turns: Number(pick("turns") || 0), tools: Number(pick("tool_calls") || 0),
+    searches: Number(pick("web_searches") || 0), fetches: Number(pick("web_fetches") || 0),
+    toolCost: Number(pick("tool_cost_usd") || 0), web: pick("web_searches") != null, usage,
+  };
+}
+
+function addCounts(a, b) {
+  const sum = (k) => (a.usage[k] || 0) + (b.usage[k] || 0);
+  return {
+    turns: a.turns + b.turns, tools: a.tools + b.tools, searches: a.searches + b.searches, fetches: a.fetches + b.fetches,
+    toolCost: a.toolCost + b.toolCost, web: a.web || b.web,
+    usage: { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_read_tokens: sum("cache_read_tokens"),
+             cache_write_tokens: sum("cache_write_tokens"), cost_usd: sum("cost_usd") },
+  };
+}
+
 const FSM = {
   created: [6, 8], queued: [6, 40], running: [92, 40], waiting_human: [92, 8], paused: [6, 98], interrupted: [92, 98],
   cancelling: [92, 156], completed: [214, 8], incomplete: [214, 32], failed: [214, 56], budget_exhausted: [214, 80],
@@ -118,15 +146,48 @@ function renderOverview(p, V, app) {
   const r = V.run;
   if (!V.sid) { p.innerHTML = emptyHint("尚未开始", "发送第一条任务后，这里会实时显示运行状态、预算与状态流转。"); return; }
   if (r && V.trailFor !== r.id && !V.running) loadTrail(V).then((ok) => ok && renderOverview(p, V, app));
-  const u = V.usage || {};
-  const usage = u.usage || r?.usage || {};
-  const budget = app.info?.budget || {};
+  // 实时 usage 事件只有页面开着时才收得到。运行结束后才打开、或运行中途打开时，退回到落盘的数据：
+  // result（结束时写入）→ checkpoint.budget（每轮结束写入，运行中也有，旧版本留下的 Run 只有它记了工具次数）
+  // 实时 usage 只属于它到达时正在看的那次运行：换了运行（新任务、重试）之后不能再拿来顶替
+  const u = (V.usage && V.usageFor === r?.id && V.usage) || {};
+  const c = runCounts(r, u);
+  const usage = c.usage;
+  // 上限取这次运行开跑时的配置（落在 run.config.replay 里），不取服务现在的配置：改过上限之后，旧运行的分母不能跟着变
+  const replay = r?.config?.replay || {};
+  const rb = { ...(app.info?.budget || {}), ...(replay.budget || {}) };
+  const rw = replay.web || {};
   const visited = new Set(V.trail.flatMap((x) => [x.from, x.to]));
   const last = V.trail[V.trail.length - 1];
   const runs = V.detail?.runs || [];
   const tokens = fmt.tokTotal(usage);
-  const maxTok = u.max_total_tokens || budget.max_total_tokens || 0;
-  const maxCost = u.max_cost_usd || budget.max_cost_usd || 0;
+  const maxTok = u.max_total_tokens || rb.max_total_tokens || 0;
+  const maxCost = u.max_cost_usd || rb.max_cost_usd || 0;
+  const webCap = V.detail?.session?.meta?.capabilities?.web || "off";
+  const webOn = webCap !== "off" || c.web;
+  const lim = app.info?.capabilities?.web?.limits || {};
+  const modelCost = Number(usage.cost_usd || 0);
+  const webMeters = webOn ? `
+      ${meter("联网搜索", c.searches, u.max_web_searches ?? rw.max_searches_per_run ?? lim.searches)}
+      ${webCap === "fetch" || c.fetches ? meter("网页读取", c.fetches, u.max_web_fetches ?? rw.max_fetches_per_run ?? lim.fetches) : ""}` : "";
+  const costText = c.toolCost ? `模型 ${fmt.money(modelCost)} + 联网 ${fmt.money(c.toolCost)}${maxCost ? " / " + fmt.money(maxCost) : ""}`
+    : `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}`;
+  // 本会话累计：同一个任务常常跨几次运行（失败后发“继续”、追加要求），每次运行的预算从零算起。
+  // 只看最新一次运行，前面花掉的轮次、token、读取次数在概览里就消失了，和时间线对不上
+  const live = V.usageFor && V.usage ? { [V.usageFor]: V.usage } : {};
+  const total = runs.reduce((acc, x) => addCounts(acc, runCounts(x, live[x.id])), runCounts(null));
+  const totalSection = runs.length > 1 ? `
+    <div class="panel-section">
+      <div class="panel-title">本会话累计<span class="aside tnum">${runs.length} 次运行</span></div>
+      <dl class="kv tnum">
+        <dt>轮次</dt><dd>${fmt.int(total.turns)}</dd>
+        <dt>工具调用</dt><dd>${fmt.int(total.tools)}</dd>
+        <dt>Token</dt><dd>${tokText(total.usage)}</dd>
+        <dt>费用</dt><dd>${total.toolCost ? `模型 ${fmt.money(total.usage.cost_usd)} + 联网 ${fmt.money(total.toolCost)}` : fmt.money(total.usage.cost_usd)}</dd>
+        ${total.web || webOn ? `<dt>联网搜索</dt><dd>${fmt.int(total.searches)} 次</dd><dt>网页读取</dt><dd>${fmt.int(total.fetches)} 次</dd>` : ""}
+      </dl>
+      <p class="muted" style="font-size:var(--fs-xs);margin:8px 0 0">预算上限按每次运行计算：新任务（包括失败后发送的“继续”）重新计数，“重试”接着原来的计数。</p>
+    </div>` : "";
+  const runLabel = r ? (r.prompt ? `“${clipText(r.prompt, 14)}”` : "恢复执行") : "";
 
   p.innerHTML = `
     <div class="panel-section">
@@ -140,12 +201,12 @@ function renderOverview(p, V, app) {
         <dt>创建于</dt><dd>${esc(fmt.time(r.created_at))}</dd></dl>` : `<p class="muted" style="font-size:var(--fs-sm)">这个会话还没有运行。</p>`}
     </div>
     <div class="panel-section">
-      <div class="panel-title">预算</div>
-      ${meter("轮次", u.turns ?? r?.result?.turns ?? 0, u.max_turns ?? budget.max_turns)}
-      ${meter("工具调用", u.tool_calls ?? 0, u.max_tool_calls ?? budget.max_tool_calls)}
-      ${meter("Token", tokens, maxTok, { text: `${fmt.k(fmt.tokIn(usage))} 入${usage.cache_read_tokens ? `（缓存 ${fmt.k(usage.cache_read_tokens)}）` : ""} · ${fmt.k(usage.output_tokens)} 出${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
-      ${meter("费用", usage.cost_usd || 0, maxCost, { text: `${fmt.money(usage.cost_usd)}${maxCost ? " / " + fmt.money(maxCost) : ""}` })}
-    </div>
+      <div class="panel-title">本次运行预算${runLabel ? `<span class="aside" title="${esc(r?.prompt || "")}">${esc(runLabel)}</span>` : ""}</div>
+      ${meter("轮次", c.turns, u.max_turns ?? rb.max_turns)}
+      ${meter("工具调用", c.tools, u.max_tool_calls ?? rb.max_tool_calls)}
+      ${meter("Token", tokens, maxTok, { text: `${tokText(usage)}${maxTok ? " / " + fmt.k(maxTok) : ""}` })}
+      ${meter("费用", modelCost + c.toolCost, maxCost, { text: costText })}${webMeters}
+    </div>${totalSection}
     <div class="panel-section">
       <div class="panel-title">状态流转<span class="aside">CAS 迁移，含原因</span></div>
       ${V.trail.length ? `<ol class="steps">${V.trail.map((x, i) => `<li class="${i === V.trail.length - 1 ? "cur" : ""}"><span class="node" aria-hidden="true"></span>
@@ -174,11 +235,82 @@ function renderOverview(p, V, app) {
     b.innerHTML = `<span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>回放中`;
     try {
       const rep = await api.post(`/api/runs/${b.dataset.replay}/replay`, {}, { timeout: 120000 });
-      if (rep.same_tool_sequence && rep.same_final_text) toast("工具调用序列与最终答案都与原始运行一致；回放过程中没有执行任何副作用。", { tone: "success", title: "回放一致" });
-      else toast(rep.divergence ? `第 ${rep.divergence.step} 次模型调用时上下文与录制不一致，说明 harness 的行为发生了变化。` : "回放结果与原始运行不同。", { tone: "warning", title: "回放出现差异", timeout: 7000 });
+      showReplayReport(rep, runs.find((x) => x.id === b.dataset.replay));
     } catch (e) { toast(e.message, { tone: "danger", title: "回放失败" }); }
     b.disabled = false; b.innerHTML = html;
   }));
+}
+
+// ====================================================================== 回放报告
+// 结论只看后端的 deterministic。回放时模型输出取自录制，工具序列和最终答案几乎总是相同，
+// 真正的信号是上下文指纹有没有分叉；只比那两项，harness 行为变了也会报“一致”。
+// 录制时走到了结局的 Run，结局与最终答案也要一致；取消、崩溃这类结局回放走不到，不比较（与 ReplayReport.deterministic 同口径）
+const REACHES_END = new Set(["completed", "budget_exhausted"]);
+const statusLabel = (s) => RUN_STATUS[s]?.label || s || "—";
+
+function firstDiff(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) return i;
+  return -1;
+}
+
+function replayChecks(rep) {
+  const at = firstDiff(rep.original_tools, rep.replay_tools);
+  const reached = REACHES_END.has(rep.original_status);
+  return [
+    { ok: !rep.divergence, label: "模型看到的上下文",
+      detail: rep.divergence ? `第 ${rep.divergence.step + 1} 次模型调用前就与录制不同` : "每次模型调用前的上下文指纹都与录制一致" },
+    { ok: rep.same_tool_sequence, label: "工具调用序列",
+      detail: rep.same_tool_sequence ? `${rep.original_tools.length} 次调用，名称与顺序一致`
+        : `录制 ${rep.original_tools.length} 次、回放 ${rep.replay_tools.length} 次，从第 ${at + 1} 次开始不同` },
+    { ok: reached ? rep.status === rep.original_status : null, label: "结局",
+      detail: reached ? `录制「${statusLabel(rep.original_status)}」，回放「${statusLabel(rep.status)}」`
+        : `录制时以「${statusLabel(rep.original_status)}」结束，回放走不到同样的结局，不比较` },
+    { ok: reached ? rep.same_final_text : null, label: "最终答案",
+      detail: reached ? (rep.same_final_text ? "逐字相同" : "与录制不同") : "同上，不比较" },
+  ];
+}
+
+function replayVerdict(rep) {
+  if (rep.deterministic) return { title: "回放一致", tone: "success", iconName: "checkCircle", desc: "harness 当前的行为与录制时一致。" };
+  const why = rep.divergence
+    ? `第 ${rep.divergence.step + 1} 次模型调用前，模型看到的上下文就与录制不同：系统提示词、工具定义、截断或压缩规则等 harness 行为发生了变化。`
+    : !rep.same_tool_sequence ? "工具调用序列与录制不同。" : "回放的结局或最终答案与录制不同。";
+  return { title: "回放出现差异", tone: "warning", iconName: "alert", desc: why };
+}
+
+function replayBody(rep, run) {
+  const at = firstDiff(rep.original_tools, rep.replay_tools);
+  const rows = Math.max(rep.original_tools.length, rep.replay_tools.length);
+  const mark = (ok) => ok === null ? `<span class="rc-ic skip" title="不比较">${icon("info", "sm")}</span>`
+    : `<span class="rc-ic ${ok ? "ok" : "bad"}">${icon(ok ? "check" : "x", "sm")}</span><span class="sr-only">${ok ? "一致" : "不一致"}</span>`;
+  const seq = rows ? `<div class="replay-seq" role="table" aria-label="工具调用序列对照">
+      <div class="rs-row rs-head" role="row"><span role="columnheader">#</span><span role="columnheader">录制</span><span role="columnheader">回放</span></div>
+      ${Array.from({ length: rows }, (_, i) => `<div class="rs-row${at >= 0 && i >= at ? " differs" : ""}${i === at ? " first" : ""}" role="row"><span role="cell" class="tnum">${i + 1}</span>
+        <span role="cell" class="mono">${esc(rep.original_tools[i] ?? "—")}</span><span role="cell" class="mono">${esc(rep.replay_tools[i] ?? "—")}</span></div>`).join("")}</div>`
+    : `<p class="muted" style="font-size:var(--fs-sm)">两边都没有工具调用。</p>`;
+  const finalDiff = REACHES_END.has(rep.original_status) && !rep.same_final_text;
+  const el = h("div", { class: "replay-report" });
+  el.innerHTML = `
+    <ul class="replay-checks">${replayChecks(rep).map((c) => `<li>${mark(c.ok)}<span class="lb">${esc(c.label)}</span><span class="dt">${esc(c.detail)}</span></li>`).join("")}</ul>
+    <div class="replay-status">录制 ${statusBadge(rep.original_status, { still: true })}${icon("chevronRight", "sm")}回放 ${statusBadge(rep.status, { still: true })}</div>
+    <details class="disclosure"${rep.same_tool_sequence ? "" : " open"}><summary>${icon("chevronRight", "sm chev")}<span>工具调用序列</span><span class="aside tnum">录制 ${rep.original_tools.length} · 回放 ${rep.replay_tools.length}</span></summary>
+      <div class="content">${seq}</div></details>
+    ${rep.divergence ? `<details class="disclosure"><summary>${icon("chevronRight", "sm chev")}<span>上下文指纹</span><span class="aside">第 ${rep.divergence.step + 1} 次模型调用</span></summary>
+      <div class="content"><dl class="kv"><dt>录制</dt><dd><span class="mono">${esc(rep.divergence.expected)}</span></dd><dt>回放</dt><dd><span class="mono">${esc(rep.divergence.actual)}</span></dd></dl>
+      <p class="muted" style="font-size:var(--fs-xs);margin-top:6px">指纹覆盖系统提示词、每个工具的名称/描述/参数 schema 和全部消息，任何一项变了都会不同。</p></div></details>` : ""}
+    ${finalDiff ? `<details class="disclosure"><summary>${icon("chevronRight", "sm chev")}<span>最终答案对照</span></summary>
+      <div class="content replay-final"><span class="muted">录制</span><pre class="plain">${esc(run?.result?.text || "（页面上没有录制的最终答案）")}</pre>
+      <span class="muted">回放</span><pre class="plain">${esc(rep.final_text || "（空）")}</pre></div></details>` : ""}
+    <div class="replay-foot"><span>回放没有调用模型，工具结果取自录制；${rep.workspace ? `临时工作区副本保留在 <span class="mono">${esc(rep.workspace)}</span>` : "临时工作区副本已删除"}。</span>
+      <button class="btn sm ghost" type="button" data-copy-report>${icon("copy", "sm")}复制报告 JSON</button></div>`;
+  $("[data-copy-report]", el).onclick = async () => {
+    if (await copyText(JSON.stringify(rep, null, 2))) toast("回放报告已复制", { tone: "success", timeout: 1800 });
+  };
+  return el;
+}
+
+function showReplayReport(rep, run) {
+  dialog({ ...replayVerdict(rep), body: replayBody(rep, run), wide: true, hideCancel: true, confirmText: "关闭" });
 }
 
 // ====================================================================== 上下文

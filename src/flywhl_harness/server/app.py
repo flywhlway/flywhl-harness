@@ -48,12 +48,14 @@ from .. import __version__
 from .._utils import estimate_tokens
 from ..agent.compaction import message_tokens
 from ..agent.context import ContextManager
+from ..config import WEB_LEVELS
 from ..observe.export import session_markdown
 from ..observe.trace import export_trajectory
 from ..policy.bash_analyzer import analyze
 from ..policy.fatigue import approval_stats
 from ..policy.permissions import MANAGED_BASELINE, grant_for
 from ..policy.supply_chain import mcp_argv, mcp_base, referenced_files, unpinned_packages
+from ..runtime.capabilities import clamp
 from ..runtime.manager import Harness
 from ..runtime.state import TERMINAL, RunStatus
 
@@ -71,13 +73,21 @@ class RevalidatingStaticFiles(StaticFiles):
 
 # 运行结束后仍值得在时间线上看到的提示：审批疲劳、新加的会话授权、hook 告警、执行中混入的不可信内容、模型降级与切换、
 # 恢复时的重新执行。排队、暂停这类过程性提示不留
-KEPT_NOTICES = frozenset({"approval_fatigue", "grant", "hook_warning", "tainted", "fallback", "server_fallback",
-                          "model_switched", "recover_reexecute"})
+KEPT_NOTICES = frozenset({"approval_fatigue", "approve_outside", "grant", "hook_warning", "tainted", "fallback",
+                          "server_fallback", "model_switched", "recover_reexecute", "web_exfil", "unpriced_web",
+                          "native_web_search"})
+# 搜索后端的数据去向，设置页给用户按合规要求选
+WEB_REGIONS = {"deepseek": "境内", "bocha": "境内", "searxng": "自建"}
+
+
+class Capabilities(BaseModel):
+    web: str | None = None
 
 
 class NewSession(BaseModel):
     title: str | None = None
     mode: str | None = None
+    capabilities: Capabilities | None = None
 
 
 class Prompt(BaseModel):
@@ -114,6 +124,7 @@ class SessionPatch(BaseModel):
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_BULKY_META = frozenset({"system_prompt", "project_context"})   # 上下文检查器单独给，会话列表不带
 TOKEN_COOKIE = "flywhl_token"
 TOKEN_MAX_AGE = 30 * 24 * 3600
 MAX_BODY = 8 * 1024 * 1024
@@ -278,7 +289,45 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
             "workspace": str(h.workspace_root), "mode": h.config.permissions.mode,
             "tools": [{"name": t.name, "description": t.description, "effect": str(t.effect)} for t in h.tools],
             "budget": h.config.budget.__dict__, "worker_id": h.worker_id,
+            "capabilities": {"web": web_info()},
         }
+
+    def native_info() -> dict[str, Any] | None:
+        """声明过的模型侧联网（主模型对得上时才有）：给人看的名字、地区、看不看得到搜索、单价、未核实的地方。"""
+        spec = h.native_web
+        if spec is None:
+            return None
+        return {"name": spec.name, "label": spec.label, "region": spec.region, "observable": spec.observable,
+                "citations": spec.citations, "price_per_call": spec.price_per_call, "notes": spec.notes}
+
+    def web_info() -> dict[str, Any]:
+        """建会话前的联网选项：只给能力和后端名字，不给端点、密钥变量名。"""
+        level, why = h.web_ceiling()
+        native = native_info() if level != "off" else None
+        names = [b.name for b in h.web.usable()] if h.web is not None and level != "off" and native is None else []
+        w = h.config.web
+        return {"available": level != "off", "fetch_available": level == "fetch", "backends": names,
+                "default": clamp(w.default, level)[0], "reason": why, "via": "native" if native else "tools",
+                "native": native, "limits": {"searches": w.max_searches_per_run, "fetches": w.max_fetches_per_run}}
+
+    def web_settings() -> dict[str, Any] | None:
+        w = h.config.web
+        if not w.enabled and not h.native_search:
+            return None
+        level, why = h.web_ceiling()
+        backends = [{"name": b.name, "region": WEB_REGIONS.get(b.name, ""), "available": b.missing() is None,
+                     "reason": b.missing() or "", "priced": bool(b.price) or b.name == "searxng"}
+                    for b in (h.web.backends if h.web is not None else [])]
+        return {"enabled": w.enabled, "level": level, "reason": why, "default": w.default, "backends": backends,
+                "fetch_backend": w.fetch_backend, "fetch_scope": w.fetch_scope, "fetch_allow": list(w.fetch_allow),
+                "deny_domains": len(w.deny_domains),
+                "limits": {"max_searches_per_run": w.max_searches_per_run, "max_fetches_per_run": w.max_fetches_per_run,
+                           "max_results": w.max_results, "fetch_chars": w.fetch_chars},
+                "unpriced": h.web.unpriced() if h.web is not None and level != "off" else [],
+                "native_via_extra_body": bool(h.native_search), "native_keys": list(h.native_search),
+                "native": {"configured": w.native, "active": native_info(), "reason": h.native_web_reason},
+                "sandbox_network": h.config.permissions.sandbox_network,
+                "mcp_tools": sum(1 for t in h.tools if t.name.startswith("mcp__"))}
 
     @app.get("/api/settings")
     async def settings() -> dict[str, Any]:
@@ -319,7 +368,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
                        "unpinned": unpinned_packages(hc.command, h.workspace_root, hc.env)} for hc in c.hooks],
             "mcp": [mcp_entry(n, spec) for n, spec in c.mcp_servers.items()],
             "budget": dict(c.budget.__dict__), "snapshots": c.snapshots, "verify_command": c.verify_command,
-            "tools": len(names),
+            "tools": len(names), **({"web": web} if (web := web_settings()) is not None else {}),
         }
 
     # ------------------------------------------------------------------ 会话
@@ -337,8 +386,31 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
 
     @app.post("/api/sessions")
     async def new_session(body: NewSession) -> dict[str, Any]:
-        s = h.create_session(body.title or "新会话", mode=body.mode)
-        return {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k != "system_prompt"}}
+        """``capabilities.web`` 在这里定：clamp 到用户配置的上限，之后只能收紧。开工请求（/runs）不带能力，
+        免得每次开工都能放宽。"""
+        want = body.capabilities.web if body.capabilities is not None else None
+        if want is not None and want not in WEB_LEVELS:
+            raise HTTPException(400, f"capabilities.web 只能是 {'、'.join(WEB_LEVELS)}")
+        cap = h.web_capability(want)
+        s = h.create_session(body.title or "新会话", mode=body.mode, capabilities=cap)
+        out = {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k not in _BULKY_META}}
+        if cap is not None:
+            out["capabilities"] = {"web": cap["web"], "requested": cap["requested"], "reason": cap["reason"]}
+        elif want not in (None, "off"):   # 没启用联网时照样回答“为什么没开”，其余字段与以前一样
+            out["capabilities"] = {"web": "off", "requested": want, "reason": h.web_ceiling()[1]}
+        return out
+
+    @app.patch("/api/sessions/{sid}/capabilities")
+    async def patch_capabilities(sid: str, body: Capabilities) -> dict[str, Any]:
+        """开工后只能收紧：放宽返回 409。收紧在下一次工具调用时生效（执行层每次都读最新值）。"""
+        session_or_404(sid)
+        if body.web not in WEB_LEVELS:
+            raise HTTPException(400, f"capabilities.web 只能是 {'、'.join(WEB_LEVELS)}")
+        try:
+            cap = h.set_capabilities(sid, body.web)
+        except PermissionError as e:
+            raise HTTPException(409, f"{e}") from None
+        return {"web": cap["web"], "requested": cap.get("requested"), "reason": cap.get("reason", "")}
 
     @app.get("/api/sessions/{sid}")
     async def session_detail(sid: str) -> dict[str, Any]:
@@ -347,7 +419,7 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         view = log.context()
         runs = h.store.list_runs(sid, limit=50)
         return {
-            "session": {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k != "system_prompt"}},
+            "session": {**s.to_dict(), "meta": {k: v for k, v in s.meta.items() if k not in _BULKY_META}},
             "messages": [m.to_dict() for m in log.messages()],
             # 时间线：当前分支上的条目（消息 + 压缩摘要），UI 按它渲染，压缩点显示为折叠分隔线
             "timeline": [{"id": e.id, "kind": e.kind, "run_id": e.run_id,
@@ -401,10 +473,16 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
         view = h.log(sid).context()
         cm = ContextManager(h.config.context, h.model_info)
         sp = s.meta.get("system_prompt", "")
-        specs = h.tools.specs()
-        stats = cm.estimate(view.messages, sp, specs)
+        pc = s.meta.get("project_context") or ""   # 不在历史里，但每次请求都带着，水位要算上
+        # 联网工具按会话钉住的名单算，与实际发出的请求一致：没开联网的会话不带它们；开工后收紧只是屏蔽，规格照样发送
+        pinned = set(s.meta.get("tools") or ())
+        specs = [t.spec() for t in h.tools if not t.egress or t.name in pinned]
+        stats = cm.estimate(view.messages, f"{sp}\n\n{pc}" if pc else sp, specs)
         items = [{"id": m.id, "role": m.role, "kind": m.kind, "tool": m.tool_name, "tokens": message_tokens(m),
                   "preview": (m.text or ", ".join(c.name for c in m.tool_calls))[:160]} for m in view.messages]
+        if pc:
+            items.insert(0, {"id": "project-context", "role": "user", "kind": "project_context", "tool": None,
+                             "tokens": estimate_tokens(pc), "preview": pc[:160]})
         return {"stats": stats.to_dict(), "system_tokens": estimate_tokens(sp),
                 "tools_tokens": estimate_tokens(json.dumps(specs, ensure_ascii=False)),
                 "messages_tokens": sum(i["tokens"] for i in items), "items": items,
@@ -534,7 +612,8 @@ def create_app(harness: Harness, *, auto_recover: bool = True, token: str | None
     async def replay(rid: str) -> dict[str, Any]:
         from ..observe.replay import replay_run
 
-        rep = await replay_run(h.store, rid, config=h.config, base_tools=h.tools)
+        # 页面上的回放只看报告，用完就删临时副本；要检查副本用 CLI 的 flywhl replay
+        rep = await replay_run(h.store, rid, config=h.config, base_tools=h.tools, keep_workspace=False)
         return rep.to_dict()
 
     @app.get("/api/runs/{rid}/events")

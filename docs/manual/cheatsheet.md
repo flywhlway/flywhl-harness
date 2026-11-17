@@ -5,17 +5,17 @@
 | 命令 | 用途 |
 |---|---|
 | `flywhl chat` | 终端交互；Ctrl-C 取消当前运行，连按两次退出 |
-| `flywhl run "<任务>" [--json] [--yes]` | 一次性执行；`completed` 时退出码为 0 |
+| `flywhl run "<任务>" [--json] [--yes] [--approve 规则] [--approve-outside 模式]` | 一次性执行；`completed` 时退出码为 0；`--approve`、`--approve-outside` 在无人值守时放行写明的操作、沙箱外命令 |
 | `flywhl serve [--host] [--port] [--expose] [--token \| --no-token] [--allow-host]` | Web UI，默认 `127.0.0.1:8765`；监听非回环地址要加 `--expose` |
 | `flywhl sessions` / `flywhl runs [--session]` | 列出会话 / 运行 |
 | `flywhl resume <run_id>` / `flywhl retry <run_id>` | 恢复暂停或中断的运行 / 重试失败的运行 |
 | `flywhl recover` | 接管心跳过期的运行 |
-| `flywhl replay <run_id> [--fork-at N]` | 确定性回放 / 反事实分叉 |
+| `flywhl replay <run_id> [--fork-at N] [--allow-web]` | 确定性回放 / 反事实分叉（分叉后默认不联网） |
 | `flywhl trace <run_id> -o trace.json` | 导出轨迹 |
 | `flywhl export <会话ID> [-o 文件] [--injected]` | 会话导出为 Markdown；`--injected` 附带注入给模型的提醒 |
 | `flywhl tools` / `flywhl doctor [模型…]` | 工具与副作用等级 / 模型接入自检 |
 
-通用参数：`-w` 工作区，`-c` 可信配置文件，`--trust` 信任项目配置，`--model`、`--provider`，`--env-file`，`--mode`，`-y` 自动批准，`--sandbox auto|off|macos|linux`，`--network allow|deny|allowlist`，`--net-allow 主机`（可重复，隐含 allowlist），`--thinking` 显示思考过程。
+通用参数：`-w` 工作区，`-c` 可信配置文件，`--trust` 信任工作区和项目配置，`--model`、`--provider`，`--env-file`，`--mode`，`-y` 自动批准，`--sandbox auto|off|macos|linux`，`--network allow|deny|allowlist`，`--net-allow 主机`（可重复，隐含 allowlist），`--thinking` 显示思考过程。
 
 终端内命令：`/new` 新会话，`/mode <模式>` 切换权限，`/compact` 手动压缩，`/tree` 会话树，`/branch <entry_id>` 切换分支，`/exit` 退出。
 
@@ -25,10 +25,10 @@
 |---|---|
 | `flywhl.toml` | 项目配置，高危项需信任 |
 | `~/.flywhl/config.toml` | 用户配置，视为可信 |
-| `~/.flywhl/trusted.json` | 已信任的配置文件（路径 + SHA-256） |
+| `~/.flywhl/trusted.json` | 已信任的配置文件（路径 + SHA-256）和工作区（仓库根） |
 | `~/.flywhl/server_token` | Web 访问令牌（0600） |
 | `<工作区>/.flywhl/` | 会话库、审批记录、影子 git 快照 |
-| `.env` | 各家密钥与 `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL` |
+| `.env` | 各家密钥（含 `BOCHA_API_KEY`）与 `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL` |
 
 ## 关键配置与默认值
 
@@ -45,6 +45,8 @@
 | `loop_guard.warn_repeats` / `stop_repeats` / `max_consecutive_errors` | 3 / 5 / 6 |
 | `permissions.mode` / `on_ask` / `approval_timeout` | `default` / `wait` / 600 秒 |
 | `permissions.sandbox` / `sandbox_network` / `strip_secret_env` | `auto` / `auto`（有沙箱时是空白名单的 `allowlist`）/ true |
+| `web.enabled` / `default` / `fetch_scope` | false / `off` / `ask` |
+| `web.backends` / `fetch_backend` / `max_searches_per_run` / `max_fetches_per_run` | `["deepseek"]` / `deepseek` / 60 / 30 |
 
 ## 规则语法
 

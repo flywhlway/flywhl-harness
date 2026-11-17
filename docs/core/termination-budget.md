@@ -70,7 +70,7 @@ class BudgetConfig:
 | 轮次 | 每次模型调用前 +1 | `_body()` 的 `rc.budget.next_turn()` | 收尾调用不计入 |
 | 工具调用 | 每批执行后加上本批调用数 | `_body()` 的 `rc.budget.charge_tool(len(calls))` | 参数非法、被跳过的调用也计入——它们同样消耗了一轮模型输出 |
 | token | `usage.total_tokens`，即输入 + 输出 + 缓存读 + 缓存写 | `charge_model(msg.usage)` | 缓存命中的 token 也计入：命中率很高的长会话，钱花得少，token 预算却照样消耗 |
-| 费用 | `usage.cost_usd`（由 `compute_cost()` 按价格表算出） | 同上 | 价格表里没有的模型成本记 0，费用预算形同虚设，见 [05](/core/messages-and-models) |
+| 费用 | `usage.cost_usd`（由 `compute_cost()` 按价格表算出）加联网工具费用 `tool_cost_usd` | 同上；联网费用在 `charge_web()` | 价格表里没有的模型成本记 0，费用预算形同虚设，见 [05](/core/messages-and-models) |
 | 墙钟 | `time.monotonic()` 自 `Budget` 创建起的秒数 | `elapsed` 属性 | 用单调时钟，不受系统时间调整影响 |
 
 五个维度是“并联”的：任意一个达到上限都会触发。判定在 `Budget.check()`：
@@ -140,6 +140,7 @@ async def _wrap_up(self, reason: str) -> AsyncIterator[Event]:
         async for ev in self._call_model(purpose="wrap_up", tool_choice="none"):
             yield ev
     except (ProviderError, _ContextOverflow):
+        yield self._ev(E.TURN_END, turn=self.turn, aborted="wrap_up_failed")
         return
     if self._last is not None:
         rc.budget.charge_model(self._last.usage)
@@ -175,7 +176,7 @@ def child(self, limits: BudgetConfig | None = None) -> "Budget":
     """为子代理切出预算：不超过父预算的剩余额度。"""
     lim = limits or BudgetConfig(max_turns=20, max_tool_calls=60)
     if self.limits.max_cost_usd is not None:
-        remain = max(0.0, self.limits.max_cost_usd - self.usage.cost_usd)
+        remain = max(0.0, self.limits.max_cost_usd - self.cost_usd)   # 模型 + 联网工具的总花费
         lim.max_cost_usd = min(lim.max_cost_usd or remain, remain)
     if self.limits.max_total_tokens is not None:
         remain_t = max(0, self.limits.max_total_tokens - self.usage.total_tokens)
@@ -245,11 +246,12 @@ def observe(self, name: str, args: dict, result_text: str, is_error: bool) -> Lo
         self.edit_counts[str(args["path"])] += 1
 
     dup = sum(1 for x in self.recent if x == self.recent[-1])
+    n = len(self.recent)
     if dup >= self.cfg.stop_repeats:
-        return LoopVerdict("stop", f"相同调用 {name} 已连续 {dup} 次得到相同结果，判定为死循环。")
+        return LoopVerdict("stop", f"最近 {n} 次调用中，{name} 以相同参数得到相同结果 {dup} 次，判定为死循环。")
     if dup >= self.cfg.warn_repeats and f"dup:{sig}" not in self._warned:
         self._warned.add(f"dup:{sig}")
-        return LoopVerdict("warn", f"你已经 {dup} 次以相同参数调用 {name} 且结果相同。...")
+        return LoopVerdict("warn", f"最近 {n} 次调用中，你已经 {dup} 次以相同参数调用 {name} 且结果相同。...")
     # ... 乒乓、连续错误、同一文件反复编辑
 ```
 
@@ -298,16 +300,19 @@ async def _stop_gaps(self, msg: Message) -> list[str]:
     gaps: list[str] = []
     planning = rc.permissions.mode == Mode.PLAN       # plan 模式的产物就是计划本身，见下方案例
     if rc.config.verify_todos and not planning:
-        todos = latest_todos(rc.log.context().messages)
+        # 只验收本次 Run 写下的计划：同一会话里上一个任务遗留的计划不应阻止新任务结束
+        mine = [Message.from_dict(e.payload) for e in rc.log.path() if e.kind == "message" and e.run_id == rc.run_id]
+        todos = latest_todos(mine)
         if todos and any(t.get("status") in ("pending", "in_progress") for t in todos):
             gaps.append("计划中仍有未完成项：\n" + render_todos([...]))
     if rc.config.verify_command and rc.role == "main" and not planning:
-        ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root))
+        ok, out = await _run_verify(rc.config.verify_command, str(rc.workspace.root), _verify_box(rc),
+                                    rc.config.permissions.strip_secret_env)   # 和 bash 一样进沙箱、剥离密钥
         if not ok:
             gaps.append(f"验收命令 `{rc.config.verify_command}` 未通过：\n{out}")
     event = HookEvent.STOP if rc.role == "main" else HookEvent.SUBAGENT_STOP
     if rc.hooks.has(event):
-        out = await rc.hooks.run(event, HookInput(..., stop_blocks=rc.stop_blocks, last_message=msg.text, context=rc))
+        out = await self._hook(event, HookInput(..., stop_blocks=rc.stop_blocks, last_message=msg.text, context=rc))
         if out.decision == "block":
             gaps.append(out.reason or "Stop hook 阻止结束")
             if out.additional_context:
@@ -321,8 +326,8 @@ async def _stop_gaps(self, msg: Message) -> list[str]:
 
 | 验收项 | 配置 | 判定 | 适用 |
 |---|---|---|---|
-| 计划 | `verify_todos=True` | 最近一次 `todo_write` 中仍有 `pending` / `in_progress` | 模型用过 todo 时；plan 模式除外 |
-| 验证命令 | `verify_command`，如 `"pytest -q"` | 退出码非 0；超时 300 秒；取输出最后 30 行作为缺口说明 | 仅主 Run（`_no_verify()` 也为子代理清空了它）；plan 模式除外 |
+| 计划 | `verify_todos=True` | 本次 Run 最近一次 `todo_write` 中仍有 `pending` / `in_progress` | 模型用过 todo 时；plan 模式除外 |
+| 验证命令 | `verify_command`，如 `"pytest -q"` | 在 bash 同一套系统沙箱里执行；退出码非 0；超时 300 秒；取输出最后 30 行作为缺口说明（工作区没信任过时，这份反馈算污点） | 仅主 Run（`_no_verify()` 也为子代理清空了它）；plan 模式除外 |
 | Stop hook | `HookEvent.STOP` / `SUBAGENT_STOP` | hook 返回 `decision="block"`（`additional_context` 并入缺口）；不阻止时给的 `additional_context` 在完成时作为一条 reminder 落盘 | 任意自定义条件 |
 
 ::: details 案例：plan 模式下验收与权限互相矛盾（真实模型回归中发现，已修复）

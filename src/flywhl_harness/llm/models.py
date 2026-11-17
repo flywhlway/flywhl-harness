@@ -72,7 +72,8 @@ MODELS: dict[str, ModelInfo] = {
     "deepseek-flash": ModelInfo("deepseek-flash", "deepseek", **_DS_FLASH),
     "deepseek-v4-pro": ModelInfo("deepseek-v4-pro", "deepseek", context_window=1_000_000, max_output=384_000,
                                  input_price=1.32, output_price=3.96, cache_read_price=0.044, supports_thinking=True),
-    # 旧模型名仍被接受，实际由 deepseek-flash 提供服务并按其价格计费
+    # 旧模型名 deepseek-chat、deepseek-reasoner 已于 2026-07-24 由官方停用，新配置请用上面两个。停用前它们由
+    # deepseek-flash 提供服务、按其价格计费；保留这两条，是为了让停用前录下的会话和轨迹仍能查到窗口与价格
     "deepseek-chat": ModelInfo("deepseek-chat", "deepseek", **_DS_FLASH),
     "deepseek-reasoner": ModelInfo("deepseek-reasoner", "deepseek", **_DS_FLASH),
     # ---- 阿里云百炼（人民币，华北2 北京地域）：0–1M 输入单一档；隐式缓存命中按输入单价的 20% 计费 ----

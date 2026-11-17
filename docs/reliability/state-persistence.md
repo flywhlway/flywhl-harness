@@ -126,8 +126,8 @@ erDiagram
 meta = {
     # 钉住：系统提示与工具集在会话创建时冻结（版本钉住 + 前缀稳定）；
     # 模型以当前 Harness 为准（这里记录创建时的模型，实际服务的模型记录在每条 assistant 消息上）
-    "system_prompt": sp, "model": self.model, "provider": self.provider.name, "tools": self.tools.names(),
-    "mode": mode or cfg.permissions.mode, "grants": [], "clear_watermark": 0,
+    "system_prompt": sp, "model": self.model, "provider": self.provider.name, "tools": names,
+    "project_context": pc, "mode": mode or cfg.permissions.mode, "grants": [], "clear_watermark": 0,
 }
 ```
 
@@ -135,10 +135,10 @@ meta = {
 模型则没有钉死：用换了模型的 Harness 继续老会话是允许的，但 `_note_model_switch()` 会发一条 `model_switched` 通知并改写 `meta["model"]`，
 回放和评测时能看出“这里换过模型”。
 
-为什么系统提示要存一份 **渲染后的全文**，而不是每次请求时现场生成？原因有两个：
+为什么系统提示和项目指令（`project_context`）要存一份 **渲染后的全文**，而不是每次请求时现场生成？原因有两个：
 
-1. **前缀稳定**：`build_system_prompt` 会读 AGENTS.md 和技能清单。用户在会话中途改了 AGENTS.md，如果每轮都重新生成，
-   系统提示就变了，之前缓存的前缀全部失效（见 [07 上下文工程与压缩](/core/context-engineering)）；
+1. **前缀稳定**：`build_project_context` 会读 AGENTS.md 和技能清单。用户在会话中途改了 AGENTS.md，如果每轮都重新生成，
+   请求前缀就变了，之前缓存的前缀全部失效（见 [07 上下文工程与压缩](/core/context-engineering)）；
 2. **恢复一致**：崩溃之后用新进程恢复时，新进程的代码或配置可能已经升级。会话按创建时的提示继续，
    而不是半路换成另一套指令（版本钉住的完整讨论见 [11 检查点与崩溃恢复](/reliability/checkpoint-recovery)）。
 

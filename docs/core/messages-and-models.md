@@ -13,7 +13,7 @@ Role = Literal["user", "assistant", "tool"]
 @dataclass
 class Message:
     role: Role
-    content: list[Block]          # TextBlock | ThinkingBlock | ToolCall
+    content: list[Block]          # TextBlock | ThinkingBlock | ToolCall | ServerBlock
     id: str = ...
     ts: float = ...
     # ---- assistant 专属 ----
@@ -36,6 +36,7 @@ system 提示放在 `ModelRequest.system` 里单独传。如果它是消息列�
 
 `ToolCall` 除了 `id / name / arguments`，还保留 `raw_arguments` 与 `parse_error`：参数 JSON 解析失败时，harness 要把“原文是什么、错在哪”告诉模型，而不是吞掉。
 `ThinkingBlock` 带一个可选的 `signature`，用于 Anthropic 的思考签名回传（后文详述）。
+`ServerBlock` 原样保存在供应商那边执行的工具块（Anthropic 模型侧联网的 `server_tool_use` / `web_search_tool_result`），只回传给产生它的同一端点。
 
 ### content 与 details 分离
 
@@ -65,8 +66,9 @@ Loop、执行器写入的状态信息（`status`、`duration_ms`、`idempotency_
 | `resume_note` | `_body()` | 暂停 / 崩溃期间发生了什么 |
 | `stop_feedback` | `_body()` | Stop 验收未通过时给出的缺口 |
 | `wrap_up` | `_wrap_up()` | 预算耗尽时的收尾指令 |
+| `project_context` | `_call_model()` | 项目指令（AGENTS.md 等）带信任标注的独立消息；每次请求排在最前面，不进历史 |
 
-它对模型不可见（转换函数不读 `meta`），但上下文构建、UI 渲染（`app.js` 的 `SYS_TAGS` 把这些 kind 折叠成“harness 注入”卡片）和回放都依赖它。
+它对模型不可见（转换函数不读 `meta`），但上下文构建、UI 渲染（`web/lib/meta.js` 的 `SYS_KINDS` 把这些 kind 折叠成“由 harness 注入”的卡片）和回放都依赖它。
 内置的 `DemoProvider` 就是靠 kind 找“最近一次真实用户输入”，从而忽略 reminder。
 
 ### stop_reason：一条消息为什么结束
@@ -77,7 +79,7 @@ Loop、执行器写入的状态信息（`status`、`duration_ms`、`idempotency_
 |---|---|---|---|
 | `end_turn` | 自然结束 | 进入 follow-up / Stop 验收 | 原样保留 |
 | `tool_use` | 请求调用工具 | 执行工具 | 原样保留 |
-| `max_tokens` | 输出被截断，工具参数可能不完整 | 有工具调用时整批写 `truncated`，不执行 | 原样保留 |
+| `max_tokens` | 输出被截断，工具参数可能不完整 | 有工具调用时整批写 `truncated`，不执行 | 原样保留；只有思考、没有正文和工具调用的 **跳过** |
 | `aborted` | 流式中途被取消 | 只落盘已生成的文本 | 保留（构造时已只剩文本） |
 | `error` | 调用失败 | Run 以 `failed` 结束 | **跳过** |
 | `refusal` | 安全策略拒答 | Run 以 `failed` 结束，绝不执行其中的工具调用 | **跳过** |
@@ -191,7 +193,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
         if m.role == "assistant":
             if m.stop_reason in (StopReason.ERROR, StopReason.REFUSAL):
                 continue
-            if not m.content:
+            if not has_payload(m):   # 没有正文、工具调用或供应商侧工具块（例如只有思考就被截断）
                 continue
             flush_pending()
             out.append(m)
@@ -210,7 +212,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
 
 | 规则 | 防止的问题 |
 |---|---|
-| 跳过 `error` / `refusal` 与空 content 的 assistant | 把没有内容的消息发给 API |
+| 跳过 `error` / `refusal`，以及没有正文和工具调用的 assistant（含只有思考的截断消息） | 把没有内容的消息发给 API（DeepSeek 对这种消息直接 400） |
 | 丢弃找不到对应调用的 tool 结果 | 孤立 `tool_result` 导致 400 |
 | 不在末尾却缺结果的调用，补合成错误结果（pi 的做法） | 中间出现配对缺口导致 400 |
 | 末尾缺结果的调用不补 | 那是 Loop 正在处理的调用，补了就是撒谎 |
@@ -256,7 +258,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
 - **用量对齐。** `OpenAICompatProvider.stream()` 用 `input_tokens = prompt_tokens - cached` 把命中部分移到 `cache_read_tokens`，
   否则按缓存价与原价各算一次，成本会被重复计算。Anthropic 的输入用量在 `message_start` 里，输出用量在 `message_delta` 里。
 - **结束原因映射。** OpenAI 侧见 `_FINISH`（`content_filter → refusal`，`length → max_tokens`）；Anthropic 侧见 `_STOP`，其中 `pause_turn` 被映射为 `end_turn`。
-  `pause_turn` 主要出现在服务端工具的长回合中，本项目没有使用服务端工具；如果你加入它们，这个映射需要改成“继续请求”。
+  `pause_turn` 主要出现在服务端工具的长回合中；本项目只有开启模型侧联网（`[web] native`）时会用到服务端 `web_search`，目前仍按 `end_turn` 处理、不自动续请求，长回合被暂停时这个映射需要改成“继续请求”。
 
 ## 供应商档案：把各家差异收敛成数据
 
@@ -291,8 +293,8 @@ ProviderProfile("minimax", "MiniMax", base_url="https://api.minimaxi.com/v1", ke
   所以疑似标签前缀的尾巴先留在缓冲区里。正文中间讨论 `<think>` 标签的内容不受影响。
 - **流的完整性。** 没有收到 `finish_reason` 就结束的流按 `network` 错误抛出（交给重试层），绝不当作正常结束——否则一次被代理截断的回复
   会被当成完整答案；流中途下发的 `{"error": …}` 与 DeepSeek 的 `finish_reason: insufficient_system_resource` 同样转成可分类的错误。
-- **记录实际服务的模型。** `chunk.model` 写进消息的 `model` 字段：请求 `deepseek-chat`（旧名）实际由 `deepseek-flash` 服务，
-  OpenRouter 也会改写成路由到的模型，归因与回放都以它为准。
+- **记录实际服务的模型。** `chunk.model` 写进消息的 `model` 字段：请求的模型名和实际服务的可能不同，比如 DeepSeek 的旧名
+  `deepseek-chat` 停用（2026-07-24）前实际由 `deepseek-flash` 服务，OpenRouter 也会改写成路由到的模型，归因与回放都以它为准。
 
 `flywhl doctor` 用两步最小的真实调用验证一家供应商“按 harness 的方式接得通”：流式文本，以及一次完整的工具往返（覆盖 tool_calls 分片拼接、
 tool 消息格式和思考回传）。新增一家兼容服务，通常只需要加一行档案，再用 doctor 和 `tests/live` 验证。
@@ -344,7 +346,7 @@ if isinstance(c, ThinkingBlock):
 | 情况 | 处理 | 原因 |
 |---|---|---|
 | 同一 provider、带签名 | 原样回传 | 签名用于校验思考内容未被篡改 |
-| `redacted_thinking` | 以 `redacted:` 前缀存在 `signature` 字段里，回传时还原 | 不为罕见块型扩展统一消息模型，三种块型保持不变 |
+| `redacted_thinking` | 以 `redacted:` 前缀存在 `signature` 字段里，回传时还原 | 不为罕见块型扩展统一消息模型 |
 | 来自 OpenAI 兼容服务的推理 | 生成消息时清掉签名；回传方式由供应商档案决定（DeepSeek / Kimi 用 `reasoning_content`，MiniMax 内联） | 各家要求不同，见上一节 |
 | 跨 provider（历史里有别家的思考） | 丢弃 | 没有签名就无法校验 |
 | 被中断的半截 thinking | `build(partial=True)` 与 Loop 的取消分支都不保留 | 没有完整签名，回传会被拒 |
@@ -392,7 +394,7 @@ flywhl-harness 的对应措施：
 | 字段 | 谁在用 | 影响 |
 |---|---|---|
 | `context_window` | `ContextManager` | 清理与压缩阈值 |
-| `max_output` | 配置参考 | 单次输出上限 |
+| `max_output` | `AgentLoop._raise_output_limit()`、`ResilientProvider` | 单次输出上限：截断后提高 `max_tokens` 的天花板，降级时按备用模型收回 |
 | `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | `compute_cost()` | 每条 assistant 消息的 `usage.cost_usd`，进而驱动费用预算 |
 | `supports_thinking` | `AnthropicProvider._kwargs()` | 开启 adaptive thinking；此时不传 `temperature` |
 | `append_only` | `ContextManager` | 关闭改写历史的清理 |
@@ -542,7 +544,7 @@ def create_provider(cfg: HarnessConfig) -> tuple[Provider, str]:
 
 | 取舍 | 选择 | 代价 |
 |---|---|---|
-| 统一消息模型的块型数量 | 只有 text / thinking / tool_call 三种 | `redacted_thinking` 需要借 `signature` 字段编码 |
+| 统一消息模型的块型数量 | text / thinking / tool_call 三种，外加原样保存的供应商侧工具块 `ServerBlock` | `redacted_thinking` 需要借 `signature` 字段编码 |
 | 修补放在哪一层 | provider 内 `prepare_history()`，每次请求执行 | 每次请求多一次线性扫描；Loop 与修补规则必须对齐 |
 | 参数校验放在哪 | 执行层，不依赖服务端 | 自己维护一个迷你 JSON Schema 校验器 |
 | 推理内容是否回传 | Anthropic 只回传同 provider 且带签名的；兼容服务按供应商档案 | 换供应商后丢失推理上下文 |
@@ -622,7 +624,7 @@ Anthropic 侧是三条消息，最后一条 user 消息里两个 `tool_result` �
 
 ## 小结与延伸思考
 
-- 统一消息模型的核心是三种角色、三种块、`content` / `details` 分离与 `meta.kind`；`stop_reason` 的每个取值都对应一条明确的处理路径。
+- 统一消息模型的核心是三种角色、三种基本块（外加原样保存的 `ServerBlock`）、`content` / `details` 分离与 `meta.kind`；`stop_reason` 的每个取值都对应一条明确的处理路径。
 - 接入层是防腐层（统一事件、拼装、协议转换、历史修补）加治理层（错误分类、单层重试、成本计量、取消、前缀稳定）。
 - 前缀稳定不是某一个技巧，而是一组约束：冻结系统提示、稳定工具顺序、只追加、确定性修补、正确的缓存断点。
 

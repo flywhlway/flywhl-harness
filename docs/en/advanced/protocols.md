@@ -20,7 +20,8 @@ An MCP tool still reaches the model as an ordinary tool schema. The model cannot
 
 **The MCP client** is a stdlib-and-asyncio client for the stdio transport, tools only.
 
-- It spawns the server with a scrubbed environment: variables whose names match `KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH` are removed, then the configured `env` is layered on.
+- It spawns the server inside the system sandbox, like `bash` (`tools/confine.py`): no access to credential files, network following the global setting unless `sandbox_network` or `network_allow` is set per server, and `sandbox = "off"` honored only in user config.
+- The environment is scrubbed: variables whose names match `KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|COOKIE` or contain `_PWD`, `_PASS`, `_PAT` or `_DSN`, and values that are URLs with a password, are removed, then the configured `env` is layered on.
 - A background `_read_loop` routes responses to pending futures by `id`, so requests can overlap on one process. Server-initiated requests always get a reply: `ping` gets an empty result and everything else gets `-32601`. A server that needs sampling or roots fails fast instead of waiting forever.
 - `tools/call` is sent with no client timeout. `ToolExecutor` owns timing, and on timeout or cancel the client sends `notifications/cancelled`. MCP tools therefore share the local timeout semantics, including `unknown` for a timed-out non-idempotent external call.
 
@@ -34,9 +35,9 @@ An MCP tool still reaches the model as an ordinary tool schema. The model cannot
 
 **Not implemented:** Streamable HTTP, resources and prompts, client capabilities such as sampling, and `reconcile` for in-flight MCP calls. The chapter also notes that large tool sets crowd the context and lists remedies (tool search, code-mode, CLI plus README, per-session tool sets). The repo only truncates descriptions and fixes the order.
 
-**Skills** use progressive disclosure. `find_skills()` scans `.flywhl/skills/*/SKILL.md` and `skills/*/SKILL.md` in the workspace, reads the first 2000 characters and parses single-line `key: value` frontmatter. The list goes into the system prompt as `<available_skills>`, and the model reads the full `SKILL.md` on demand. Multi-line YAML values are not parsed. The list is frozen with the session. Skill scripts run through `bash`, so permissions still apply.
+**Skills** use progressive disclosure. `find_skills()` scans `.flywhl/skills/*/SKILL.md` and `skills/*/SKILL.md` in the workspace, reads the first 2000 characters and parses single-line `key: value` frontmatter. The list goes into the project-context message (sent ahead of the history, not part of the system prompt) as `<available_skills>`, and the model reads the full `SKILL.md` on demand. Multi-line YAML values are not parsed. The list is frozen with the session. Skill scripts run through `bash`, so permissions still apply.
 
-**AGENTS.md** is gathered by `find_project_context()`. It walks up from the workspace to the git root, takes one of `AGENTS.md` or `CLAUDE.md` per directory, and enforces a 32 KiB limit counted in UTF-8 bytes. Nearer files win when the budget runs out, and the output order puts ancestors first. Outside a git repo the walk goes to the filesystem root, which can pull in a home-directory file.
+**AGENTS.md** is gathered by `find_project_context()`. It walks up from the workspace to the git root, takes one of `AGENTS.md` or `CLAUDE.md` per directory, and enforces a 32 KiB limit counted in UTF-8 bytes. Nearer files win when the budget runs out, and the output order puts ancestors first. Outside a git repo only the workspace itself is read. These files bypass the permission layer, so a symlink pointing outside the project or at a secret is skipped with a warning.
 
 **A2A** is covered as a design. A Run maps closely onto an A2A task: `waiting_human` is input-required, `running` is working, `Harness.subscribe(run_id, after_seq)` gives resubscription. As a client, a remote agent would be an `EXTERNAL`, untrusted-output tool whose `reconcile()` finds the remote task again by idempotency key.
 

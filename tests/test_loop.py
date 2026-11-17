@@ -91,6 +91,28 @@ async def test_budget_exhausted_wraps_up(ws):
     assert wrap_req.purpose == "wrap_up" and wrap_req.tool_choice == "none" and wrap_req.tools
 
 
+async def test_tool_call_count_reaches_the_record_and_the_live_view(ws):
+    """回归：检查器的“工具调用”一直显示 0。
+
+    结束时 result 只记了轮次没记工具次数，页面在运行结束后打开就只能显示 0；
+    运行中 usage 快照又只在模型调用结束时发，工具执行完之后要等下一轮模型回复才更新。
+    """
+    h = make_harness(ws, [
+        {"tool_calls": [{"name": "ls", "args": {"path": "."}}, {"name": "ls", "args": {"path": ".", "depth": 2}}]},
+        {"tool_calls": [{"name": "ls", "args": {"path": ".", "depth": 3}}]},
+        "看完了。",
+    ])
+    res = await h.run("看看目录")
+    assert res.status == "completed"
+    rec = h.store.get_run(res.run_id)
+    assert rec.result["tool_calls"] == 3 and rec.result["turns"] == 3
+    assert rec.checkpoint["budget"]["tool_calls"] == 3
+    # 第一批两个工具执行完、第二次模型调用之前，快照里就应该是 2
+    second_turn = next(i for i, e in enumerate(res.events) if e.type == E.TURN_START and e.data["turn"] == 2)
+    before = [e.data["tool_calls"] for e in res.events[:second_turn] if e.type == E.USAGE]
+    assert before[-1] == 2
+
+
 async def test_loop_guard_stops_dead_loop(ws):
     h = make_harness(ws, [{"tool_calls": [{"name": "ls", "args": {"path": "."}}]}] * 10)
     res = await h.run("重复")

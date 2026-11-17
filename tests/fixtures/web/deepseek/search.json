@@ -1,0 +1,51 @@
+{
+  "results": [
+    {
+      "title": "httpx 0.28.1 — <em>Changelog</em>",
+      "url": "https://WWW.Python-HTTPX.org/changelog/?utm_source=search&ref=top#0281",
+      "snippet": "0.28.1 (6th December, 2024) Fix SSL case where verify=False together with client side certificates.",
+      "summary": "HTTPX 的更新日志。0.28.1 发布于 2024-12-06，修复 verify=False 与客户端证书同时使用时的 SSL 问题；0.28.0 移除了已弃用的 proxies 参数。",
+      "site_name": "HTTPX",
+      "site_icon": "https://www.python-httpx.org/favicon.ico",
+      "date": "2024-12-06T10:00:00Z",
+      "rerank_score": 2.4,
+      "authority": 3
+    },
+    {
+      "title": "httpx · PyPI",
+      "url": "https://pypi.org/project/httpx/",
+      "snippet": "The next generation HTTP client. Latest version: 0.28.1, released Dec 6, 2024.",
+      "summary": "PyPI 上的 httpx 项目页，最新版本 0.28.1，需要 Python 3.8 及以上。",
+      "site_name": "PyPI",
+      "date": "2024-12-06",
+      "rerank_score": 2.9,
+      "authority": 4
+    },
+    {
+      "title": "httpx · PyPI（重复）",
+      "url": "https://pypi.org/project/httpx/#history",
+      "snippet": "Release history",
+      "site_name": "PyPI",
+      "rerank_score": 1.1,
+      "authority": 4
+    },
+    {
+      "title": "httpx 镜像站",
+      "url": "https://mirror.spam.example/httpx",
+      "snippet": "镜像",
+      "site_name": "",
+      "date": "not-a-date",
+      "rerank_score": 0.4,
+      "authority": -1
+    },
+    {
+      "title": "ftp 链接",
+      "url": "ftp://files.example/httpx.tar.gz",
+      "snippet": "不是网页"
+    },
+    {
+      "title": "缺网址",
+      "snippet": "没有 url 字段的条目要跳过"
+    }
+  ]
+}

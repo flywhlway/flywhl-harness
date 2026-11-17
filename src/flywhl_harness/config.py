@@ -106,6 +106,114 @@ class PermissionConfig:
             auto_approve_rule(r)    # 写错了在加载时就报出来，不要等到第一次审批
 
 
+WEB_LEVELS = ("off", "search", "fetch")         # 会话联网能力：fetch 包含 search
+FETCH_SCOPES = ("cited", "ask", "public")       # 由严到松
+WEB_BACKENDS = ("deepseek", "bocha", "searxng")
+FETCH_BACKENDS = ("deepseek", "direct")
+# 只能调低的数值项：项目配置写得比用户配置大就丢弃
+_WEB_LOWER_ONLY = ("max_searches_per_run", "max_fetches_per_run", "max_results", "result_chars", "fetch_chars",
+                   "fetch_max_bytes", "timeout", "cache_ttl")
+WEB_BACKEND_KEYS = ("api_key_env", "price_per_call", "send_question", "min_rerank_score", "endpoint", "allow_private")
+
+
+def web_rank(level: str) -> int:
+    return WEB_LEVELS.index(level) if level in WEB_LEVELS else 0
+
+
+# 打开供应商侧联网的 extra_body 键（百炼、OpenAI 兼容的 web_search_options 等）。搜索发生在模型供应商那里，
+# 结果直接进模型上下文：harness 看不到、不计数、不审计。识别出来只为告警和置污点，不阻止
+NATIVE_SEARCH_KEYS = ("enable_search", "search_options", "forced_search", "web_search_options", "enable_source",
+                      "enable_citation")
+
+
+def native_web_search(extra_body: dict[str, Any] | None) -> list[str]:
+    """``extra_body`` 里打开模型侧联网的字段名（只看值为真的；``tools`` 里 type 以 web_search 开头的也算）。"""
+    body = extra_body or {}
+    hits = [k for k in NATIVE_SEARCH_KEYS if body.get(k) not in (None, False, 0, "", {}, [])]
+    tools = body.get("tools")
+    if isinstance(tools, list) and any(isinstance(t, dict) and str(t.get("type", "")).startswith("web_search") for t in tools):
+        hits.append("tools[].type=web_search")
+    return hits
+
+
+@dataclass
+class WebConfig:
+    """内置联网工具 web_search / web_fetch。默认关闭；开启后每个会话在开工前选能力（off / search / fetch），开工后只能收紧。
+
+    后端按 ``backends`` 的顺序使用，鉴权、余额、服务故障时换下一家。密钥只写环境变量名（``[web.backend.<名字>]``
+    的 ``api_key_env``），不进 /api 接口、事件和日志。项目配置里的 ``[web]`` 只能收紧，见 ``_keep_web_tight``。
+    """
+
+    enabled: bool = False
+    default: str = "off"                       # 新会话默认能力
+    backends: list[str] = field(default_factory=lambda: ["deepseek"])
+    fetch_backend: str = "deepseek"            # deepseek（服务端抓取）| direct（本机直连）
+    max_searches_per_run: int = 60             # 调研类长任务一次运行要查几十次、翻几十页公告：20 / 10 不够用
+    max_fetches_per_run: int = 30
+    max_results: int = 8                       # 单次搜索返回条数上限
+    result_chars: int = 6000                   # 单次搜索交给模型的总字符上限
+    fetch_chars: int = 20000                   # 单页正文交给模型的字符上限
+    fetch_max_bytes: int = 2_000_000           # 响应体（解压后）字节上限
+    fetch_scope: str = "ask"                   # cited | ask | public
+    fetch_allow: list[str] = field(default_factory=list)    # 额外自动放行读取的主机，写法同 permissions.network_allow
+    deny_domains: list[str] = field(default_factory=list)   # 搜索结果过滤 + 禁止读取，含子域名
+    timeout: float = 15.0
+    cache_ttl: float = 600.0                   # 同会话同参数的搜索结果缓存秒数，0 关闭
+    backend: dict[str, dict[str, Any]] = field(default_factory=dict)   # [web.backend.<名字>]
+    # 改用模型供应商自带的搜索（llm/native.py 里已确认的那几家）：会话开“搜索”时不注册 web_search，
+    # 搜索在供应商那边发生；主模型不在声明里时照常用内置工具
+    native: bool = False
+
+    def __post_init__(self) -> None:
+        check_web(self)
+
+
+def check_web(w: "WebConfig") -> "WebConfig":
+    """``[web]`` 写错在加载时就报错。_merge 用 setattr 赋值，不经过 __post_init__，所以加载完再调一次。"""
+    from .tools.egress import parse_rules   # 延迟导入：tools 依赖本模块
+
+    for k in ("enabled", "native"):
+        if not isinstance(getattr(w, k), bool):
+            raise ValueError(f"web.{k} 必须是 true 或 false，实际是 {getattr(w, k)!r}")
+    if w.default not in WEB_LEVELS:
+        raise ValueError(f"web.default 只能是 {'、'.join(WEB_LEVELS)}，实际是 {w.default!r}")
+    if w.fetch_scope not in FETCH_SCOPES:
+        raise ValueError(f"web.fetch_scope 只能是 {'、'.join(FETCH_SCOPES)}，实际是 {w.fetch_scope!r}")
+    if w.fetch_backend not in FETCH_BACKENDS:
+        raise ValueError(f"web.fetch_backend 只能是 {'、'.join(FETCH_BACKENDS)}，实际是 {w.fetch_backend!r}")
+    for b in _check_str_list("web.backends", w.backends):
+        if b not in WEB_BACKENDS:
+            raise ValueError(f"web.backends 里的 {b!r} 不认识（可选：{'、'.join(WEB_BACKENDS)}）")
+    for k in _WEB_LOWER_ONLY:
+        v = getattr(w, k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or (v == 0 and k not in ("cache_ttl",)):
+            raise ValueError(f"web.{k} 必须是正数，实际是 {v!r}")
+    parse_rules(_check_str_list("web.fetch_allow", w.fetch_allow))
+    for d in _check_str_list("web.deny_domains", w.deny_domains):
+        if not d.strip() or "/" in d:
+            raise ValueError(f"web.deny_domains 写主机名或域名（如 example.com），实际是 {d!r}")
+    if not isinstance(w.backend, dict):
+        raise ValueError(f"web.backend 必须是表，实际是 {w.backend!r}")
+    for name, spec in w.backend.items():
+        if name not in WEB_BACKENDS:
+            raise ValueError(f"[web.backend.{name}] 不认识（可选：{'、'.join(WEB_BACKENDS)}）")
+        if not isinstance(spec, dict):
+            raise ValueError(f"[web.backend.{name}] 必须是表")
+        unknown = sorted(set(spec) - set(WEB_BACKEND_KEYS))
+        if unknown:
+            raise ValueError(f"[web.backend.{name}] 有未知配置项：{', '.join(unknown)}（可选：{', '.join(WEB_BACKEND_KEYS)}）")
+        price = spec.get("price_per_call", 0)
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0:
+            raise ValueError(f"[web.backend.{name}].price_per_call 必须是非负数，实际是 {price!r}")
+        for k in ("send_question", "allow_private"):
+            if not isinstance(spec.get(k, False), bool):
+                raise ValueError(f"[web.backend.{name}].{k} 必须是 true 或 false")
+        for k in ("api_key_env", "endpoint"):
+            if k in spec and not isinstance(spec[k], str):
+                raise ValueError(f"[web.backend.{name}].{k} 必须是字符串")
+    return w
+
+
 DURABILITY_LEVELS = ("full", "normal")
 
 
@@ -165,6 +273,7 @@ class HarnessConfig:
     append_system_prompt: str | None = None
     load_agents_md: bool = True            # 加载工作区 AGENTS.md / CLAUDE.md
     load_skills: bool = True               # 渐进披露：只把技能清单放进提示词
+    trust_workspace: bool = False          # 信任所有工作区。项目配置写的丢弃，只在用户配置、-c 指定的文件里有效，见 is_workspace_trusted
     # ---- 运行时 ----
     workspace: str = "."
     data_dir: str = ".flywhl"
@@ -189,6 +298,7 @@ class HarnessConfig:
     permissions: PermissionConfig = field(default_factory=PermissionConfig)
     hooks: list[HookConfig] = field(default_factory=list)
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    web: WebConfig = field(default_factory=WebConfig)
 
     def __post_init__(self) -> None:
         check_durability(self.durability)
@@ -217,7 +327,8 @@ class HarnessConfig:
             raw = project.read_bytes()      # 只读一次：哈希与解析的必须是同一份内容
             data = tomllib.loads(raw.decode("utf-8"))
             if not path:
-                data = _keep_sandbox_on(data, project.resolve())
+                data = _no_self_trust(_only_turn_off(_keep_sandbox_on(data, project.resolve())), project.resolve())
+                data = _keep_web_tight(data, cfg.web, project.resolve())
                 data = _trusted_part(project.resolve(), raw, data, trust, _run_dir(cfg, data, explicit),
                                      cfg.permissions.auto_approve)
             _merge(cfg, data, layer=True)
@@ -249,6 +360,7 @@ class HarnessConfig:
             if pinned_provider(cfg.model) not in (None, explicit["provider"]):
                 cfg.model = None
         _merge(cfg, explicit)
+        check_web(cfg.web)
         return cfg
 
     def data_path(self) -> Path:
@@ -320,13 +432,15 @@ PROJECT_CONFIG_FILES = ("flywhl.toml", ".flywhl/config.toml")
 
 # 和启动目录的 .env 一样用白名单：只影响“用哪家模型、花多少钱、何时收尾”的设置直接生效，最坏是效果差一点、多花一点钱。
 # 其余字段都要信任——hooks / mcp_servers / verify_command 会执行命令；base_url / api_key / api_key_env / extra_body
-# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写。新增字段默认落在需要信任的一侧。
+# 决定请求发往哪里、记在谁的账上；workspace / data_dir 决定 Agent 在哪里读写；
+# system_prompt / append_system_prompt 是 harness 对模型说的话，不能由仓库作者来写。新增字段默认落在需要信任的一侧。
 _SAFE_KEYS = frozenset({
     "provider", "model", "fallback_models", "max_tokens", "temperature", "thinking", "reasoning_effort",
-    "request_timeout", "max_retries", "system_prompt", "append_system_prompt", "load_agents_md", "load_skills",
+    "request_timeout", "max_retries", "load_agents_md", "load_skills",
     "tool_timeout", "parallel_tool_limit", "cancel_grace_seconds", "heartbeat_seconds", "stale_after_seconds",
     "snapshots", "max_stop_blocks", "verify_todos", "subagent_max_depth", "enable_demo_tools",
     "context", "budget", "loop_guard",
+    "web",   # 先经过 _keep_web_tight：到这里只剩收紧的部分
 })
 # permissions 按取值判断：收紧审批的取值直接生效，放宽的（bypass、accept_edits、on_ask=allow、不剥离密钥）要信任。
 # on_ask = deny 有一个例外：用户配置里写了 auto_approve 规则时，它会让这些规则替人批准，见 split_untrusted
@@ -359,29 +473,91 @@ def flywhl_home() -> Path:
     return Path(os.environ.get("FLYWHL_HOME") or "~/.flywhl").expanduser()
 
 
+# 项目配置写了也丢弃的取值，信任过也一样：关沙箱、放开网络都是用户的决定，仓库只能收紧。具体主机的 network_allow 不在其中，走信任确认
+_NEVER_FROM_PROJECT = {"sandbox": "off", "sandbox_network": "allow"}
+
+
 def _keep_sandbox_on(data: dict[str, Any], path: Path) -> dict[str, Any]:
-    """项目配置关不掉沙箱，信任过也一样：关沙箱的决定属于用户，仓库只能收紧。``permissions.sandbox`` 与 hook、MCP 服务器
-    各自的 ``sandbox = "off"`` 都去掉。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
-    dropped = []
+    """项目配置关不掉沙箱，也放不开沙箱的网络：``permissions`` 与 hook、MCP 服务器各自的设置都去掉。
+    放开网络和关沙箱同等处理，否则工作区靠一次信任确认就能被传走。用户配置、``-c`` 指定的文件、命令行不经过这里。"""
+    dropped: list[str] = []
+
+    def keep(spec: Any, where: str) -> Any:
+        if not isinstance(spec, dict):
+            return spec
+        bad = [k for k, v in _NEVER_FROM_PROJECT.items() if spec.get(k) == v]
+        dropped.extend(f"{where}.{k} = {spec[k]!r}" for k in bad)
+        return {k: v for k, v in spec.items() if k not in bad}
+
     out = dict(data)
-    perms = data.get("permissions")
-    if isinstance(perms, dict) and perms.get("sandbox") == "off":
-        out["permissions"] = {k: v for k, v in perms.items() if k != "sandbox"}
-        dropped.append("permissions.sandbox")
-    hooks = data.get("hooks")
-    if isinstance(hooks, list):
-        dropped += [f"hooks[{i}].sandbox" for i, h in enumerate(hooks) if isinstance(h, dict) and h.get("sandbox") == "off"]
-        out["hooks"] = [{k: v for k, v in h.items() if k != "sandbox"} if isinstance(h, dict) and h.get("sandbox") == "off" else h
-                        for h in hooks]
-    servers = data.get("mcp_servers")
-    if isinstance(servers, dict):
-        off = [n for n, s in servers.items() if isinstance(s, dict) and s.get("sandbox") == "off"]
-        dropped += [f"mcp_servers.{n}.sandbox" for n in off]
-        out["mcp_servers"] = {n: {k: v for k, v in s.items() if k != "sandbox"} if n in off else s for n, s in servers.items()}
+    if "permissions" in data:
+        out["permissions"] = keep(data["permissions"], "permissions")
+    if isinstance(data.get("hooks"), list):
+        out["hooks"] = [keep(h, f"hooks[{i}]") for i, h in enumerate(data["hooks"])]
+    if isinstance(data.get("mcp_servers"), dict):
+        out["mcp_servers"] = {n: keep(s, f"mcp_servers.{n}") for n, s in data["mcp_servers"].items()}
     if dropped:
-        warnings.warn(f"{path} 里的 {'、'.join(dropped)} = \"off\" 不生效：项目配置不能关闭系统沙箱。确实要关，写在用户配置 "
-                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off", UntrustedConfigWarning, stacklevel=3)
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} 不生效：项目配置不能关闭系统沙箱，也不能放开它的网络。确实要改，写在用户配置 "
+                      f"{flywhl_home() / 'config.toml'} 里，或者启动时加 --sandbox off、--network allow",
+                      UntrustedConfigWarning, stacklevel=3)
     return out
+
+
+def _keep_web_tight(data: dict[str, Any], user: WebConfig, path: Path) -> dict[str, Any]:
+    """项目配置里的 ``[web]`` 只能收紧，信任过也一样：联网把工作区的内容送到第三方，开不开、送给谁是用户的决定。
+
+    - ``enabled``、``native`` 只能写 false；``default``、``fetch_scope`` 只能比用户配置更严；数值上限只能调低；
+    - ``backends``、``fetch_backend``、``[web.backend.*]``、``fetch_allow`` 一律丢弃：它们决定查询词和网址发给谁、
+      从哪台机器发出（``fetch_backend = "direct"`` 把抓取搬到本机）；
+    - ``deny_domains`` 与用户配置合并，只增不减。"""
+    spec = data.get("web")
+    if spec is None:
+        return data
+    if not isinstance(spec, dict):
+        return data   # 交给 _merge 报类型错误
+    dropped: list[str] = []
+    out: dict[str, Any] = {}
+    for k, v in spec.items():
+        if k in ("enabled", "native"):
+            ok = v is False   # native = true 会把查询词交给模型供应商：只认用户配置
+        elif k == "default":
+            ok = v in WEB_LEVELS and web_rank(v) <= web_rank(user.default)
+        elif k == "fetch_scope":
+            ok = v in FETCH_SCOPES and FETCH_SCOPES.index(v) <= FETCH_SCOPES.index(user.fetch_scope)
+        elif k in _WEB_LOWER_ONLY:
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v <= getattr(user, k)
+        elif k == "deny_domains":
+            ok = isinstance(v, list)
+            if ok:
+                v = list(dict.fromkeys([*user.deny_domains, *v]))
+        elif k in ("backends", "fetch_backend", "backend", "fetch_allow"):
+            ok = False
+        else:
+            ok = True   # 未知键交给 _merge 报错
+        if ok:
+            out[k] = v
+        else:
+            dropped.append(f"web.{k} = {v!r}")
+    if dropped:
+        warnings.warn(f"{path} 里的 {'、'.join(dropped)} 不生效：项目配置里的 [web] 只能收紧（关闭联网、调低上限、收窄读取范围、"
+                      f"增加禁止的域名），后端与密钥只认用户配置 {flywhl_home() / 'config.toml'} 或 -c 指定的文件",
+                      UntrustedConfigWarning, stacklevel=3)
+    return {**data, "web": out}
+
+
+def _no_self_trust(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    """仓库不能宣布自己可信，配置被信任过也一样：信任配置是同意它的 hook 和模型设置，不是同意把它的文件当成自己人写的。"""
+    if "trust_workspace" not in data:
+        return data
+    if data["trust_workspace"]:
+        warnings.warn(f"{path} 里的 trust_workspace 不生效：项目配置不能信任自己所在的工作区。确实要信任，启动时加 --trust，"
+                      f"或者写在用户配置 {flywhl_home() / 'config.toml'} 里", UntrustedConfigWarning, stacklevel=3)
+    return {k: v for k, v in data.items() if k != "trust_workspace"}
+
+
+def _only_turn_off(data: dict[str, Any]) -> dict[str, Any]:
+    """项目文件的加载，项目配置只能关不能开：用户为了看陌生仓库关掉的，仓库不能自己打开。"""
+    return {k: v for k, v in data.items() if k not in ("load_agents_md", "load_skills") or v is False}
 
 
 def split_untrusted(data: dict[str, Any], base: Path | None = None,
@@ -528,6 +704,36 @@ def record_trust(req: TrustRequest) -> None:
     """记下“这个位置的这份内容可信”。同一路径只保留最近一次确认的内容。"""
     records = _trust_records()
     records[str(req.path)] = {"sha256": req.digest, "trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    _save_trust(records)
+
+
+def trust_root(path: str | Path) -> Path:
+    """工作区信任的单位：所在的 git 仓库根，不在仓库里时是这个目录本身。子目录跟着仓库走；vendor/ 里的嵌套仓库是另一个作者写的，
+    单独算。解析到真实路径：软链接换个名字还是同一个工作区。"""
+    cur = Path(path).expanduser().resolve()
+    return next((d for d in [cur, *cur.parents] if (d / ".git").exists()), cur)
+
+
+def is_workspace_trusted(path: str | Path) -> bool:
+    """用户说过这个工作区里的文件是自己人写的吗。没说过的工作区，文件内容算不可信（污点来源），项目指令文件标注为不可信。
+    只认 ``trusted.json`` 里用户亲自确认的记录：这个文件在工作区之外，沙箱里写不到，文件工具对 ``.flywhl/`` 一律拒绝。
+    记录绑定路径，不绑定内容：工作区每天都在变。删掉仓库再在同一路径克隆一个别的，信任还在。"""
+    rec = _workspace_records().get(str(trust_root(path)))
+    return isinstance(rec, dict)
+
+
+def record_workspace_trust(path: str | Path) -> None:
+    records = _trust_records()
+    records["workspaces"] = {**_workspace_records(records), str(trust_root(path)): {"trusted_at": time.strftime("%Y-%m-%d %H:%M:%S")}}
+    _save_trust(records)
+
+
+def _workspace_records(records: dict[str, Any] | None = None) -> dict[str, Any]:
+    found = (_trust_records() if records is None else records).get("workspaces")
+    return found if isinstance(found, dict) else {}
+
+
+def _save_trust(records: dict[str, Any]) -> None:
     f = _trust_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")

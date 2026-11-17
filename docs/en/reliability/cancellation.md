@@ -23,7 +23,7 @@ asyncio's `task.cancel()` is preemptive: it raises `CancelledError` at any `awai
 | Layer | Behavior |
 |---|---|
 | Model stream | Text already generated is kept as an assistant message with `stop_reason=aborted`, because the user saw it. A half-built tool call is dropped |
-| Read-only or local tool | Aborted at once. Bash gets SIGTERM to the whole process group, then SIGKILL after 2 seconds |
+| Read-only tool or local bash command | Aborted at once. Bash gets SIGTERM to the whole process group, then SIGKILL after 2 seconds |
 | Irreversible external tool (`git push`, `curl -X POST`, non-read-only MCP) | Not interrupted. It gets a grace period (`cancel_grace` on the tool, else `cancel_grace_seconds`, default 5) and is marked `completed_after_cancel` if it finishes, or `unknown` with its idempotency key if not |
 | `task` (subagent) | Not interruptible, 30 second grace. The child token cancels the child loop, which writes its own terminal state |
 | Approval wait | `guard` raises, the approval is expired, the call gets an "unexecuted" result |

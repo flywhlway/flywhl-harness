@@ -35,7 +35,8 @@ flowchart TB
       RES[resilient.py<br/>重试 · 熔断 · 降级]
       PROV[openai_compat.py · anthropic.py<br/>mock.py · replay.py]
     end
-    TOOLS[tools/<br/>read · write · edit · bash · ls · grep<br/>todo · refs · mcp · demo]
+    TOOLS[tools/<br/>read · write · edit · bash · ls · grep<br/>todo · refs · web · mcp · demo · 沙箱]
+    NET[net/<br/>唯一出站入口 · 搜索后端]
     OBS[observe/<br/>trace · replay · evals]
 
     Clients --> H
@@ -44,6 +45,7 @@ flowchart TB
     LOOP --> CTX --> SL --> ST
     LOOP --> EX --> PERM & HOOK & APR
     EX --> TOOLS --> WS
+    TOOLS --> NET
     LOOP --> BG
     LOOP --> RES --> PROV
     SUB --> H
@@ -180,7 +182,7 @@ erDiagram
     EVENT { int seq string type json data }
 ```
 
-- **Session.meta** 冻结了系统提示词、工具集与模型（版本钉住），以及会话级授权、清理水位线；
+- **Session.meta** 冻结了系统提示词、项目指令、工具集与模型（版本钉住），以及会话级授权、清理水位线；
 - **Entry** 是上下文的事实源：`message` 或 `compaction`；
 - **Run** 带 `version`（每次迁移 +1，用于乐观锁）、`attempt`、`heartbeat_at`（租约）、`checkpoint`（工作区清单）；
 - **Step** 是工具调用的预写日志：执行副作用 **之前** 写 `started`，完成后写结果——恢复时据此判断“做没做过”；
@@ -197,15 +199,16 @@ src/flywhl_harness/
 ├── events.py            事件类型
 ├── cancel.py            CancelToken：协作式取消
 ├── config.py            配置 dataclass 树（flywhl.toml + 环境变量）
-├── prompts.py           系统提示、AGENTS.md、技能清单、压缩模板
+├── prompts.py           系统提示、项目指令通道（AGENTS.md、技能清单）、压缩模板
 ├── agent/               loop · executor · context · compaction · budget · inbox · subagent · run_context
-├── llm/                 base · models · openai_compat · anthropic · mock · replay · resilient
-├── tools/               base · schema · registry · fs · shell · extra · demo · mcp
-├── policy/              permissions · bash_analyzer · hooks · approvals
-├── runtime/             manager · store · session · state · workspace · retry · scheduler · dispatch
-├── observe/             trace · replay · evals
-├── server/app.py        FastAPI：REST + SSE
-├── web/                 index.html · app.js · md.js · style.css（无构建步骤）
+├── llm/                 base · profiles · models · openai_compat · anthropic · native · mock · replay · resilient · doctor
+├── tools/               base · schema · registry · fs · shell · extra · web · demo · mcp · sandbox · confine · egress · regex_search
+├── net/                 client（唯一出站入口）· search · exfil · extract · backends/
+├── policy/              permissions · bash_analyzer · sensitive · hooks · approvals · fatigue · supply_chain
+├── runtime/             manager · store · session · state · workspace · retry · scheduler · dispatch · capabilities
+├── observe/             trace · replay · evals · export
+├── server/              app.py（FastAPI：REST + SSE）· exposure.py（serve 的网络暴露判定）
+├── web/                 index.html · app.js · boot.js · md.js · style.css · lib/ · views/（原生 ES 模块，无构建步骤）
 └── cli.py               flywhl 命令
 ```
 

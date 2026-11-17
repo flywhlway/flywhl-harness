@@ -12,7 +12,7 @@ Workspace 是 Agent 的工作现场，沙箱是这个现场的围墙。flywhl-ha
 |---|---|---|
 | 代码与文件 | 仓库、产物、临时文件 | `Workspace.root` |
 | 依赖 | `node_modules`、`.venv`、系统包 | 与宿主共用，不做隔离 |
-| 执行环境 | shell、解释器、环境变量、网络 | 宿主进程；bash 子进程剥离密钥环境变量 |
+| 执行环境 | shell、解释器、环境变量、网络 | 宿主上的子进程，默认进系统沙箱（与宿主共用内核）；子进程剥离密钥环境变量 |
 | 元数据 | 检查点清单、快照历史、会话数据 | `.flywhl/`：`harness.db`、`shadow.git`（数据目录在工作区外时为 `shadow-<hash>.git`） |
 | 凭据 | 访问外部系统的身份 | 理想情况下不在现场内，见下文“凭据代持” |
 
@@ -378,11 +378,12 @@ _SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIA
                          r"|_(PWD|PASS|PAT|DSN)(_|$)", re.I)   # _PWD 要带前缀：PWD / OLDPWD 是当前目录
 _URL_WITH_PASSWORD = re.compile(r"^[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@", re.I)
 
-def _clean_env(strip: bool) -> dict[str, str]:
+def _clean_env(strip: bool, *, keep: Iterable[str] = ()) -> dict[str, str]:
+    """``keep`` 是剥离之后要留下的变量名，只给人批准过的沙箱外命令用。"""
     env = dict(os.environ)
-    if strip:   # GIT_CONFIG_KEY_<n> 是配置键名（名字里带 KEY），删掉它而留着 GIT_CONFIG_COUNT，git 会直接报错
+    if strip:   # 删掉 GIT_CONFIG_KEY_<n> 而留着 GIT_CONFIG_COUNT，git 会直接报错；删掉 GIT_AUTHOR_* 提交时会报身份未知
         env = {k: v for k, v in env.items()
-               if not ((_SECRET_ENV.search(k) and not _GIT_CONFIG_KEY.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
+               if k in keep or not ((_SECRET_ENV.search(k) and not _NOT_SECRET_ENV.fullmatch(k)) or _URL_WITH_PASSWORD.match(v))}
     env.setdefault("PAGER", "cat")
     env["GIT_PAGER"] = "cat"
     env["NO_COLOR"] = "1"
@@ -395,14 +396,14 @@ harness 进程自己需要 `ANTHROPIC_API_KEY` 调模型，但模型执行的 `e
 | 情况 | 是否被剥离 |
 |---|---|
 | `OPENAI_API_KEY`、`GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`MYSQL_PWD` | 是 |
-| `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是 bash 里的 git 无法使用 ssh-agent |
+| `SSH_AUTH_SOCK` | 是（名字含 AUTH），副作用是沙箱里的 git 无法使用 ssh-agent。人批准过的 `outside_sandbox` 命令保留它，`--approve-outside` 放行的也算 |
 | `DATABASE_URL=postgres://user:pass@host/db` | 是，值是带密码的 URL |
 | `PGCONN="host=db password=…"`、JSON 配置里的密码 | **否**，名字和值的形态都认不出 |
 | `~/.config/gh/hosts.yml`、`~/.docker/config.json` 等文件里的凭据 | **否**，环境变量过滤管不到文件；这条通道靠命令分析：命令里出现凭证位置时任何模式都拒绝，但运行时才拼出来的路径等混淆写法认不出，要靠下文的沙箱档位由内核拒绝 |
 
 MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True), **self.env}` 启动子进程，服务器拿不到 harness 进程里的密钥类变量，
 需要的凭证必须在 `flywhl.toml` 该服务器的 `env` 里显式给出——第三方 MCP 服务器拿到什么，从配置里一眼可见。
-进程外命令 hook 则仍继承完整的 `os.environ`，不经过这层过滤（见 [16 Hooks](/governance/hooks)）。
+进程外命令 hook 同样经过这层过滤，脚本确实要用的变量在该 hook 的 `env` 里写明取值或在 `pass_env` 里列出变量名（见 [16 Hooks](/governance/hooks)）。
 环境变量剥离只是“别把钥匙放在桌上”，不是“把钥匙锁起来”；后者需要沙箱加凭据代持。
 
 ## 浏览器自动化的隔离
@@ -447,7 +448,8 @@ MCP 服务器进程复用同一个函数：`MCPClient` 以 `{**_clean_env(True),
 
 关闭只有三个入口：用户配置 `~/.flywhl/config.toml` 里的 `sandbox = "off"`、`-c` 指定的文件、`--sandbox off`。
 项目配置里写的会被丢弃并提示，**信任了也一样**：信任一个仓库的配置，是信它的 hook 和模型设置，不等于同意拆掉隔离。陌生仓库里的
-`flywhl.toml` 不能靠一次回车换到沙箱外运行。
+`flywhl.toml` 不能靠一次回车换到沙箱外运行。放开网络按同样的规矩：项目配置里的 `sandbox_network = "allow"`（单条 hook、MCP 服务器写的也一样）丢弃，
+只有用户配置、`-c` 文件和 `--network allow` 能放开。
 
 ### 默认网络
 
@@ -492,7 +494,7 @@ network_allow = ["registry.npmjs.org", "api.github.com"]
 [[hooks]]
 event = "post_tool_use"
 command = "~/.flywhl/hooks/notify.sh"
-sandbox_network = "allow"       # 这条 hook 要发通知
+sandbox_network = "allow"       # 这条 hook 要发通知。只在用户配置里有效，项目配置写的会被丢弃
 
 [mcp_servers.keychain-bridge]
 command = "/usr/local/bin/keychain-mcp"
@@ -510,9 +512,17 @@ sandbox = "off"                 # 只在用户配置里有效，项目配置写�
 | `.flywhl/`、`flywhl.toml` | 下一次启动时读成配置 |
 | 数据目录（`data_dir` 可以改到别处） | 影子仓库和会话库，harness 在沙箱外读写 |
 | `.git/hooks`、`.git/config` | 用户的 `git commit`，或一条获准离开沙箱的 `git push` |
+| `.git/commondir`、`.git/config.worktree`、`.git/worktrees` | 决定 git 去哪读配置和钩子，写得了它们就等于写得了 `.git/config` |
 
-`.git` 只保护已经存在的，空工作区里 `git init` 照常能用。`.git` 目录本身也不能改名，否则挪开再建一个新的就绕过去了：
+工作区还没有 `.git` 时都不保护，空工作区里 `git init` 照常能用。有了 `.git` 目录，`hooks` 不存在也保护：`git init --template=` 建出来的仓库就没有它，
+Linux 上会在 `.git` 里留下一个空目录做挂载点。`.git` 是文件时（linked worktree、子模块），文件本身只读：`gitdir:` 指向哪里，用的就是哪份配置。
+`.git` 目录本身也不能改名，否则挪开再建一个新的就绕过去了：
 macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的索引、对象、引用照常写，`git add`、`git commit` 不受影响。
+
+只读规则写的是路径，工作区在 `/tmp` 这类可写位置下时，上级目录改个名就脱离了规则。所以 macOS 上工作区和它往上每一级目录都不能改名，Linux 上工作区是挂载点，本来就改不了。
+
+`commondir` 这类文件平时不存在。macOS 上照样写不进去；Linux 上不存在的文件挂不成只读，占位的空文件又会让 git 报错，所以由 harness 清理：进沙箱前清一次，运行期间每 0.1 秒清一次。这是缩短窗口，不是消除窗口。`config.worktree` 只在仓库开了 `extensions.worktreeConfig` 时才起作用；harness 被强杀时新建的这个文件会留下来，之后当成用户自己的。
+
 代价是 `git config`、`git remote add`、`git push -u` 这类要改 `.git/config` 的命令在沙箱里会失败，要走 `outside_sandbox`，或者自己在终端里跑。
 
 工作区放在数据目录里面时不保护数据目录，否则整个工作区都成了只读。这种布局要自己留意。
@@ -536,7 +546,8 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 | default、accept_edits、bypass 模式 | 都要人确认 |
 | 有 `allow` 规则、会话授权，或命中 `auto_approve` | 照样要人确认，这些都放行不了 |
 | plan 模式、`deny` 规则、凭证位置、灾难性命令 | 拒绝，人工门不能把拒绝变成放行 |
-| 无人值守（`on_ask` 不是 `wait`） | 拒绝，`--yes` 也不行 |
+| 无人值守（`on_ask` 不是 `wait`） | 拒绝，`--yes` 也不行。例外只有 `--approve-outside` 写明的命令，见下文 |
+| 配了沙箱但当前机器用不了 | 普通命令拒绝执行；`outside_sandbox` 照走这道门，人批准后在沙箱外执行 |
 | 审批卡片、终端提示 | 写明“将在沙箱外执行”，风险记为 critical，没有“本会话始终允许” |
 | 人点了批准并勾选“记住” | 只放行这一次，不产生授权 |
 | hook 在审批之前把参数改成沙箱外 | 重新判定，走人工门，hook 自己放行不了 |
@@ -546,17 +557,54 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 | 没配沙箱（`off`） | 没有门：本来就在沙箱外 |
 
 实现上，工具用 `Tool.human_gate()` 声明这道门，权限判定把它记成 `PermissionResult.human_only`，放在模式、规则、授权之上，
-执行器看到这个标记就不走 `auto_approve` 和无人值守分支。批准之后的复查和改写后的重新判定都看同一个标记，
+执行器看到这个标记就不走 `auto_approve`，无人值守分支只认 `--approve-outside`。批准之后的复查和改写后的重新判定都看同一个标记，
 所以 hook 也不能在批准之后把参数改成沙箱外。
 
-工具自己还要再核对一次。执行器只在人批准之后才设 `ToolContext.human_approved`，`BashTool` 和文件工具只认这个标记，只看参数不够：
+工具自己还要再核对一次。执行器只在过了人工门之后才设 `ToolContext.human_approved`，`BashTool` 和文件工具只认这个标记，只看参数不够：
 回放把工具包成 `RecordedTool`，权限层看不到人工门，模式又是 bypass，没有录制结果的调用落到真实工具上时，`outside_sandbox` 就直接生效了。
 这样任何走不到审批的路径，默认都是拒绝。
 
 文件工具的门要知道工作区在哪，权限层通过 `Tool.human_gate_in()` 取。门放在工具上而不是权限层，是为了回放：
 `RecordedTool` 没有这道门，已有轨迹里写过 `.git/config` 的调用才能照原样重放，不会分叉。
 
-用户选择了让命令在外面跑，后果也在外面：它能读凭证、能写工作区之外，网络不受限。环境变量照样剥离。
+**无人值守时的显式放行。** 发布任务走到 `git push` 时没有人能点批准，只能失败。`--approve-outside` 让人把这一个决定提前做了：
+
+```bash
+flywhl run "发布 0.3.0" --json --trust --approve-outside 'git push origin main'
+```
+
+这个决定只能由当时在命令行前的人做，所以限制写得很死：
+
+- 只有 `flywhl run` 的命令行参数，配置文件和环境变量都写不了，`resume`、`serve` 也没有；
+- 必须写命令模式，第一个词要是具体的命令名。`*`、路径（工作区里的脚本沙箱里的命令能改）、解释器和包装命令（`bash`、`python`、`env`、`sudo`……）都拒绝；
+- 只在无人值守时生效（`--json`、`--approve`、`on_ask = "deny"`），有人在场时照样问人，不能和 `--yes` 一起用；
+- 只管 bash，`write`、`edit` 写 `.git/hooks`、`.git/config` 不在其中。
+
+判定比 `auto_approve` 严，因为命令离开沙箱就没有东西兜底：
+
+| 不放行 | 原因 |
+|---|---|
+| 复合命令里有一段不匹配 | `git push && curl …` 不能搭便车 |
+| 实际执行的程序不在命令文本里，嵌着另一段代码，或者解析不了 | 命令替换、`git push --receive-pack=…` 和它的缩写、`ext::` 地址都能匹配 `git push*`。解析不了的命令 bash 不一定拒绝，分号后面的部分照样执行 |
+| 命令分析为高危 | `git push --force` 同样匹配。人工门把 `risk` 一律记成 critical，这里看的是命令分析 |
+| 输出重定向到文件 | `git push > ~/.zshrc` 也匹配 `git push*`，`2>&1` 不算 |
+| 托管基线要求确认的 | 同 `auto_approve` |
+| 会话有污点 | 没信任过的工作区里读过文件也算，所以这个参数只对信任过的仓库有用 |
+| PreToolUse hook 要求确认的 | 守卫明确要人看 |
+
+plan 模式、`deny` 规则、凭证位置、灾难性命令在这之前已经拒绝了，回放和脚本直接调用走不到这里。
+
+每次放行留两条记录：`approvals` 表里一条 `decided_by = policy:approve_outside` 的记录（别的无人值守判定不建这种记录），事件流里一条 `approve_outside` 通知，写明命令和命中的模式。
+
+模式按文本匹配，担保不了命令读到的东西。`make deploy`、`npm run release` 跑的是工作区里的文件，而沙箱里的命令能改这些文件，这类命令写进模式之前要想清楚。
+
+`bash` 工具的参数描述还写着“无人值守时直接拒绝”。工具描述算进回放指纹，改它会让已发布的轨迹分叉，所以没动：模型看到的比实际严，不影响判定。
+
+用户选择了让命令在外面跑，后果也在外面：它能读凭证、能写工作区之外，网络不受限。
+
+环境变量照样剥离，只留下 `SSH_AUTH_SOCK`：`git push` 是这个参数最常见的用途，靠这个变量找 ssh-agent 的用户没有它就 push 不了。
+它给的是一次签名的能力，读不到私钥，而且这条命令是人批准过的：当场确认，或者用 `--approve-outside` 提前写明了模式。`GH_TOKEN`、`*_API_KEY` 的值本身就是凭证，继续剥离，
+所以 `gh` 要靠 `gh auth login` 存下的凭据，靠环境变量登录的要自己在终端里跑。沙箱里的 bash 不受影响，看不到这个变量。
 
 ### 已有配置的迁移
 
@@ -565,7 +613,7 @@ macOS 上拒绝写这个目录项，Linux 上把它挂成挂载点。里面的�
 | 什么都没写 | `auto`，网络 `allowlist` | 用户配置写 `sandbox = "off"` |
 | `sandbox = "off"` 在用户配置里 | 不变 | 不用改 |
 | `sandbox = "off"` 在项目配置里 | 丢弃并提示 | 挪到用户配置 |
-| `sandbox = "macos"` 或 `"linux"`，没写网络 | 网络从 `allow` 变成 `allowlist` | 写 `sandbox_network = "allow"` |
+| `sandbox = "macos"` 或 `"linux"`，没写网络 | 网络从 `allow` 变成 `allowlist` | 在用户配置或 `-c` 文件里写 `sandbox_network = "allow"`，项目配置写的丢弃 |
 | hook、MCP 服务器要读家目录里的文件或联网 | 会失败 | 按上面单独设置 |
 
 ### 开销
@@ -585,7 +633,8 @@ macOS 是 Apple Silicon 本机，Linux 是同一台机器上 Docker 里的 arm64
 ### 这一层不管的事
 
 - **写进工作区、之后在沙箱外执行的东西。** `.git/hooks`、`.git/config` 已经只读，但沙箱里还能写 `Makefile`、`.envrc`、`package.json` 的脚本，
-  以及嵌套仓库和子模块的配置（`.git/modules`）；工作区一开始没有 `.git` 时，第一条命令建出来的也没有保护。
+  以及嵌套仓库和子模块的配置（`.git/modules`）；工作区一开始没有 `.git` 时，第一条命令建出来的也没有保护。`core.hooksPath` 指到工作区目录（`.husky` 这类）时，那个目录同样写得进去。
+  Linux 上 `flywhl.toml` 还不存在时，沙箱里能新建它，里面的高危设置要信任才生效；macOS 按路径拒绝。
   用户之后在终端里跑 `make`、进目录，或者批准一条 `outside_sandbox` 的命令，这些内容就在外面执行了。人工门上要看清楚命令本身，也要想到它会读工作区；
 - **工作区本身的数据。** 工作区可读，白名单里的主机是出得去的。放行一个谁都能上传的主机，等于放行外发；
 - **共享内核。** 系统沙箱挡的是误操作和注入驱动的越界，不是内核漏洞。跑不可信代码、尤其多租户时，见上文的运行时选型；
@@ -655,7 +704,8 @@ macOS 上 `auto` 落到这一档，也可以写 `permissions.sandbox = "macos"`�
   （`test_sandbox_fails_closed_when_unavailable`、`test_auto_without_any_sandbox_refuses_and_says_how_to_fix_it`）。
 - **sandbox-exec 已被 Apple 标为 deprecated**，但仍随系统提供；配置语法（SBPL）没有正式文档，系统升级后要重跑上面的测试。
   非 macOS 或 sandbox-exec 不能用时，相关测试自动跳过。
-- 项目配置可以打开它，不能关掉（`sandbox = "off"` 信任了也丢弃）。`sandbox_network` 可以设成 `deny`；`allow`、`allowlist`、`auto` 都要先信任，
+- 项目配置可以打开它，不能关掉，也不能放开网络：`sandbox = "off"`、`sandbox_network = "allow"` 信任了也丢弃，单条 hook、MCP 服务器写的同样丢弃。
+  放开网络等于工作区能被传走，和关沙箱一样不能靠一次回车换到。`sandbox_network` 可以设成 `deny`；`allowlist`、`auto` 要先信任，
   因为不知道用户配置里原来是哪一档，它们相对 `deny` 都是放宽。`network_allow` 的条目、`unix_sockets` 放行的套接字同样要信任，见 [19 安全](/governance/security)。
 
 ### 本机 IPC：沙箱外的进程替它执行
@@ -788,19 +838,11 @@ seccomp 会拦下 bubblewrap 需要的 `unshare`（`--security-opt seccomp=uncon
 
 容器里让 harness 当 PID 1 时要加 `docker run --init`。bwrap 退出后留下的进程归 PID 1 接管，Python 不回收，每条沙箱命令留一个僵尸，最后占满 `--pids-limit`，`fork` 开始失败。
 
-### 设计草案：只在沙箱档位下允许 bypass（未实现）
+### bypass 不要求沙箱
 
-bypass 的注释一直写着“只应在隔离沙箱中使用”，但没有任何机制检查这一点。打算这样补：
-
-1. `permissions.sandbox` 增加取值 `external`：使用者声明 harness 已经跑在容器或 VM 里，隔离由外部负责。harness 验证不了这个声明，
-   作用是让“我在沙箱外开 bypass”不再是默认值，而是一个写进配置、留在审计里的显式选择；
-2. 构造 Run 时（`Harness._build_rc`）mode 为 bypass 而 sandbox 为 `off`，**拒绝启动** 并说明原因，而不是悄悄降级成 default——
-   无人值守的任务降级之后会卡在审批上，比报错更难排查；
-3. Web UI 与 `/mode bypass` 在 sandbox 为 `off` 时给出同样的拒绝。
-
-没有直接实现，是因为它改变现有的公开行为：`examples/` 默认以 bypass 运行，CI 的 Ubuntu job 会跑这些示例；
-回放（`observe/replay.py`）也以 bypass 创建会话；测试里大量使用 bypass。迁移要把这些位置显式声明为 `external`
-（它们用脚本化模型，不需要真实隔离），这是对 v0.1.0 的不兼容改动，留待单独决定。
+早期草案想加一个 `external` 档位，bypass 配 `off` 时拒绝启动。没有采用：沙箱默认开启之后，bypass 默认就在沙箱里，
+要跑到沙箱外必须显式写 `sandbox = "off"` 或 `--sandbox off`，这个显式选择已经留在配置里，草案要解决的问题不存在了。
+加 `external` 还要改所有示例和回放入口，而它的取值 harness 验证不了。
 
 ## 接入远程沙箱执行器
 
@@ -913,13 +955,13 @@ uv run pytest tests/test_security.py::test_shadow_repo_is_per_workspace -q
 - write / edit 原子写（临时文件 → fsync → `os.replace`），进程中途被杀也不会留下半截文件。
 - 并行 Agent 用 worktree + 合并队列最稳妥；共享工作区要在文件锁、所有权划分、合并队列之间取舍。
 - 沙箱按代码可信度、密度、能力需求在容器、gVisor、Firecracker、Kata 之间选型；冷启动靠预热池摊平，容量按到达率 × 冷启动时长估算。
-- 系统沙箱默认开启（`sandbox = "auto"`），用不了时拒绝执行，不退回沙箱外；只有用户配置、`-c`、`--sandbox off` 能关掉，项目配置不能。
+- 系统沙箱默认开启（`sandbox = "auto"`），用不了时拒绝执行，不退回沙箱外；只有用户配置、`-c`、`--sandbox off` 能关掉，项目配置不能，放开网络（`sandbox_network = "allow"`）同样如此。
   bash、命令 hook、MCP 服务器、`verify_command` 共用一层：凭证位置不可读写、写操作限制在工作区与临时目录。
 - 网络默认是空白名单的 `allowlist`：经代理按主机名放行，DNS 与本机套接字一并拒绝，被拦时报错写明主机和放行办法。Linux 上代理经 Unix 套接字和沙箱里的转发器接起来。
-- 要在沙箱外跑命令用 `outside_sandbox`，这是一道独立的人工门，任何模式都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时拒绝。
-  工具只认执行器在人批准之后给的标记，回放和直接调用走不到这里。
-- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`。影子 git 自己也跑在沙箱外，不收录嵌套仓库，不执行它们的配置。
-- “只在沙箱档位下允许 bypass”还是设计草案。
+- 要在沙箱外跑命令用 `outside_sandbox`，这是一道独立的人工门，任何模式都要人确认，`auto_approve`、规则、会话授权都放行不了，无人值守时拒绝，只有命令行上 `--approve-outside` 写明的命令例外。
+  工具只认执行器过了人工门之后给的标记，回放和直接调用走不到这里。
+- 工作区里之后会在沙箱外起作用的位置只读：`.flywhl/`、`flywhl.toml`、数据目录、`.git/hooks`、`.git/config`，以及把 git 引到别处读配置的 `.git/commondir`、`.git/config.worktree`、`.git/worktrees`。影子 git 自己也跑在沙箱外，不收录嵌套仓库，不执行它们的配置。
+- bypass 不要求沙箱。沙箱默认开启后，要在沙箱外用 bypass 必须显式关沙箱。
 - 出口默认拒绝，凭据由代理持有；本项目的环境变量剥离（bash、MCP 服务器、命令 hook 共用一套规则）只是最小实现。
 
 下一章把这些防线放到同一张威胁模型里：[19 安全：注入、凭据与供应链](/governance/security)。

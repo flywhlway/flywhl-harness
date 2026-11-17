@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.error
+import urllib.request
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -23,7 +25,7 @@ from bench.common import (  # noqa: E402
 from bench.q2 import run_q2, schedule, trial_env  # noqa: E402
 from bench.q3 import run_q3  # noqa: E402
 from bench.rehearsal import problems, script_for  # noqa: E402
-from bench.taskset import CATEGORIES, load_tasks, run_check, validate_task  # noqa: E402
+from bench.taskset import CATEGORIES, Task, answers_hidden, load_tasks, run_check, served, validate_task  # noqa: E402
 from flywhl_harness import Store  # noqa: E402
 from flywhl_harness.observe.evals import mcnemar_exact  # noqa: E402
 from flywhl_harness.tools.sandbox import Detected  # noqa: E402
@@ -139,7 +141,7 @@ def test_real_runs_refuse_to_start_without_a_working_sandbox(monkeypatch):
 def test_regression_reruns_real_tasks_under_its_own_id():
     regression, plan = load_plan(REGRESSION), load_plan()
     assert regression["id"].startswith(plan["plan_id"] + "-")
-    assert set(regression["tasks"]) <= {t.id for t in load_tasks() if t.sandbox_sensitive}
+    assert set(regression["tasks"]) <= {t.id for t in load_tasks()}
 
 
 def test_rehearsal_flags_results_that_prove_nothing():
@@ -264,6 +266,7 @@ def test_unknown_failure_class_is_rejected(tmp_path):
 async def test_pipeline_runs_end_to_end_with_a_scripted_model(tmp_path, monkeypatch):
     """脚本化模型照参考答案做题：结果、轨迹、回放、脱敏、报告走一遍。沙箱敏感题的区分度在容器彩排里验证。"""
     monkeypatch.setenv("BENCH_WORK", str(tmp_path))      # 镜像里默认是 /work，测试沙箱里只读
+    monkeypatch.delenv("FLYWHL_BENCH_DISPOSABLE", raising=False)   # 基准镜像里也有这个变量，但测试沙箱里任务目录只读
     plan = load_plan()
     plan["q2"] = {**plan["q2"], "trials": 1}
     tasks = [t for t in TASKS if t.id == "fix-pagination"]
@@ -345,3 +348,40 @@ def test_site_pages_refuse_secrets_in_handwritten_text(tmp_path, note):
         report.write_pages(report.build(tmp_path), tmp_path / "docs")
     assert not (tmp_path / "docs").exists()
 
+
+def test_answers_are_unreadable_while_hidden_and_come_back_afterwards(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYWHL_BENCH_DISPOSABLE", "1")
+    root = tmp_path / "tasks"
+    (root / "t").mkdir(parents=True)
+    (root / "t" / "solution.sh").write_text("echo 答案\n", encoding="utf-8")
+    root.chmod(0o750)
+    with pytest.raises(RuntimeError, match="模型出错"), answers_hidden(root):
+        with pytest.raises(PermissionError):
+            (root / "t" / "solution.sh").read_text(encoding="utf-8")
+        with pytest.raises(PermissionError):
+            list(root.iterdir())
+        raise RuntimeError("模型出错")   # 试验中途失败也要恢复，不然后面的检查脚本都读不到
+    assert root.stat().st_mode & 0o777 == 0o750
+    assert (root / "t" / "solution.sh").read_text(encoding="utf-8") == "echo 答案\n"
+
+
+def test_answers_stay_put_on_the_host(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLYWHL_BENCH_DISPOSABLE", raising=False)
+    root = tmp_path / "tasks"
+    root.mkdir(mode=0o750)
+    with answers_hidden(root):
+        assert root.stat().st_mode & 0o777 == 0o750
+
+
+def test_local_service_keeps_answering_while_answers_are_hidden(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYWHL_BENCH_DISPOSABLE", "1")
+    root = tmp_path / "tasks"
+    (root / "t" / "served" / "sub").mkdir(parents=True)
+    (root / "t" / "served" / "sub" / "items.json").write_text('{"items": []}', encoding="utf-8")
+    task = Task("t", "标题", "environment", "提示词", root / "t", serve="served")
+    with served(task) as port, answers_hidden(root):
+        url = f"http://127.0.0.1:{port}/sub/items.json"
+        assert urllib.request.urlopen(url, timeout=5).read() == b'{"items": []}'
+        assert urllib.request.urlopen(f"{url}?x=1", timeout=5).read() == b'{"items": []}'
+        with pytest.raises(urllib.error.HTTPError, match="404"):
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/../task.toml", timeout=5)

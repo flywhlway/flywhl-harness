@@ -162,6 +162,7 @@ _HELP = """我是 **flywhl-demo**：一个内置的规则演示模型，不需�
 | `循环测试` | 重复调用检测（loop guard） |
 | `压缩演示` | 上下文水位上升 → 自动压缩 |
 | `错误演示` | 工具报错 → 模型读到错误后自我修正 |
+| `联网搜索 httpx 最新版本` | 联网工具：会话能力位、来源卡片、污点（要在开工前打开「联网」） |
 
 接入真实模型：设置 `ANTHROPIC_API_KEY`，或 `OPENAI_API_KEY` + `FLYWHL_BASE_URL`（DeepSeek、通义、Ollama 等 OpenAI 兼容服务）。"""
 
@@ -293,6 +294,8 @@ class DemoProvider(Provider):
             return {"text": "预算即将耗尽，我在这里收尾：\n\n" + self._summarize_results(msgs[start + 1 :]) + "\n\n未完成的部分可以在新的运行中继续。"}
         if is_sub:
             return self._subagent(prompt, step, msgs[start + 1 :])
+        if re.search(r"联网|上网|网上|web", prompt.lower()):
+            return self._web(prompt, step, msgs[start + 1 :], {t.get("name") for t in req.tools or []})
 
         thought, plan = _plan_for(prompt)
         if not plan:
@@ -304,6 +307,24 @@ class DemoProvider(Provider):
             # 循环演示时每轮说同样的话：这正是“死循环”的样子
             return {"thinking": thought if step == 0 else "", "text": lead, "tool_calls": plan[step]}
         return {"text": "完成。以下是执行结果摘要：\n\n" + self._summarize_results(msgs[start + 1 :])}
+
+    def _web(self, prompt: str, step: int, msgs: list[Message], tools: set[str]) -> dict[str, Any]:
+        """联网演示：先搜索，开了读取就读第一条结果，最后按 [编号] 引用来源作答。"""
+        if "web_search" not in tools:
+            return {"text": "这个会话没有开联网，我看不到 web_search 工具。联网要在开工前选：新建会话，在输入框左下角把「联网」"
+                            "改成「仅搜索」或「搜索并读取网页」，再发送任务。"}
+        query = re.sub(r"联网搜索|联网查一下|联网|上网|网上|搜索|web", " ", prompt, flags=re.I).strip() or "flywhl harness"
+        found = [m for m in msgs if m.role == "tool" and m.tool_name == "web_search" and not m.is_error]
+        hits = (found[-1].details or {}).get("hits") or [] if found else []
+        if step == 0:
+            return {"thinking": "这是时效性问题，工作区里没有答案：先联网搜索，结果是外部数据，只当参考。",
+                    "text": "我先联网搜索。", "tool_calls": [_call("web_search", query=clip(query, 60), count=5)]}
+        if step == 1 and hits and "web_fetch" in tools:
+            return {"text": "读一下第一条结果的原文。", "tool_calls": [_call("web_fetch", url=hits[0]["url"])]}
+        if not hits:
+            return {"text": "没有搜到可用的结果。可以换个关键词再试。"}
+        lines = [f"[{h.get('n')}] {h.get('title')} — {h.get('url')}" for h in hits[:5]]
+        return {"text": "根据搜索结果（外部数据，仅供参考）：\n\n" + "\n".join(lines)}
 
     def _subagent(self, brief: str, step: int, msgs: list[Message]) -> dict[str, Any]:
         if step == 0:

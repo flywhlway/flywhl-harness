@@ -59,7 +59,7 @@ harness 里的每个组件都隐含着一个判断：“模型自己做不到这
 | CAS 状态机 | `RunStateMachine`、`Store.cas_run` | 治理 | — |
 | 预算硬上限 | `Budget.check` 的 `hard` | 治理 | — |
 | 影子 git 快照 | `ShadowGit` + `snapshots` | 治理（可回滚） | — |
-| 污点升级 | `PermissionPolicy.evaluate` 中的 `tainted`（写入会话元数据，子代理污点上传父 Run） | 治理（安全） | — |
+| 污点升级 | `PermissionPolicy.evaluate` 中的 `tainted`（写入会话元数据，子代理污点上传父 Run，父 Run 的污点在派生时下传子代理） | 治理（安全） | — |
 | bash 命令分析 | `policy/bash_analyzer.analyze` | 治理（安全） | —（剥包装命令、递归分析 `sh -c`；`catastrophic` 在任何模式下都拒绝，`bypass` 也不例外） |
 | 熔断与探测名额归还 | `CircuitBreaker`（`allow` / `release`） | 治理（可用性） | — |
 | DAG 调度的租户 / 全局名额 | `DagScheduler`（先租户后全局） | 治理（配额） | — |
@@ -104,7 +104,7 @@ harness 里的每个组件都隐含着一个判断：“模型自己做不到这
 | 循环守卫 | `loop_guard.warn_repeats` / `stop_repeats` / `max_consecutive_errors` / `same_file_edit_warn` | 3 / 5 / 6 / 6 | 调大即近似关闭；没有单独的启用开关 |
 | 预算软提醒 | `budget.soft_ratio` | `0.8` | 设为 `1.0` 时软阈值与硬阈值重合，软提醒不再出现 |
 | 预算收尾 | `budget.wrap_up_on_exhaust` | `True` | 耗尽时直接结束，不做总结 |
-| AGENTS.md / 技能清单 | `load_agents_md` / `load_skills` | `True` | 系统提示不再包含对应段落 |
+| AGENTS.md / 技能清单 | `load_agents_md` / `load_skills` | `True` | 项目指令通道不再包含对应段落 |
 | 子代理 | `subagent_max_depth` | `2` | 见下方注意事项 |
 | 并行工具 | `parallel_tool_limit` | `8` | 设为 `1` 即串行 |
 

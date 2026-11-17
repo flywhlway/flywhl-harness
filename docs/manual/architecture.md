@@ -66,6 +66,7 @@ sequenceDiagram
 | `bash` | 按命令分析 | 只读命令按 READ 处理，其余进入权限判定；可中断 |
 | `todo_write` | READ | 外置计划，只改 harness 内部状态 |
 | `read_ref`、`search_ref` | READ | 分页读取或检索外置结果 |
+| `web_search`、`web_fetch` | READ，结果算不可信内容 | 联网搜索与读取网页；默认关闭，在用户配置 `[web]` 里开启 |
 | `task` | 由子代理自身把关 | 派生隔离上下文的子代理，只回传结构化结论 |
 | MCP 工具 | EXTERNAL；配置点名的为 READ | 命名为 `mcp__<服务器>__<工具>`；服务器自报的注解默认不采信 |
 
