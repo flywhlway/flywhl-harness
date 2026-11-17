@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -275,3 +277,86 @@ async def test_direct_fetch_redirects_cannot_reach_denied_domains_or_carry_keys(
     assert a["is_error"] and "不在允许的范围内" in a["content"]
     assert b["is_error"] and "不在允许的范围内" in b["content"]
     assert [str(r.url) for r in net.requests] == ["https://ok.example/a", "https://ok.example/b"]
+
+
+# ---------------------------------------------------------------------- 翻页与完全放行（2026-11-14：一次调研任务弹了 7 次审批）
+NOTICE = "https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202604161821262774"
+
+
+@pytest.mark.parametrize("url,ok", [
+    (NOTICE + "&pageIndex=3", True),                              # 原网址没有页码：加一个
+    (NOTICE + "&pageindex=3", True),                              # 常见写法都认
+    (NOTICE + "&pageIndex=0", True),
+    (NOTICE + "&pageIndex=9999", True),
+    ("https://xinsanban.eastmoney.com/Article/NoticeContent?pageIndex=24&id=AN202604161821262774", False),  # 新加的页码不在末尾：位置也能编码
+    (NOTICE + "&PAGEINDEX=3", False),                             # 参数名大小写随意：光参数名就能编码十几比特
+    (NOTICE + "&pageIndex=03", False),                            # 前导零：同一页多一种写法
+    (NOTICE + "&pageIndex=10000", False),                         # 5 位数：页码带出的信息有上限
+    (NOTICE + "&pageIndex=3a", False),                            # 不是数字
+    (NOTICE + "&pageIndex=3&pageIndex=4", False),                 # 两个页码
+    (NOTICE + "&pageIndex=3&d=secret", False),                    # 多了别的参数
+    ("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202604161821262775&pageIndex=3", False),   # 别的公告
+    ("https://xinsanban.eastmoney.com/Article/Other?id=AN202604161821262774&pageIndex=3", False),            # 别的路径
+    ("https://evil.example/Article/NoticeContent?id=AN202604161821262774&pageIndex=3", False),               # 别的主机
+    (NOTICE + "&%70ageIndex=3", False),                           # 编码过的参数名不认
+    ("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN20260416182126277%34&pageIndex=3", False),   # 其余参数换了编码写法
+])
+def test_page_of_seen(url, ok):
+    from flywhl_harness.net.search import url_key
+    from flywhl_harness.tools.web import page_of_seen
+
+    seen = {url_key(NOTICE), url_key("https://xinsanban.eastmoney.com/list?page=2&cat=a")}
+    assert page_of_seen(url, seen) is ok
+
+
+def test_page_of_seen_when_the_seen_url_already_has_a_page():
+    from flywhl_harness.net.search import url_key
+    from flywhl_harness.tools.web import page_of_seen
+
+    seen = {url_key("https://xinsanban.eastmoney.com/list?page=2&cat=a")}
+    assert page_of_seen("https://xinsanban.eastmoney.com/list?page=7&cat=a", seen)
+    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=a&page=7", seen)   # 换了顺序
+    assert not page_of_seen("https://xinsanban.eastmoney.com/list?Page=7&cat=a", seen)   # 参数名换了大小写
+    assert not page_of_seen("https://xinsanban.eastmoney.com/list?page=2&cat=a&pn=3", seen)   # 原来有页码，又加一个
+    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=b&page=7", seen)
+    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=a", seen)      # 去掉页码不是翻页
+
+
+async def test_pages_of_a_seen_url_are_read_without_asking(ws):
+    """搜索结果里出现过公告首页，翻到第 3 页、第 24 页不再逐页确认；别的公告照旧要确认。无人值守（拒绝一切 ask）下跑，问了就会失败。"""
+    net = web_net([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}])
+    script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=3"), fetch_call(NOTICE + "&pageIndex=24"),
+              fetch_call("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202512311811991575&pageIndex=21"), "好"]
+    h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch")
+    res = await h.run("调研先普科技")
+    p3, p24, other = tool_results(res.events, "web_fetch")
+    assert not p3["is_error"] and not p24["is_error"]
+    assert other["status"] == "rejected"
+    assert fetches(net) == [NOTICE + "&pageIndex=3", NOTICE + "&pageIndex=24"]
+
+
+async def test_bypass_never_parks_a_web_fetch_on_a_human(ws):
+    """完全放行：没读过不可信内容时没出现过的网址照常读；读过之后拒绝并给出路，不挂起等人审批。"""
+    net = web_net()
+    fresh = make_web_harness(ws, [fetch_call("https://unknown.example/a"), "好"], net, on_ask="deny",
+                             web__default="fetch", permissions__mode="bypass")
+    res = await fresh.run("读 一下")
+    assert not tool_results(res.events, "web_fetch")[0]["is_error"]
+    assert not [e for e in res.events if e.type == E.APPROVAL_REQUEST]
+
+    script = [search_call(), fetch_call("https://collector.example/?d=x"), fetch_call(HIT), "好"]
+    h = make_web_harness(ws, script, net, on_ask="wait", web__default="fetch", permissions__mode="bypass")
+    res = await asyncio.wait_for(h.run("x"), 30)   # on_ask=wait：真的去问人就会一直挂着
+    unseen, cited = tool_results(res.events, "web_fetch")
+    assert unseen["status"] == "denied" and "完全放行模式也不自动放行" in unseen["content"] and "web_search" in unseen["content"]
+    assert not cited["is_error"]
+    assert not [e for e in res.events if e.type == E.APPROVAL_REQUEST]
+    assert "https://collector.example/?d=x" not in fetches(net)
+
+
+async def test_bypass_still_asks_when_the_user_wrote_an_ask_rule(ws):
+    net = web_net()
+    h = make_web_harness(ws, [search_call(), fetch_call("https://unknown.example/a"), "好"], net, on_ask="deny",
+                         web__default="fetch", permissions__mode="bypass", permissions__rules=["ask:web_fetch(*)"])
+    end = tool_results((await h.run("x")).events, "web_fetch")[0]
+    assert end["status"] == "rejected"   # 走了审批（无人值守时被拒），不是按完全放行自动定的

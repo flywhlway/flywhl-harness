@@ -26,7 +26,7 @@ from ..cancel import RunCancelled
 from ..events import E, Event
 from ..policy.approvals import OUTSIDE_BY
 from ..policy.hooks import HookEvent, HookInput
-from ..policy.permissions import Decision, PermissionResult, grant_for, strictest
+from ..policy.permissions import Decision, Mode, PermissionResult, grant_for, strictest
 from ..runtime.workspace import CredentialPath, PathEscape
 from ..tools.base import Effect, Tool, ToolContext, ToolResult, TransientToolError
 from ..tools.schema import format_errors, validate
@@ -365,12 +365,23 @@ class ToolExecutor:
             if code and publish is not None:   # 不带参数：被拦下的正是参数里疑似密钥的那段，通知不能再抄一遍
                 publish(E.NOTICE, {"level": "warn", "code": code, "text": f"{tool.name} 调用被拦截：{why}"})
             return replace(perm, decision=Decision.DENY, reason=why)
-        if verdict == "ask" and rc.tainted and getattr(rc.approvals, "on_ask", "wait") == "allow":
+        if verdict != "ask":
+            return perm
+        if rc.tainted and getattr(rc.approvals, "on_ask", "wait") == "allow":
             # --yes 自动批准所有 ask。会话读过不可信内容后，没出现过的网址正是注入外传的通道，
             # 自动批准就等于 fetch_scope = public；没读过不可信内容时照常按 --yes 放行
             return replace(perm, decision=Decision.DENY,
                            reason=f"{why}。会话读取过不可信内容，--yes 不自动批准这类读取：请先 web_search 找到它，或请用户把网址发过来")
-        if verdict == "ask" and perm.decision == Decision.ALLOW:
+        if rc.permissions.mode == Mode.BYPASS and perm.decision == Decision.ALLOW:
+            # 完全放行：用户选了“不要停下来问我”，这里和 --yes 同一个口径，自己定、不挂起等人。
+            # 没读过不可信内容时没有注入来源，照常放行；读过之后拒绝并给出路（先搜索），长任务不会卡在一张审批卡上。
+            # 用户自己写的 ask 规则（perm 已是 ASK）照旧问人
+            if not rc.tainted:
+                return perm
+            return replace(perm, decision=Decision.DENY,
+                           reason=f"{why}。会话读取过不可信内容，完全放行模式也不自动放行这类读取（防止提示注入借网址把数据带出去）："
+                                  "请先 web_search 找到它，或请用户把网址发过来")
+        if perm.decision == Decision.ALLOW:
             return replace(perm, decision=Decision.ASK, reason=why)
         return perm
 

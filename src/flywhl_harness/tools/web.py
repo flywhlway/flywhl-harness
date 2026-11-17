@@ -105,6 +105,67 @@ def seen_urls(rc: "RunContext") -> set[str]:
     return out
 
 
+# 表示“第几页 / 从第几条开始”的查询参数（按原文小写比对，不解码：%70age 不算）
+PAGE_KEYS = frozenset({
+    "page", "pageindex", "page_index", "pagenum", "page_num", "pagenumber", "pageno", "page_no", "pn", "p", "pg",
+    "curpage", "cur_page", "currentpage", "current_page", "offset", "start", "from", "skip",
+})
+# 原网址没有页码、要新加一个时，参数名只认这些写法（区分大小写）：大小写随意的话，光参数名就能多编码十几比特
+PAGE_NAMES = PAGE_KEYS | {"Page", "pageIndex", "pageNum", "pageNumber", "pageNo", "curPage", "currentPage"}
+_PAGE_VALUE = re.compile(r"0|[1-9]\d{0,3}")   # 不收前导零：0012 和 12 是同一页，多一种写法就多一份可编码的信息
+_SEEN_PAGE = re.compile(r"\d{1,4}")           # 原网址里的页码只要是数字就行，它不是模型写的
+
+
+def page_of_seen(url: str, seen: set[str]) -> bool:
+    """``url`` 是不是某个出现过的网址翻到另一页。协议、主机、路径相同，查询串按原文逐段比对（不解码、不换顺序），只允许两种差别：
+
+    - 原网址有页码参数：同一个位置、同一个参数名，只换取值；
+    - 原网址没有页码参数：在末尾加一个，参数名是 ``PAGE_NAMES`` 里的写法。
+
+    取值是不超过 4 位、没有前导零的数字。
+
+    为什么可以不问人：出现过的网址本来就能读，翻页只换了一个页码。模型能选的只有页码（log2(10000) ≈ 13 比特），
+    新加参数时再加上参数名（约 26 种写法，约 5 比特）；只能发给已经出现过的那个主机，次数受 ``max_fetches_per_run`` 约束，
+    拼不进任意文字。参数顺序、参数名大小写、前导零都卡死，是因为每多一种写法就多一份可编码的信息。
+    2026-11-14 的调研任务里 7 次审批全是同一份公告的 ``pageIndex=3、4、5……``，逐页确认没有任何安全价值。"""
+    from urllib.parse import urlsplit
+
+    from ..net.search import url_key
+
+    try:
+        u = urlsplit(url_key(url))
+    except ValueError:
+        return False
+    params = u.query.split("&") if u.query else []
+    pages = [i for i, kv in enumerate(params) if kv.partition("=")[0].lower() in PAGE_KEYS]
+    if len(pages) != 1:
+        return False
+    i = pages[0]
+    name, _, value = params[i].partition("=")
+    if not _PAGE_VALUE.fullmatch(value):
+        return False
+    head = f"{u.scheme}://{u.netloc}{u.path}"
+    for s in seen:
+        if not s.startswith(head):
+            continue
+        try:
+            v = urlsplit(s)
+        except ValueError:
+            continue
+        if (v.scheme, v.netloc, v.path) != (u.scheme, u.netloc, u.path):
+            continue
+        other = v.query.split("&") if v.query else []
+        theirs = [j for j, kv in enumerate(other) if kv.partition("=")[0].lower() in PAGE_KEYS]
+        if not theirs:
+            if i == len(params) - 1 and name in PAGE_NAMES and params[:-1] == other:
+                return True
+        elif theirs == [i]:
+            old_name, _, old_value = other[i].partition("=")
+            if old_name == name and _SEEN_PAGE.fullmatch(old_value) and params[:i] + params[i + 1:] == other[:i] + other[i + 1:]:
+                return True
+    return False
+
+
 def _granted(rc: "RunContext", tool: str, target: str) -> bool:
     return any(g.decision == "allow" and g.matches(tool, [target]) for g in rc.grants)
 
@@ -327,11 +388,15 @@ class WebFetchTool(_WebTool):
             return "deny", "只能读取 https 网址", None
         if denied_host(host, self.cfg.deny_domains):
             return "deny", f"{host} 在 [web] deny_domains 里", None
-        seen = url_key(url) in seen_urls(rc)
-        if why := leaked(url, heuristics=not seen):
+        known = seen_urls(rc)
+        seen = url_key(url) in known
+        page = not seen and page_of_seen(url, known)   # 翻页只多了一个页码，按出现过处理：长随机串也是原网址里本来就有的
+        if why := leaked(url, heuristics=not (seen or page)):
             return "deny", f"网址{why}，可能是在把数据带出去，已拦截", "web_exfil"
         if seen:
             return "allow", "本会话出现过的网址", None
+        if page:
+            return "allow", "本会话出现过的网址翻到另一页", None
         if self._allowed_host(host, port):
             return "allow", "在 [web] fetch_allow 里", None
         if _granted(rc, self.name, url):
