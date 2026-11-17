@@ -65,6 +65,16 @@
 
 **English summary.** IP-literal entries in `network_allow` and `web.fetch_allow` that the egress check never connects to (`0.0.0.0`, loopback addresses other than `127.0.0.1`, link-local, reserved, multicast and cloud metadata addresses) now fail when the config loads, and so do non-canonical IPv4 forms such as `127.1` or `0x7f.0.0.1`. Use `localhost:PORT` for local ports; loopback aliases and link-local devices can only be reached with `sandbox_network = "allow"`.
 
+**命令的某个参数整条就是灾难性命令时，任何模式都拒绝，bypass 也一样。**
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| `python3 tool.py 'rm -rf ~'`、`make 'rm -rf ~'` 被拒绝 | 可写或未知的命令可能把参数交给 shell 执行（`script -c`、`flock f -c` 就是这样），静态看不出它会不会执行 | 参数里不写整条删除命令；确实要传，改从文件读 |
+
+只影响判成可写或未知的命令。`echo`、`git commit -m`、`gh … --body` 这类认得的命令不受影响。
+
+**English summary.** When one argument of a writing or unknown command is itself a whole catastrophic command (`python3 tool.py 'rm -rf ~'`), the call is refused in every mode, bypass included, because such commands may hand the argument to a shell (`script -c`, `flock f -c`). Known commands such as `echo`, `git commit -m` and `gh … --body` are not affected.
+
 ### 新增
 
 **联网工具 `web_search` 与 `web_fetch`，默认关闭。** 在用户配置里写 `[web] enabled = true` 后，每个会话在开工前选“关闭 / 仅搜索 / 搜索并读取”，
@@ -90,6 +100,20 @@
 **`flywhl run --approve-outside '模式'`：无人值守时放行写明的沙箱外命令。** 只有命令行能写，只在无人值守时生效，只管 bash。必须写具体的命令，`*`、路径、解释器都拒绝；复合命令每段都要匹配，有污点、高危、重定向到文件、实际程序不在命令文本里的照样拒绝。每次放行在 `approvals` 表和事件流里各留一条记录。
 
 - `scripts/durability_bench.py`：用 mock 模型跑真实的 Agent 循环，比较两种落盘强度的提交耗时、事件循环延迟和吞吐。
+
+### 安全
+
+命令分析不是安全边界，系统沙箱才是。下面这些判定偏松的问题已修：
+
+- 判成只读的：here-document 结束符里的续行（`EO\⏎F` 就是 `EOF`，后面的行是真命令）、`ps` 的值紧贴在字母后面、`printf -vPATH`、`awk` 的 `|&` 和 `getline <` 读工作区外文件。
+- 脚本经标准输入进 shell：here-string、here-document 正文、管道前 `echo`、`printf` 的文本现在递归分析，`sh -` 同样算从标准输入读。
+- 包装命令：`env -S`、`env -vS`、`env -C/` 接着解包；`ionice -t` 不带值；`mapfile -C`、`less +!` 的命令递归分析；shell 名单补上 ash、mksh、fish、csh、tcsh。
+- 灾难性命令的写法：`$'rm\x00junk'`、`find -f ~ -delete`、`-exec` 的全部起点、`{r..r..1}m`、未赋值的 `A+=/usr`、`export -n`、`tee`/`cp`/`mv` 写块设备、改了名字的 fork 炸弹。
+- `sed`、`awk`：程序来源取全（`-e`、`--expression`、`--source`、长选项缩写），`sed` 的程序按语法解析，地址和 `s` 的分隔符不再被误认成命令；`e` 的内容递归分析，认不出的程序判 `external`。程序写在引号里时不做花括号展开，没加引号时照样展开（`awk {-f,x.awk} f` 就是 `awk -f x.awk f`）；分词后分不出是哪种，两种读法取更严的，所以花括号里带逗号的 sed 块（`sed '1,3{s/a,b/c/}'`）要人确认。awk 程序被切碎时，执行命令、改写 ARGV、`getline` 读文件的检查都查全部位置参数。
+- `sh -c 脚本 名字 参数`：脚本后面的词代入 `$0`、`$1` 再分析，`--command=` 的脚本也能取到。长选项只有 bash 的 `--rcfile`、`--init-file` 等少数几个带值，`sh --rcfile x.sh -c ls` 执行的是 x.sh（dash、ash 的长选项都不带值）；sh 也可能是 bash 或 ksh，几种读法都查；bash 开头的单横线长选项（`-rcfile`）按长选项算；`bash --rcfile x.sh -ic` 先执行 x.sh，判 `external`，rc 文件是标准输入时分析它的内容；bash、dash 里 `-o` 在选项簇中间（`bash -oc posix …`）也从后面的参数取值，zsh、ksh 里簇中 `o` 后面的部分就是值；zsh 的 `-O` 是开关。
+- 只读命令的短选项紧贴工作区外路径时过边界（`date -f/etc/passwd`）；`$'\x{72}m'`、前置的 `D+=/` 按 bash 的语义解开。
+- `git clean` 的选项簇和缩写（`-dfx`、`--force`）、`-i`、`--no-dry-run` 判高危，`-n` 空跑不算。
+- `require_pinned`：40 位提交号只有写在 git 地址上才算锁住版本，普通 URL 的 `#片段`、npm dist-tag 不算。
 
 ### 修复
 
