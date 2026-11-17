@@ -54,6 +54,9 @@ from .executor import ToolExecutor
 from .run_context import RunContext
 
 
+OUTPUT_BOOST_CAP = 65_536   # 截断后自动提高输出上限的天花板：再长的单次输出，该拆成几步写
+
+
 @dataclass
 class Outcome:
     status: str
@@ -190,6 +193,9 @@ class AgentLoop:
                 self.outcome = Outcome("failed", "模型基于安全策略拒绝了该请求（refusal）")
                 return
             calls = msg.tool_calls
+            if msg.stop_reason == StopReason.MAX_TOKENS and (raised := self._raise_output_limit()):
+                yield self._ev(E.NOTICE, level="info", code="max_tokens_raised",
+                               text=f"输出在 {raised[0]} token 处被截断，本次运行之后的模型调用输出上限提高到 {raised[1]} token")
             if calls and msg.stop_reason == StopReason.MAX_TOKENS:
                 # 输出被截断时，工具参数可能不完整：整批判失败、不执行，让模型分步重来
                 for c in calls:
@@ -197,16 +203,22 @@ class AgentLoop:
                 yield self._ev(E.TURN_END, turn=self.turn)
                 continue
             if not calls and msg.stop_reason == StopReason.MAX_TOKENS:
-                # 纯文本回复被长度上限截断：不能当作“完成”，让模型从中断处续写（有上限，防止无限续写）
+                # 被长度上限截断：不能当作“完成”（有上限，防止无限续写）。
+                # 只有思考、没有正文时没有“中断处”可接：这条消息不会回传（见 llm/base.py has_payload），要换一句提示
                 n = rc.state.get("continuations", 0)
                 if n < 3:
                     rc.state["continuations"] = n + 1
-                    yield self._append(user_message(reminder(
-                        "你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。"),
-                        kind=MsgKind.REMINDER))
+                    text = ("你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。" if msg.text else
+                            "你上一轮的思考用完了单次输出的长度上限，没有输出正文，也没有调用工具，这段思考不会保留。"
+                            "请少做推演、直接行动：内容很长时分几步完成，比如大文件先写骨架，再分几次 edit 补全。")
+                    yield self._append(user_message(reminder(text), kind=MsgKind.REMINDER))
                     yield self._ev(E.TURN_END, turn=self.turn)
                     continue
                 yield self._ev(E.NOTICE, level="warn", code="truncated", text="回复多次被长度上限截断，可能不完整")
+                if not msg.text:   # 最后一次仍是只有思考：没有任何产出，不能按“自然完成”收尾
+                    self.outcome = Outcome("incomplete", "多次在思考阶段就被输出长度上限截断，没有产出正文")
+                    yield self._ev(E.TURN_END, turn=self.turn)
+                    return
             if not calls:
                 if rc.inbox.pending()["steer"] or rc.inbox.pending()["follow_up"]:
                     for ev in self._drain_inbox():
@@ -350,11 +362,14 @@ class AgentLoop:
         if rc.project_context:   # 不进历史：压缩碰不到它；每次都排在最前面：前缀缓存不受影响
             messages = [user_message(rc.project_context, kind=MsgKind.PROJECT_CONTEXT), *messages]
         native, native_opts = self._native_request(purpose)
+        meta: dict[str, Any] = {"role": rc.role, "run_id": rc.run_id, "session_id": rc.session_id}
+        max_tokens = int(rc.state.get("max_tokens") or rc.config.max_tokens)
+        if max_tokens != rc.config.max_tokens:
+            meta["max_tokens_base"] = rc.config.max_tokens   # 降级到备用模型时按它的输出上限收回提高的部分
         req = ModelRequest(
             model=rc.model, system=rc.system_prompt, messages=messages, tools=specs,
-            max_tokens=rc.config.max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
-            purpose=purpose, metadata={"role": rc.role, "run_id": rc.run_id, "session_id": rc.session_id},
-            native_search=native, native_opts=native_opts,
+            max_tokens=max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
+            purpose=purpose, metadata=meta, native_search=native, native_opts=native_opts,
         )
         mid = new_id("m_")
         # 上下文指纹：回放时比对“模型看到的东西”是否与录制时一致，用来定位分叉点
@@ -496,6 +511,20 @@ class AgentLoop:
         for c in unpaired_tool_calls(self.rc.log.context().messages):
             self.rc.store.step_finished(self.rc.run_id, c.id, "cancelled", {"content": text})
             yield self._persist_tool_error(c, text, "cancelled")
+
+    def _raise_output_limit(self) -> tuple[int, int] | None:
+        """输出被截断后，本次运行之后的模型调用把 ``max_tokens`` 提高到 4 倍，不超过模型登记的最大输出和 ``OUTPUT_BOOST_CAP``。
+
+        思考模型的思考也算在 ``max_tokens`` 里：默认 8192 时，模型想一想怎么写一份长报告就把预算用完了，
+        原样重来只会在同一个地方再被截断。只按登记过最大输出的模型提高：没登记的按默认 8192 算，
+        不往上加，免得超出服务端上限变成 400。返回 (原上限, 新上限)，没提高返回 None。"""
+        rc = self.rc
+        cur = int(rc.state.get("max_tokens") or rc.config.max_tokens)
+        new = min(cur * 4, rc.model_info.max_output, OUTPUT_BOOST_CAP)
+        if new <= cur:
+            return None
+        rc.state["max_tokens"] = new
+        return cur, new
 
     def _native_request(self, purpose: str) -> tuple[str | None, dict[str, Any]]:
         """模型侧联网：会话在建立时选了它、当前能力没收紧到 off、本次 Run 的搜索次数没用完，才在请求里带上。

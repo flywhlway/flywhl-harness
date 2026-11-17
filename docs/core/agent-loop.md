@@ -145,13 +145,15 @@ while True:
         self.outcome = Outcome("failed", "模型基于安全策略拒绝了该请求（refusal）")
         return
     calls = msg.tool_calls
+    if msg.stop_reason == StopReason.MAX_TOKENS and (raised := self._raise_output_limit()):
+        yield self._ev(E.NOTICE, level="info", code="max_tokens_raised", text=...)
     if calls and msg.stop_reason == StopReason.MAX_TOKENS:
         for c in calls:
             yield self._persist_tool_error(c, "输出被 max_tokens 截断，...未执行。...", "truncated")
         yield self._ev(E.TURN_END, turn=self.turn)
         continue
     if not calls and msg.stop_reason == StopReason.MAX_TOKENS:
-        # ... 纯文本回复被截断：追加“请从中断处继续”的 reminder 并 continue（最多 3 次）
+        # ... 有正文：追加“请从中断处继续”的 reminder；只有思考：提示少推演、分步做。都 continue，最多 3 次
     if not calls:
         if rc.inbox.pending()["steer"] or rc.inbox.pending()["follow_up"]:
             for ev in self._drain_inbox():
@@ -488,6 +490,10 @@ def _drain_inbox(self) -> list[Event]:
 3. **`max_tokens` 且没有工具调用。** 若把它当作自然停止，一个被截断的最终回答就会以 `completed` 结束。
    本项目在这个分支追加一条“请从中断处继续”的 reminder 让模型续写，最多 3 次，之后发出 `notice(code=truncated)` 再进入验收
    （`tests/test_loop.py::test_truncated_text_reply_is_continued`）。
+   思考型模型还有一种截断：思考就把上限用完，没有正文也没有工具调用。这条消息不能原样发回去，DeepSeek 对内容为空、没有 tool_calls 的 assistant 消息直接 400，
+   而它已经落盘，之后每次重试都带着它。所以 `prepare_history()` 跳过这类消息，reminder 换成“少推演、直接行动，长内容分几步写”；
+   每次截断后本次运行的输出上限提高到 4 倍，不超过模型登记的最大输出和 65536，降级到备用模型时按备用模型的上限收回。
+   连续 3 次仍只有思考，以 `incomplete` 结束（`tests/test_truncation_recovery.py`）。
 4. **在 async generator 里吞掉 `BaseException`。** 见上文。
 5. **用 `task.cancel()` 实现“停止”按钮。** 它会在任意 `await` 处抛出，可能正好打断一个已发出、尚未回包的外部写操作。
 

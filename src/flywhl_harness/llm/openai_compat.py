@@ -58,6 +58,10 @@ def to_openai_messages(system: str, messages: list[Message], *, echo: str = "non
             text = m.text
             if echo == "inline" and thinking:
                 text = f"{_THINK_OPEN}\n{thinking}\n{_THINK_CLOSE}\n\n{text}"
+            if not text and not m.tool_calls:
+                # 这里不认供应商侧工具块（降级前 Anthropic 留下的 server 块）：只剩它们时同样是 content=null
+                # 且没有 tool_calls，兼容服务会 400。prepare_history 已滤掉只有思考的消息，这里兜住其余情况
+                continue
             msg: dict[str, Any] = {"role": "assistant", "content": text or None}
             if echo == "field":
                 msg["reasoning_content"] = thinking
