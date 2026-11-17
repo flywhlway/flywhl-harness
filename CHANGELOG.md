@@ -130,6 +130,7 @@
 - bash 超时或取消时，如果 shell 已经退出，留在后台的进程不会被结束，结果却写着“已终止进程组”。
 - `GIT_CONFIG_VALUE_<n>` 的值像带口令的 URL 被剥掉之后，键和计数还在，所有 git 命令都报错退出。现在整对去掉，其余的重新编号。
 - 出站代理、MCP 启动失败时，文字为空的异常（比如超时）不显示错误类型。
+- Python 3.13 及以上，取消请求先于下一段模型输出到达时，会报 `RuntimeWarning: coroutine method 'asend' ... was never awaited`，取消本身不受影响。现在令牌已取消时，`CancelToken.guard()` 先关掉还没开始等待的对象再抛出。
 
 ## [0.2.1] - 2026-11-06
 

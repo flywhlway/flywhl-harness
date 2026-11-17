@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import inspect
 import json
 import random
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -14,7 +17,7 @@ import httpx
 import pytest
 
 from flywhl_harness import ScriptedProvider
-from flywhl_harness.cancel import CancelToken
+from flywhl_harness.cancel import CancelToken, RunCancelled
 from flywhl_harness.events import E
 from flywhl_harness.llm.base import ErrorKind, ModelRequest, Provider, ProviderError
 from flywhl_harness.llm.resilient import ResilientProvider
@@ -394,6 +397,27 @@ async def test_dag_tenant_limit_does_not_block_other_tenants():
              TaskSpec("b1", job("b1", 0.01), tenant="B")]
     await DagScheduler(max_concurrency=2, per_tenant=1).run(tasks)
     assert started["b1"] < 0.15, started
+
+
+async def test_guard_closes_what_it_never_started():
+    """令牌已取消时 guard 不会开始等待：传进来的协程、流的 __anext__() 要当场关掉，否则 Python 3.13 起报 never awaited。"""
+    token = CancelToken()
+    token.cancel("测试")
+    coro = asyncio.sleep(0)
+    with pytest.raises(RunCancelled):
+        await token.guard(coro)
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+
+    async def stream():
+        yield 1
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RunCancelled):
+            async for _ in token.iterate(stream()):
+                pass
+        gc.collect()
+    assert not [w for w in caught if "never awaited" in str(w.message)]
 
 
 async def test_dag_continue_policy_passes_failure_and_cancel_is_immediate():
