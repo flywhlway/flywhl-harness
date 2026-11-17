@@ -77,6 +77,17 @@
 
 **bash 的 `post_tool_use` hook 收到完整输出。** 以前收到的是截断后的结尾（最多 400 行 / 30KB），现在保尾截断和存句柄都排在 hook 之后，hook 输入的 `details` 里也不再有 `full_output_ref`。完整输出没有上限，命令打出几十 MB 时 hook 的输入也是几十 MB，默认 10 秒的 `timeout` 可能不够：超时的 fail-open hook 被忽略，fail-closed 的 hook 把结果换成占位文字。脱敏 hook 请写 `fail_closed`，并按可能的输出规模调大 `timeout`。
 
+**Anthropic provider 不再发送 `temperature`。** 以前只在开着 thinking 时不发。用非思考模型或关掉 `thinking` 时，它会传给 SDK，anthropic 2.x 直接抛 `TypeError`，Run 以失败结束。升级 SDK 之前就有这个问题。
+现在一律不发。DeepSeek、OpenAI 兼容等其他供应商照常发送。
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| 配了 `temperature` 的 Run，第一次调用 Anthropic 时多一条 warn 级 `notice`（`code=temperature_ignored`），一个 Run 只有一条 | Anthropic API 版本 `2026-10-21` 对所有模型都用 400 拒绝 `temperature`、`top_p`、`top_k`，SDK 2.x 的 `messages.create()` 也删掉了这几个参数 | 只用 Anthropic 时删掉 `temperature`，提示随之消失。降级链里还有别家时可以留着，对别家照常生效 |
+
+项目登记的 Claude 模型本来就不接受非默认的采样值，输出不受影响。自己配置的旧模型（如 Claude Sonnet 4.6）调低 `temperature` 的效果没有了，也没有替代参数。
+
+**English summary.** The Anthropic provider no longer sends `temperature`. API version `2026-10-21` rejects `temperature`, `top_p` and `top_k` on every model with a 400, and anthropic SDK 2.x removed them from `messages.create()`, so a configured `temperature` with a non-thinking model (or with `thinking` off) used to fail the run with a `TypeError`. The request now goes out without it, and each run emits one warn-level `notice` with `code=temperature_ignored`. DeepSeek and other OpenAI-compatible providers still send it. Remove `temperature` if Anthropic is your only provider; keep it if a fallback provider uses it.
+
 ### 新增
 
 **联网工具 `web_search` 与 `web_fetch`，默认关闭。** 在用户配置里写 `[web] enabled = true` 后，每个会话在开工前选“关闭 / 仅搜索 / 搜索并读取”，
@@ -112,6 +123,7 @@
 - 包装命令：`env -S`、`env -vS`、`env -C/` 接着解包；`ionice -t` 不带值；`mapfile -C`、`less +!` 的命令递归分析；shell 名单补上 ash、mksh、fish、csh、tcsh。
 - 灾难性命令的写法：`$'rm\x00junk'`、`find -f ~ -delete`、`-exec` 的全部起点、`{r..r..1}m`、未赋值的 `A+=/usr`、`export -n`、`tee`/`cp`/`mv` 写块设备、改了名字的 fork 炸弹。
 - `sed`、`awk`：程序来源取全（`-e`、`--expression`、`--source`、长选项缩写），`sed` 的程序按语法解析，地址和 `s` 的分隔符不再被误认成命令；`e` 的内容递归分析，认不出的程序判 `external`。程序写在引号里时不做花括号展开，没加引号时照样展开（`awk {-f,x.awk} f` 就是 `awk -f x.awk f`）；分词后分不出是哪种，两种读法取更严的，所以花括号里带逗号的 sed 块（`sed '1,3{s/a,b/c/}'`）要人确认。awk 程序被切碎时，执行命令、改写 ARGV、`getline` 读文件的检查都查全部位置参数。
+- `sed`、`awk` 程序词的定位不再依赖花括号展开前的位置：命令名、包装命令的参数或命令名本身带花括号、命令名来自变量时，引号里的程序以前只剩照常展开那份、被切碎后丢了结论。现在对命令词之后每个含花括号的词都枚举“展开 / 不展开”两种读法、所有组合取更严的，前缀里的花括号绕不过程序解析；含花括号的词太多、组合穷举不过来时，只有这段可能是 `sed`/`awk`（程序会被花括号切碎）才按 `external` 兜底（默认模式要人确认），普通命令照常全部展开、级别不变，不会因为花括号多就被挡。
 - `sh -c 脚本 名字 参数`：脚本后面的词代入 `$0`、`$1` 再分析，`--command=` 的脚本也能取到。长选项只有 bash 的 `--rcfile`、`--init-file` 等少数几个带值，`sh --rcfile x.sh -c ls` 执行的是 x.sh（dash、ash 的长选项都不带值）；sh 也可能是 bash 或 ksh，几种读法都查；bash 开头的单横线长选项（`-rcfile`）按长选项算；`bash --rcfile x.sh -ic` 先执行 x.sh，判 `external`，rc 文件是标准输入时分析它的内容；bash、dash 里 `-o` 在选项簇中间（`bash -oc posix …`）也从后面的参数取值，zsh、ksh 里簇中 `o` 后面的部分就是值；zsh 的 `-O` 是开关。
 - 只读命令的短选项紧贴工作区外路径时过边界（`date -f/etc/passwd`）；`$'\x{72}m'`、前置的 `D+=/` 按 bash 的语义解开。
 - `git clean` 的选项簇和缩写（`-dfx`、`--force`）、`-i`、`--no-dry-run` 判高危，`-n` 空跑不算。

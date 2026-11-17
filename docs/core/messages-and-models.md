@@ -396,7 +396,7 @@ flywhl-harness 的对应措施：
 | `context_window` | `ContextManager` | 清理与压缩阈值 |
 | `max_output` | `AgentLoop._raise_output_limit()`、`ResilientProvider` | 单次输出上限：截断后提高 `max_tokens` 的天花板，降级时按备用模型收回 |
 | `input_price` / `output_price` / `cache_read_price` / `cache_write_price` | `compute_cost()` | 每条 assistant 消息的 `usage.cost_usd`，进而驱动费用预算 |
-| `supports_thinking` | `AnthropicProvider._kwargs()` | 开启 adaptive thinking；此时不传 `temperature` |
+| `supports_thinking` | `AnthropicProvider._kwargs()` | 开启 adaptive thinking |
 | `append_only` | `ContextManager` | 关闭改写历史的清理 |
 | `server_fallback` | `AnthropicProvider._kwargs()` | 是否附加服务端降级参数 |
 | `currency` / `tiers` | `compute_cost()` | 价格的币种（`USD` / `CNY`）；按单次请求输入规模分档的长上下文价格 |
@@ -470,7 +470,8 @@ def compute_cost(info: ModelInfo, usage: Usage) -> float:
 
 `temperature=0` 并不等于“同样的输入一定得到同样的输出”。推理服务为了吞吐会动态拼批，而 GPU 上的浮点加法不满足结合律，
 同一请求在不同批大小下可能走不同的归约顺序，从而得到不同的 logits（Thinking Machines 2025 年的文章专门分析了这个“批不变性”问题）；
-此外还有 MoE 路由、硬件与推理后端版本、服务端静默升级等因素。本项目的 Anthropic provider 在开启 thinking 时干脆不传 `temperature`。
+此外还有 MoE 路由、硬件与推理后端版本、服务端静默升级等因素。Anthropic 已经不接受采样参数：API 版本 `2026-10-21` 对 `temperature`、`top_p`、`top_k` 一律返回 400。
+本项目的 Anthropic provider 因此从不传 `temperature`，配置了只在每个 Run 里提示一次（`notice`，`code=temperature_ignored`）。
 
 对 Agent 系统而言，正确的姿势是把非确定性当常态：
 

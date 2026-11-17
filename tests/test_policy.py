@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from flywhl_harness import Store
-from flywhl_harness.policy.bash_analyzer import analyze
+from flywhl_harness.policy.bash_analyzer import _RANK, analyze
 from flywhl_harness.policy.hooks import CommandHook, Hook, HookBus, HookEvent, HookInput, HookOutput
 from flywhl_harness.policy.permissions import Decision, PermissionPolicy, Rule
 from flywhl_harness.policy.supply_chain import unpinned_in
@@ -965,3 +965,58 @@ def test_single_dash_rcfile_with_interactive_bash_is_not_read():
 def test_awk_getline_outside_the_workspace_is_found_even_when_the_program_is_split(cmd):
     a = analyze(cmd)
     assert a.level == "external", (cmd, a.reasons)
+
+
+# ---------------------------------------------------------------- 程序词定位不再依赖“展开前位置”：命令名、包装命令的参数
+# 或命令名本身带花括号时，引号里的 sed 程序照样要当程序看。对照：不带前缀的 sed '…e rm -rf ~…' f 本就判灾难性。
+# 命令串同样只喂 analyze()，绝不执行。
+@pytest.mark.parametrize("cmd", [
+    "{sed,} '1{s/a,b/c/;e rm -rf ~\n}' f",                  # 命令名自身带花括号：{sed,} → sed
+    "timeout {5,} sed '1{s/a,b/c/;e rm -rf ~\n}' f",        # 包装命令的时长参数带花括号
+    "sed {-n,-e} '1{s/a,b/c/;e rm -rf ~\n}' f",             # sed 自己的选项带花括号：{-n,-e} → -n -e
+    "S=sed; $S '1{s/a,b/c/;e rm -rf ~\n}' f",               # 命令名来自变量
+])
+def test_quoted_sed_program_is_seen_even_with_braces_before_it(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+_PAD_ARGS = " ".join("{f%d,g%d}" % (i, i) for i in range(5))           # 5 个带花括号的数据文件参数
+_PAD_ASSIGNS = " ".join("V%d={a%d,b%d}" % (i, i, i) for i in range(5))  # 5 个带花括号的前置赋值
+_PROG = "'1{s/a,b/c/;e rm -rf ~\n}'"
+
+
+@pytest.mark.parametrize("cmd", [
+    # 前两条 main 本来就判灾难性：守住穷举上限不把它们放松（只留全展开那份时会被绕成 external）
+    f"sed {_PROG} f {_PAD_ARGS}",
+    f"{_PAD_ASSIGNS} sed {_PROG} f",
+    f"{{sed,}} {_PROG} f {_PAD_ARGS}",   # 命令名带花括号再顶过上限：main 判 external
+    f"S=sed; $S {_PROG} f {_PAD_ARGS}",  # 命令名来自变量再顶过上限：要等变量代入后才看得出是 sed
+])
+def test_padding_with_braces_past_the_combination_limit_cannot_hide_a_sed_program(cmd):
+    # 含花括号的词超过穷举上限、这段又可能是 sed/awk 时，走线性兜底：多塞几个带花括号的参数（顶过上限、又不顶掉 sed
+    # 这个命令）不能把引号里的 sed 程序绕成 external。只调用 analyze()。
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+# ---------------------------------------------------------------- 守卫：花括号的词多到穷举不过来时，不能把良性命令误判成
+# 灾难性（任何模式都拒绝）。不是 sed/awk 的普通命令照常全部展开，级别和 main 一样；sed/awk 读文件最多按 external 兜底。
+# 命令串只喂 analyze()，绝不执行。
+@pytest.mark.parametrize("cmd,level", [
+    ("mkdir -p src/{a,b} test/{c,d} doc/{e,f} lib/{g,h} bin/{i,j}", "write"),
+    ("echo {a,b} {c,d} {e,f} {g,h} {i,j}", "read"),
+    ("cp x.{txt,md} y.{txt,md} z.{txt,md} w.{txt,md} v.{txt,md} out/", "write"),
+    ("grep -n x a.{txt,md} b.{txt,md} c.{txt,md} d.{txt,md} e.{txt,md}", "read"),
+])
+def test_many_brace_words_do_not_overblock_ordinary_commands(cmd, level):
+    a = analyze(cmd)
+    assert a.level == level and not a.catastrophic, (cmd, a.level, a.reasons)
+
+
+@pytest.mark.parametrize("cmd", [
+    "sed -n p a.{txt,md} b.{txt,md} c.{txt,md} d.{txt,md} e.{txt,md}",
+    "awk '{print $1}' a.{txt,md} b.{txt,md} c.{txt,md} d.{txt,md} e.{txt,md}",
+])
+def test_many_brace_file_args_to_sed_awk_are_not_catastrophic(cmd):
+    # sed/awk 读文件、花括号参数多到顶过上限：最多按 external 兜底（默认模式要人确认），不能升成任何模式都拒绝的灾难性。
+    a = analyze(cmd)
+    assert not a.catastrophic and a.rank <= _RANK["external"], (cmd, a.level, a.reasons)
