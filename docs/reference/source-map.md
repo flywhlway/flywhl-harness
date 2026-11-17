@@ -82,7 +82,7 @@
 | `regex_search.py` | 正则搜索放进子进程执行（`grep`、`search_ref` 共用）：超时或取消时直接杀掉，灾难性回溯不卡事件循环 |
 | `demo.py` | `FakeNotifyService`（同键不同内容报 `IdempotencyConflict`）、`send_notification`、`sleep` |
 | `mcp.py` | 最小 MCP stdio 客户端与 `MCPTool`（注解的保守默认值、环境隔离、`notifications/cancelled`） |
-| `web.py` | `web_search` / `web_fetch`：静态规格、结果格式、`fetch_scope` 判定（`precheck`）、本会话出现过的网址（`seen_urls()`）、读成功过的网址（`fetched_urls()`）与顺序翻页（`page_of_seen()`） |
+| `web.py` | `web_search` / `web_fetch`：静态规格、结果格式、`fetch_scope` 判定（`precheck`）、本会话出现过的网址（`seen_urls()`）、已读的页（`fetched_urls()`）与顺序翻页（`page_of_seen()`） |
 
 ### net/ —— 联网
 
