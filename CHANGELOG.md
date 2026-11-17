@@ -65,6 +65,16 @@
 
 **English summary.** IP-literal entries in `network_allow` and `web.fetch_allow` that the egress check never connects to (`0.0.0.0`, loopback addresses other than `127.0.0.1`, link-local, reserved, multicast and cloud metadata addresses) now fail when the config loads, and so do non-canonical IPv4 forms such as `127.1` or `0x7f.0.0.1`. Use `localhost:PORT` for local ports; loopback aliases and link-local devices can only be reached with `sandbox_network = "allow"`.
 
+**命令的某个参数整条就是灾难性命令时，任何模式都拒绝，bypass 也一样。**
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| `python3 tool.py 'rm -rf ~'`、`make 'rm -rf ~'` 被拒绝 | 可写或未知的命令可能把参数交给 shell 执行（`script -c`、`flock f -c` 就是这样），静态看不出它会不会执行 | 参数里不写整条删除命令；确实要传，改从文件读 |
+
+只影响判成可写或未知的命令。`echo`、`git commit -m`、`gh … --body` 这类认得的命令不受影响。
+
+**English summary.** When one argument of a writing or unknown command is itself a whole catastrophic command (`python3 tool.py 'rm -rf ~'`), the call is refused in every mode, bypass included, because such commands may hand the argument to a shell (`script -c`, `flock f -c`). Known commands such as `echo`, `git commit -m` and `gh … --body` are not affected.
+
 ### 新增
 
 **联网工具 `web_search` 与 `web_fetch`，默认关闭。** 在用户配置里写 `[web] enabled = true` 后，每个会话在开工前选“关闭 / 仅搜索 / 搜索并读取”，
@@ -96,7 +106,7 @@
 命令分析不是安全边界，系统沙箱才是。下面这些判定偏松的问题已修：
 
 - 判成只读的：here-document 结束符里的续行（`EO\⏎F` 就是 `EOF`，后面的行是真命令）、`ps` 的值紧贴在字母后面、`printf -vPATH`、`awk` 的 `|&` 和 `getline <` 读工作区外文件。
-- 脚本经标准输入进 shell：here-string、here-document 正文、管道前 `echo` 的文本现在递归分析。
+- 脚本经标准输入进 shell：here-string、here-document 正文、管道前 `echo`、`printf` 的文本现在递归分析，`sh -` 同样算从标准输入读。
 - 包装命令：`env -S`、`env -vS`、`env -C/` 接着解包；`mapfile -C`、`less +!` 的命令递归分析；shell 名单补上 ash、mksh、fish、csh、tcsh。
 - 灾难性命令的写法：`$'rm\x00junk'`、`find -f ~ -delete`、`-exec` 的全部起点、`{r..r..1}m`、未赋值的 `A+=/usr`、`export -n`、`tee`/`cp`/`mv` 写块设备、改了名字的 fork 炸弹。
 - `sed`、`awk`：程序来源取全（`-e`、`--expression`、`--source`、长选项缩写），`sed` 的程序按语法解析，地址和 `s` 的分隔符不再被误认成命令；`e` 的内容递归分析，认不出的程序判 `external`。

@@ -774,3 +774,69 @@ def test_prefix_append_stays_with_the_command():
 ])
 def test_ps_environment_still_refused(cmd):
     assert analyze(cmd).credential, cmd
+
+
+# ---------------------------------------------------------------- 评审补的反例：这些写法比修改前判得松
+# 只调用 analyze()（纯判定），不执行任何命令
+
+@pytest.mark.parametrize("cmd", [
+    "bash --norc x.sh -c ls",            # --norc 不带值：执行的是 x.sh，-c ls 只是它的参数
+    "bash --login x.sh -c ls",
+    "zsh --no-rcs x.sh -c ls",
+    "bash --frobnicate x.sh -c ls",      # 不认得的长选项按不带值处理
+])
+def test_valueless_long_options_do_not_turn_a_script_file_into_read(cmd):
+    a = analyze(cmd)
+    assert a.level != "read", (cmd, a.reasons)
+
+
+@pytest.mark.parametrize("cmd", [
+    "timeout 5 awk 'BEGIN{print \"a\", \"b\"; system(\"touch marker\")}' f",
+    "nice -n 5 awk 'BEGIN{print \"a\", \"b\"; system(\"touch marker\")}' f",
+    "env -u X awk 'BEGIN{print \"a\", \"b\"; system(\"touch marker\")}' f",
+    "timeout -s KILL 5 awk 'BEGIN{print \"a\", \"b\"; system(\"touch marker\")}' f",
+])
+def test_awk_behind_a_wrapper_keeps_its_program_whole(cmd):
+    a = analyze(cmd)
+    assert a.level == "external", (cmd, a.reasons)
+
+
+def test_awk_behind_a_wrapper_still_reads():
+    a = analyze("timeout 5 awk 'BEGIN{print \"a\", \"b\"}' f")
+    assert a.level == "read", a.reasons
+
+
+@pytest.mark.parametrize("cmd", [
+    "test -d x && D=/; D+=usr sh -c 'rm -rf $D'",     # 条件赋值：D 可能是 /，也可能没赋过
+    "D=/; test -d x && D=~; D+=usr sh -c 'rm -rf $D'",  # 两种旧值
+])
+def test_prefix_append_with_an_uncertain_old_value_stays_strict(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+@pytest.mark.parametrize("cmd, level", [("echo ls | sh -", "external"), ("sh - x.sh", "write")])
+def test_a_lone_dash_ends_shell_options(cmd, level):
+    a = analyze(cmd)
+    assert a.level == level, (cmd, a.reasons)
+
+
+def test_a_lone_dash_reads_the_script_from_stdin():
+    assert analyze("sh - <<< 'rm -rf ~'").catastrophic
+
+
+@pytest.mark.parametrize("cmd", ["script -c 'rm -rf $HOME'", "flock f -c 'rm -rf $HOME'"])
+def test_whole_command_in_one_argument_expands_single_quoted_variables(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+@pytest.mark.parametrize("cmd, level", [
+    ("git clean -fdx -en", "dangerous"),          # n 是 -e 的值（排除模式），不是 -n
+    ("git clean -f -e -n", "dangerous"),
+    ("git clean -f --exclude -n", "dangerous"),
+    ("git clean -fdn", "write"),
+    ("git clean -n -f", "write"),
+    ("git clean --dry-run --force", "write"),
+])
+def test_git_clean_dry_run_is_not_read_out_of_exclude_patterns(cmd, level):
+    a = analyze(cmd)
+    assert a.level == level, (cmd, a.reasons)
