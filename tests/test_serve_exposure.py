@@ -15,7 +15,7 @@ from flywhl_harness.config import HookConfig
 from flywhl_harness.server.exposure import (console_hosts, console_reachers, console_url, is_wildcard, no_token_refusal,
                                             rules_reach_loopback, serve_refusal)
 from flywhl_harness.tools.confine import Confinement
-from flywhl_harness.tools.egress import EgressDenied, EgressProxy, parse_rules
+from flywhl_harness.tools.egress import AllowRule, EgressDenied, EgressProxy, parse_rules
 
 from .conftest import make_harness
 
@@ -277,14 +277,21 @@ def test_serve_refusal_lets_valid_arguments_through(host, kw):
 LOOPBACK_RULES = [
     ("localhost:8765", True), ("127.0.0.1:8765", True), ("localhost:*", True), ("127.0.0.1:*", True),
     ("LOCALHOST:8765", True),
-    ("0.0.0.0:8765", True),            # 连 0.0.0.0 落到本机，代理接受写全 IP 的规则
-    ("0.0.0.0:*", True),
     ("localhost", False),              # 没写端口只放行 80、443
-    ("localhost:5432", False), ("127.0.0.1:5432", False), ("0.0.0.0:5432", False),
+    ("localhost:5432", False), ("127.0.0.1:5432", False),
     ("*.localhost:8765", False),       # 通配不含 localhost 本身
     ("*.0.0.1:8765", False),           # 字符串上匹配 127.0.0.1，但通配规则进不了回环地址
     ("pypi.org", False), ("registry.local:8765", False), ("192.168.1.20:8765", False),
 ]
+
+
+@pytest.mark.parametrize("rule", ["0.0.0.0:8765", "0.0.0.0:*"])
+def test_unspecified_address_rules_never_reach_the_console(rule):
+    """连 0.0.0.0 落到本机。这类规则加载时报错；就算绕过解析直接构造，回环判定也不放行。"""
+    with pytest.raises(ValueError, match="localhost"):
+        parse_rules([rule])
+    port = rule.partition(":")[2]
+    assert not rules_reach_loopback([AllowRule("0.0.0.0", None if port == "*" else frozenset({int(port)}))], PORT)
 
 
 @pytest.mark.parametrize(("rule", "expected"), LOOPBACK_RULES)
@@ -338,7 +345,6 @@ def test_console_reachers_global(box, reached):
     (SANDBOXED, {"sandbox": "off"}, True),
     (SANDBOXED, {"sandbox_network": "allow"}, True),
     (SANDBOXED, {"network_allow": ["localhost:8765"]}, True),
-    (SANDBOXED, {"network_allow": ["0.0.0.0:8765"]}, True),
     (SANDBOXED, {"network_allow": ["localhost:5432"]}, False),
     ({"level": "macos", "network": "deny"}, {"network_allow": ["localhost:8765"]}, False),
     ({"level": "macos", "network": "deny"}, {"sandbox_network": "allowlist", "network_allow": ["localhost:8765"]}, True),

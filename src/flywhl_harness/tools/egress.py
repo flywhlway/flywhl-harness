@@ -40,6 +40,8 @@ _LABEL = r"[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?"
 _HOST = re.compile(rf"{_LABEL}(\.{_LABEL})*")
 _RULE = re.compile(rf"(\*\.)?{_HOST.pattern}(:(\d{{1,5}}|\*))?")
 _LOCAL = ("localhost", "127.0.0.1")
+# 末段是纯数字或 0x 开头的主机名不是真实域名：解析器会把 127.1、0x7f.0.0.1、2130706433 当成 IPv4 的别种写法
+_NUMERIC = re.compile(r"\d+|0x[0-9a-f]*")
 _DENIED_LIMIT = 256     # 一条长命的 MCP 服务器可以反复撞白名单：报错只要列出主机，不用留下每一次
 _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 _REASONS = {400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway"}
@@ -67,9 +69,10 @@ class AllowRule:
         return ok and (self.ports is None or port in self.ports)
 
     def reaches(self, ip: IPAddress) -> bool:
-        """这条规则放行的主机解析到 ``ip`` 时能不能连：公网都行；内网只认写全名的规则；回环只认本机规则。"""
+        """这条规则放行的主机解析到 ``ip`` 时能不能连：公网都行；内网只认写全名的规则；回环只认本机规则。
+        写成 IP 的规则走同一个判定：写全地址也连不到元数据服务和 0.0.0.0，后者连的是本机。"""
         scope = _scope(ip)
-        return (scope == "public" or str(ip) == self.host or (scope == "private" and not self.host.startswith("."))
+        return (scope == "public" or (scope == "private" and not self.host.startswith("."))
                 or (scope == "loopback" and self.host in _LOCAL))
 
     def __str__(self) -> str:
@@ -117,17 +120,43 @@ async def vet_host(host: str, port: int, reaches: Callable[[IPAddress], bool],
     raise EgressDenied(f"{host} 解析到 {seen}，{why or '不放行这类地址'}")
 
 
-def parse_rules(entries: Iterable[str]) -> list[AllowRule]:
-    """解析白名单，写法不对抛 ``ValueError``：宁可启动时报错，也不要悄悄放宽或悄悄失效。"""
+def parse_rules(entries: Iterable[str], *, key: str = "network_allow") -> list[AllowRule]:
+    """解析白名单，写法不对抛 ``ValueError``：宁可启动时报错，也不要悄悄放宽或悄悄失效。
+    ``key`` 只用在报错里：说清是哪个配置项，给出这个配置项对应的改法。"""
     rules = []
     for entry in entries:
         s = entry.strip().lower() if isinstance(entry, str) else ""
         host, _, port = s.partition(":")
         if not _RULE.fullmatch(s) or (port not in ("", "*") and not 0 < int(port) < 65536):
             raise ValueError(f"出站白名单条目写法不对：{entry!r}（示例：pypi.org、*.github.com、registry.local:5000）")
+        if not host.startswith("*.") and _NUMERIC.fullmatch(host.rpartition(".")[2]) and not _dotted_quad(host):
+            raise ValueError(f"出站白名单条目写法不对：{entry!r} 像 IP 地址，但不是标准的点分十进制（如 10.0.0.5）。"
+                             "127.1、0x7f.0.0.1 这类写法连接时会被解析成别的地址，规则和实际连到的地方对不上")
         ports = DEFAULT_PORTS if not port else None if port == "*" else frozenset({int(port)})
-        rules.append(AllowRule(host[1:] if host.startswith("*.") else host, ports))
+        rule = AllowRule(host[1:] if host.startswith("*.") else host, ports)
+        if _dead_literal(rule):
+            hint = "web_fetch 只连公网地址" if key == "web.fetch_allow" else "要连本机端口写 localhost:端口"
+            raise ValueError(f"出站白名单条目连不到：{key} 里的 {entry!r} 是回环、链路本地、保留或云元数据地址，"
+                             f"写成 IP 也不会放行。{hint}")
+        rules.append(rule)
     return rules
+
+
+def _dotted_quad(host: str) -> bool:
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _dead_literal(rule: AllowRule) -> bool:
+    """规则写成 IP，这个地址却永远不放行：启动时就报错，不要留一条悄悄失效的规则。"""
+    try:
+        ip = ipaddress.ip_address(rule.host)
+    except ValueError:
+        return False
+    return not rule.reaches(ip)
 
 
 def local_ports(rules: Iterable[AllowRule]) -> list[str]:
