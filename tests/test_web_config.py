@@ -50,7 +50,7 @@ def test_project_config_can_only_tighten_web(tmp_path):
         assert dropped in text
     web = cfg.web
     assert web.enabled is True and web.default == "search" and web.fetch_scope == "cited"
-    assert web.max_searches_per_run == 5 and web.max_fetches_per_run == 10
+    assert web.max_searches_per_run == 5 and web.max_fetches_per_run == 30
     assert web.backends == ["deepseek"] and web.fetch_backend == "deepseek" and web.fetch_allow == ["docs.python.org"]
     assert web.backend == {"deepseek": {"api_key_env": "MY_DS_KEY"}}
     assert web.deny_domains == ["a.example", "b.example"]

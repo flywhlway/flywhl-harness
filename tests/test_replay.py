@@ -259,8 +259,8 @@ async def test_web_runs_replay_deterministically_without_touching_the_network(ws
     assert_same(await replay_run(h.store, res.run_id, config=HarnessConfig.load(workspace=str(ws))))
     assert len(net.requests) == sent
     rec = export_trajectory(h.store, res.run_id)
-    assert rec["run"]["config"]["replay"]["web"] == {"capability": "fetch", "max_searches_per_run": 20,
-                                                     "max_fetches_per_run": 10}
+    assert rec["run"]["config"]["replay"]["web"] == {"capability": "fetch", "max_searches_per_run": 60,
+                                                     "max_fetches_per_run": 30}
 
 
 async def test_tightened_web_session_replays_deterministically(ws):
