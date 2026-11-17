@@ -375,7 +375,7 @@ if recovering:
 
 | 状态 | 存在哪 | 恢复后 | 不持久化会怎样 |
 |---|---|---|---|
-| `Budget`（轮次、工具调用数、用量、已用墙钟） | `runs.checkpoint.budget`，每个 `turn_end` 写一次 | `budget.restore()` 接着计数；暂停期间不计入墙钟 | 反复暂停或崩溃就能绕过限额，`_finish()` 还会用新计数覆盖 `runs.usage` |
+| `Budget`（轮次、工具调用数、用量、已用墙钟、联网次数与费用） | `runs.checkpoint.budget`，每个 `turn_end` 写一次 | `budget.restore()` 接着计数；暂停期间不计入墙钟 | 反复暂停或崩溃就能绕过限额，`_finish()` 还会用新计数覆盖 `runs.usage` |
 | 排队未注入的插话 / 追加输入 | `runs.checkpoint.inbox`，暂停时写入 | `_launch()` 放回 inbox | 用户暂停前发的消息被静默丢弃 |
 | `rc.tainted`（读过不可信内容） | `sessions.meta.tainted` | `_build_rc()` 还原 | 污点感知失效，之后的副作用操作审批等级降低（见 [19](/governance/security)） |
 | `LoopGuard` 的观察窗口 | 只在内存 | 清空 | 跨越恢复点的重复调用检测失效 |

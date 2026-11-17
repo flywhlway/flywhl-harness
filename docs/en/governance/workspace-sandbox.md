@@ -76,7 +76,7 @@ A project-level `sandbox = "off"` is dropped, so move it to user config. A setup
 | `tools/sandbox.py` `seatbelt_profile()`, `bwrap_argv()` | The macOS profile and Linux bubblewrap arguments, including read-only `.git/hooks` and `.git/config` |
 | `tools/confine.py` `Confinement` | Resolves `auto`, starts the egress proxy, builds the launch; raises `SandboxUnavailable` |
 | `tools/egress.py` | The egress proxy and host allowlist |
-| `config.py` `_keep_sandbox_on()` | Drops `sandbox = "off"` from project config |
+| `config.py` `_keep_sandbox_on()` | Drops `sandbox = "off"` and `sandbox_network = "allow"` from project config |
 | `tools/shell.py` `BashTool.human_gate()` | Declares the `outside_sandbox` gate and re-checks `human_approved` |
 | `tools/fs.py` `_GatedWrite.human_gate()` | The same gate for `write` and `edit` on read-only paths, with a re-check at write time |
 | `policy/permissions.py` `PermissionResult.human_only` | Marks a call that only a person may release |

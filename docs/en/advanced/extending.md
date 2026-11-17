@@ -4,7 +4,7 @@
 
 ## The problem
 
-You want to add a tool, a model, a guard or a storage backend without forking the loop. The loop, permissions, hooks and journal only know a few interfaces, so each extension point is a constructor argument or a config entry. The signature is `Harness(config, *, provider=None, model=None, tools=None, store=None, hooks=None, approval_resolver=None, worker_id=None)`. Anything you do not pass falls back to the default: `create_provider`, `default_tools`, the SQLite `Store` and an empty `HookBus`.
+You want to add a tool, a model, a guard or a storage backend without forking the loop. The loop, permissions, hooks and journal only know a few interfaces, so each extension point is a constructor argument or a config entry. The signature is `Harness(config=None, *, provider=None, model=None, tools=None, store=None, hooks=None, approval_resolver=None, worker_id=None, approve_outside=())`. Anything you do not pass falls back to the default: `create_provider`, `default_tools`, the SQLite `Store` and an empty `HookBus`.
 
 ## Extension points
 

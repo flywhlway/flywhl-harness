@@ -53,4 +53,8 @@ governance/     策略与执行环境：Hooks、权限与人审、Workspace 与�
 multi-agent/    多 Agent 与度量：子代理、DAG、轨迹与评测、可观测与成本
 advanced/       进阶：长时任务、持久执行、端云、协议、可删减 Harness、对照 pi、扩展
 reference/      知识地图、动手练习、源码地图、术语表、参考资料
+manual/         精简手册：7 页浓缩理论、架构、关键机制、安全与实战，附速查表
+benchmark/      公开基准：概览、方法说明、结果
+en/             英文站：快速上手与架构全文，其余每章一页摘要，链接到中文原文
+quality-audit/  质量审计、发布门禁与证据记录（按 GitHub 浏览写的，`srcExclude` 排除，不进站点）
 ```

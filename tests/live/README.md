@@ -11,8 +11,8 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 
 - 密钥从项目根目录的 `.env` 读取（只在这里加载；普通的 `pytest` 不运行这些用例，也不会读到本机密钥）；
   缺少某家密钥的用例自动跳过，不算失败。
-- 测试报告末尾打印每个场景的 token、缓存命中与费用。用 deepseek-flash 跑完全部 33 个场景约 3～5 分钟、28 万 token、0.03 美元左右
-  （其中 64% 的输入命中前缀缓存）。
+- 测试报告末尾打印每个场景的 token、缓存命中与费用。用 deepseek-flash 跑完联网以外的 33 个场景约 3～5 分钟、28 万 token、0.03 美元左右
+  （其中 64% 的输入命中前缀缓存）；联网的 5 个合计不到 0.05 美元。
 - 断言只针对 harness 的可观测结果（工具序列、文件内容、Run 状态、事件），提示词要求原样输出时才匹配文字。
   模型偶尔不按要求做时，失败信息里附带完整对话记录（`transcript()`），可以直接判断是 harness 的问题还是模型的问题。
 
@@ -20,8 +20,9 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 
 ## 需要哪些密钥
 
-每个用例开头用 `need()` 检查自己要的密钥，缺了就 **跳过**（skipped），不会失败。没有任何密钥时 33 个全部跳过——
-所以 live 用例的 **失败** 一定是“有密钥但没跑通”，原因只剩网络、供应商侧或 harness 缺陷三类，见下文的分类记录。
+每个用例开头用 `need()` 检查自己要的密钥，缺了就 **跳过**（skipped），不会失败。没有任何密钥时 38 个里 37 个跳过，
+只剩本机直连读取一个公网网页（不用密钥，但要能上网）——
+所以 live 用例的 **失败** 不会是缺密钥，原因只剩网络、供应商侧或 harness 缺陷三类，见下文的分类记录。
 
 | 密钥 | 用例 |
 |---|---|
@@ -33,6 +34,9 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 | `OPENROUTER_API_KEY` | OpenRouter 多步任务；经 OpenRouter 调 Claude Haiku（Anthropic 协议） |
 | `DEEPSEEK_API_KEY` + Kimi + `MINIMAX_API_KEY` | 同一会话依次换用三家供应商续聊（共 4 次运行） |
 | `LLM_PRIMARY_MODEL`、`LLM_FALLBACK_MODEL`（及链上每一家的密钥） | 项目 `.env` 配置的降级链 |
+| `DEEPSEEK_API_KEY` | 联网：DeepSeek Search、DeepSeek Fetch，以及 deepseek-flash 联网回答时效性问题 |
+| `BOCHA_API_KEY` | 联网：博查搜索 |
+| 不需要 | 联网：本机直连（`fetch_backend = "direct"`）读取公网网页 |
 
 ## 失败分类记录（2026-10-16）
 
@@ -111,6 +115,7 @@ FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live
 | `test_live_provider.py` | 接入自检；思考开关；前缀缓存命中；`max_tokens` 截断；真实错误分类（模型不存在、密钥无效）；降级链（模型不存在 → 可用模型）；跨供应商降级（密钥失效 → 百炼）；项目 `.env` 配置的降级链逐项可用且能接手；百炼 / Kimi / MiniMax / OpenRouter 各跑一次多步任务；Anthropic 协议（经 OpenRouter 的 Claude Haiku 5.5、DeepSeek 的 Anthropic 端点） |
 | `test_live_agent.py` | 多步只读任务与思考回传；同一轮并行调用；写入审批与 diff 预览；拒绝理由引导模型换方案；编辑 + Stop 验收命令；计划全部完成才允许结束；规划模式只读；子代理结构化回传契约；上下文压缩后仍记得关键事实；预算耗尽时无工具收尾；文件中的提示注入不被执行；超大输出用句柄按需取回；同一会话跨四家供应商续聊 |
 | `test_live_runtime.py` | 流式中途取消后会话仍可继续；运行中插话被采纳；安全点暂停与恢复；`kill -9` 后另一个进程接管并完成；真实轨迹的确定性回放；Web API 端到端（REST 建会话 → SSE 事件 → 审批接口批准） |
+| `test_live_web.py` | DeepSeek Search 返回带价格的结果；DeepSeek Fetch 与本机直连各读一个公网网页；博查搜索；模型先搜再答、回答带来源网址，会话置污点，次数与费用记进结果 |
 
 ## 录制的夹具
 

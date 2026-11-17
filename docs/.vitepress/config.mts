@@ -5,7 +5,8 @@ import { withMermaid } from "vitepress-plugin-mermaid";
 // 部署到子路径时设置 BASE，例如 GitHub Pages：BASE=/flywhl-harness/ npm run build
 const base = process.env.BASE || "/";
 
-// 页面标注的版本和包版本同源，发版时不用再改站点
+// 页面标注的版本和包版本同源，发版时不用再改站点。
+// 站点从 main 构建，内容可能已经包含还没发版的改动（见 CHANGELOG 的 Unreleased），所以标注写成“main · 已发布 x.y.z”
 const version = readFileSync(new URL("../../src/flywhl_harness/__init__.py", import.meta.url), "utf8")
   .match(/__version__ = "(.+?)"/)![1];
 const changelog = "https://github.com/flywhlway/flywhl-harness/blob/main/CHANGELOG.md";
@@ -212,7 +213,7 @@ export default withMermaid(
             { text: "Docs", link: "/en/guide/what-is-harness" },
             { text: "Quick start", link: "/en/guide/quickstart" },
             { text: "Glossary", link: "/en/reference/glossary" },
-            { text: `Docs for ${version}`, link: changelog },
+            { text: `main · released ${version}`, link: changelog },
           ],
           sidebar: { "/en/": enSidebar },
           outline: { level: [2, 3], label: "On this page" },
@@ -240,7 +241,7 @@ export default withMermaid(
         { text: "精简手册", link: "/manual/", activeMatch: "^/manual/" },
         { text: "知识地图", link: "/reference/knowledge-map" },
         { text: "源码地图", link: "/reference/source-map" },
-        { text: `对应 ${version}`, link: changelog },
+        { text: `main · 已发布 ${version}`, link: changelog },
       ],
       sidebar: { "/manual/": manualSidebar, "/": sidebar },
       outline: { level: [2, 3], label: "本页目录" },

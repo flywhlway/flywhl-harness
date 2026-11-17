@@ -19,7 +19,7 @@ flowchart LR
     TEST["ScriptedProvider + make_harness<br/>配方 ⑩"] -.-> H
 ```
 
-`Harness.__init__` 的签名决定了扩展方式：`Harness(config, *, provider=None, model=None, tools=None, store=None, hooks=None, approval_resolver=None, worker_id=None)`。
+`Harness.__init__` 的签名决定了扩展方式：`Harness(config=None, *, provider=None, model=None, tools=None, store=None, hooks=None, approval_resolver=None, worker_id=None, approve_outside=())`。
 所有零件都通过构造参数注入；不传就用默认实现（`create_provider`、`default_tools`、SQLite `Store`、空的 `HookBus`）。
 
 ## ① 新增工具
@@ -225,7 +225,7 @@ if "git push" in (inp.get("tool_input") or {}).get("command", ""):
 
 `Harness.__init__` 把每条 `HookConfig` 包装成 `CommandHook` 注册（`source="project"`，工作目录为工作区根，环境变量 `FLYWHL_HOOK_EVENT` 为事件名）。协议与 Claude Code 兼容：退出码 0 放行（stdout 可以返回 JSON 决策，如 `{"hookSpecificOutput": {"permissionDecision": "ask"}}`），2 阻断，其它为非阻断错误。stdin 的 JSON 字段名是 `hook_event_name`、`tool_name`、`tool_input`、`tool_response` 等（见 `HookInput.to_json`）；空字段会被去掉，但工具类事件的 `tool_input` 总会保留，无参工具也传 `{}`，脚本可以直接取。
 
-两个运行细节：hook 进程以新会话启动，超时（`timeout`）时整个进程组被 `SIGKILL`，脚本派生的子进程不会残留在后台；hook 进程继承 harness 的**完整**环境变量，不像 bash 工具那样剥离密钥类变量，脚本来源要与代码一样审查。
+两个运行细节：hook 进程以新会话启动，超时（`timeout`）时整个进程组被 `SIGKILL`，脚本派生的子进程不会残留在后台；hook 进程与 bash、MCP 一样剥离密钥类环境变量并跑在系统沙箱里（每条可用 `sandbox` / `sandbox_network` / `network_allow` 单独设置，没写的跟随 `permissions`），脚本确实要用的变量在 `env` 里写明取值、或在 `pass_env` 里列出变量名。
 
 写在启动目录 `flywhl.toml` 里的 hook 要先信任这份配置才会注册：`flywhl` 在终端里逐项列出并询问，也可以加 `--trust`；
 非交互运行时忽略并提示。只给自己用的 hook 放进用户配置 `~/.flywhl/config.toml`，或用 `-c` 指定配置文件，就不需要确认（见配方 ⑨）。
@@ -256,7 +256,7 @@ rules = [
 | bash 复合命令 | allow 规则要求**每一段**都被 allow 覆盖：`git status && rm -rf x` 不会因为 `allow:bash(git status*)` 被放行 |
 | 文件工具 | 目标同时匹配原始路径、绝对路径与相对工作区的路径 |
 | 只升不降 | 命令分析为高危 → 至少 ask；会话被污点标记 → 非只读的 allow 升级为 ask（bypass 模式除外） |
-| 污点来源与范围 | 工具的 `untrusted_for(args)` 为真即标记污点（bash 下载类命令带 `network` 标记）；污点写入会话元数据，暂停恢复、崩溃接管后保留；子代理的污点在返回时上传到父 Run |
+| 污点来源与范围 | 工具的 `untrusted_for(args)` 为真即标记污点（bash 下载类命令带 `network` 标记）；污点写入会话元数据，暂停恢复、崩溃接管后保留；子代理的污点在返回时上传到父 Run，父 Run 的污点在派生时下传子代理 |
 
 模式可以按会话切换：`h.set_mode(session_id, "accept_edits")`。审批时选择“本会话总是允许”会生成一条窄粒度的会话级授权（`grant_for`），例如 bash 只取命令的前两个词加 `*`。完整语义见 [17 权限与人审](/governance/permissions-hitl)。
 
@@ -268,7 +268,7 @@ command = "python"
 args = ["examples/mcp_echo_server.py"]
 ```
 
-工具以 `mcp__<server>__<tool>` 命名注册，一律按外部副作用处理、输出视为污点。服务器自报的 annotations 默认不采信：只读工具在 `read_only_tools` 里点名（支持 `*` 通配），确实信得过的服务器才写 `trust_annotations = true`。必须通过 `async with Harness(...)` 或 `await h.start()` 才会连接服务器并注册工具；`start()` 是幂等的，`run_eval` 也会自动调用。服务器子进程拿不到 harness 进程里的密钥类环境变量，凭证要写在该服务器的 `env` 里。协议细节、未实现的部分与安全注意事项见 [27 协议生态](/advanced/protocols)。
+工具以 `mcp__<server>__<tool>` 命名注册，一律按外部副作用处理、输出视为污点。服务器自报的 annotations 默认不采信：只读工具在 `read_only_tools` 里点名（支持 `*` 通配），确实信得过的服务器才写 `trust_annotations = true`。必须通过 `async with Harness(...)` 或 `await h.start()` 才会连接服务器并注册工具；`start()` 是幂等的，`run_eval` 也会自动调用。服务器子进程跑在系统沙箱里（可按服务器设 `sandbox` / `sandbox_network` / `network_allow`），拿不到 harness 进程里的密钥类环境变量，凭证要写在该服务器的 `env` 里。协议细节、未实现的部分与安全注意事项见 [27 协议生态](/advanced/protocols)。
 
 ## ⑥ 替换存储后端为 PostgreSQL
 
@@ -389,7 +389,8 @@ asyncio.create_task(watch(h, run.id))
 
 启动目录的配置文件可能来自刚克隆的仓库，其中下列设置要先信任这份文件的当前内容才生效：`hooks`、`mcp_servers`、`verify_command`、
 `base_url`、`api_key`、`api_key_env`、`extra_body`、`workspace`、`data_dir`、`durability`、`system_prompt`、`append_system_prompt`，以及 `permissions` 中放宽审批的取值
-（`allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`）。其余字段直接生效（白名单见 `config.py::_SAFE_KEYS`）。
+（`allow` 规则、`bypass` / `accept_edits`、`on_ask = "allow"`、`strip_secret_env = false`、`sandbox_network = "allowlist"`、`network_allow`、`unix_sockets`、`auto_approve`、`require_pinned = false`）。其余字段直接生效（白名单见 `config.py::_SAFE_KEYS`）。
+关沙箱（`sandbox = "off"`）、放开沙箱网络（`sandbox_network = "allow"`）写在项目配置里一律丢弃，`[web]` 只能收紧，信任过也一样。
 信任按“绝对路径 + 内容 SHA-256”记在 `~/.flywhl/trusted.json`，内容变化后重新确认；用户配置与 `-c` 指定的文件视为可信。
 库代码默认忽略未信任的设置并发出 `UntrustedConfigWarning`，要自己做确认时传回调：
 
@@ -419,6 +420,7 @@ cfg = HarnessConfig.load(trust=ask)
 | `cancel_grace_seconds` | `5.0` | 不可中断工具在取消后的宽限期 |
 | `heartbeat_seconds` / `stale_after_seconds` | `2.0` / `10.0` | 心跳间隔；超过即视为 Worker 崩溃 |
 | `snapshots` | `True` | 写操作前影子 git 快照 |
+| `durability` | `"full"` | 会话库落盘强度：`full` 每次提交刷到盘上，`normal` 更快但断电可能丢最后几次提交。项目配置里写 `normal` 要先信任 |
 | `max_stop_blocks` / `verify_command` / `verify_todos` | `3` / `None` / `True` | Stop 验收 |
 | `subagent_max_depth` / `enable_demo_tools` | `2` / `True` | 子代理嵌套上限；演示工具 |
 | `context.compact_threshold` / `reserve_tokens` / `keep_recent_tokens` | `0.80` / `8192` / `12000` | 压缩触发与保留量 |
@@ -432,8 +434,10 @@ cfg = HarnessConfig.load(trust=ask)
 | `loop_guard.max_consecutive_errors` / `same_file_edit_warn` | `6` / `6` | 连续错误；同文件反复编辑 |
 | `permissions.mode` / `rules` / `on_ask` / `approval_timeout` | `"default"` / `[]` / `"wait"` / `600.0` | 见配方 ④ |
 | `permissions.strip_secret_env` | `True` | bash 子进程剥离 `*KEY*` / `*TOKEN*` / `*SECRET*` 等环境变量 |
-| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed`（不写时 `pre_tool_use` 为 true，其余事件为 false） |
-| `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd`；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
+| `permissions.sandbox` / `sandbox_network` / `network_allow` | `"auto"` / `"auto"` / `[]` | bash、命令 hook、MCP 服务器、验收命令的系统沙箱；`auto` 探测，用不了时拒绝执行 |
+| `hooks` | `[]` | 每项 `event` / `command` / `matcher` / `timeout`（30.0）/ `fail_closed`（不写时 `pre_tool_use` 为 true，其余事件为 false）/ `env` / `pass_env`，以及单独的沙箱设置 |
+| `mcp_servers` | `{}` | 每项 `command` / `args` / `env` / `cwd` / `read_only_tools` / `trust_annotations`，以及单独的沙箱设置；服务器子进程总是剥离密钥类环境变量，不受 `strip_secret_env` 影响 |
+| `web.enabled` / `max_searches_per_run` / `max_fetches_per_run` | `False` / `60` / `30` | 内置 `web_search` / `web_fetch`，默认关闭 |
 
 可识别的环境变量：`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_FALLBACK_MODELS`（逗号分隔）、`FLYWHL_BASE_URL`、`FLYWHL_API_KEY_ENV`、
 `FLYWHL_THINKING`、`FLYWHL_REASONING_EFFORT`、`FLYWHL_CNY_PER_USD`（人民币计价模型的折算汇率）、`FLYWHL_WORKSPACE`、`FLYWHL_DATA_DIR`、`FLYWHL_PERMISSION_MODE`，

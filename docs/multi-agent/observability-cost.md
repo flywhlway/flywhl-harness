@@ -63,8 +63,10 @@ def to_otel_spans(run: dict[str, Any], events: list[Event], session_meta: dict[s
 | `chat {model}` | `message_start` → assistant 的 `message_end` | `gen_ai.response.model` | 消息上记录的实际模型（降级后与请求模型不同） |
 | | | `gen_ai.response.finish_reasons` | `stop_reason` |
 | | | `gen_ai.usage.*`，含 `gen_ai.usage.cache_read.input_tokens` | 该次调用的真实 usage |
-| `execute_tool {name}` | `tool_start` → `tool_end` | `gen_ai.tool.name` / `gen_ai.tool.call.id` / `gen_ai.tool.type=function` | 工具调用 |
+| | | `flywhl.web.backend` / `flywhl.web.searches` / `flywhl.web.hits` | 仅模型侧联网：声明名（`native:…`）、搜索次数、来源条数 |
+| `execute_tool {name}` | `tool_start` → `tool_end` | `gen_ai.tool.name` / `gen_ai.tool.call.id` / `gen_ai.tool.type=function` / `flywhl.tool.status` | 工具调用与结果状态 |
 | | | `error.type` | 仅在 `is_error` 时设置，取工具结果的状态（如 `denied`、`timeout`） |
+| | | `flywhl.web.backend` / `flywhl.web.hits` / `flywhl.web.cached` / `server.address` / `http.response.status_code` | 仅联网工具：后端、条数、是否命中缓存、读取的主机与状态码；不带查询词与正文 |
 
 几个实现上的选择：
 
@@ -109,7 +111,7 @@ def to_otel_spans(run: dict[str, Any], events: list[Event], session_meta: dict[s
 | 心跳过期的活动 Run | 状态为活动但 `heartbeat_at` 超过 `stale_after_seconds` | `runs.heartbeat_at`、`runs.worker_id` | 出现即告警：Worker 崩溃且无人接管 |
 | TTFT | 一次模型调用从请求到第一个增量的时间 | `message_start.ts` → 同 `message_id` 的第一个 `message_update.ts` | P95 相对基线显著上升 |
 | 输出速度 | 输出 token / 生成时长 | `message_end` 的 usage 与时间戳 | 持续下降常意味着 provider 拥塞 |
-| 每 Run 成本 | 根 Run 的 `usage.cost_usd` | `runs.usage` 或 `run_end.usage` | P95 超过近 7 天基线的若干倍 |
+| 每 Run 成本 | 根 Run 的 `usage.cost_usd`，开了联网时再加 `tool_cost_usd` | `runs.usage` 或 `run_end.usage`；联网费用在 `runs.result` 与 `usage` 事件里 | P95 超过近 7 天基线的若干倍 |
 | 每 Run 轮次 | 回合数 | `run_end.turns`、`turn_start` 计数 | 分布右移意味着任务变难或 Agent 原地打转 |
 | 缓存命中率 | `cache_read / (input + cache_read + cache_write)` | assistant `message_end` 的 `usage` | 发布后骤降：前缀被打碎 |
 | 工具错误率 | `is_error` 的 `tool_end` 占比，按工具名分组 | `tool_end` 事件 | 某个工具突然升高：环境变化或工具回归 |
@@ -149,15 +151,19 @@ class Usage:
 
 ```python
 def compute_cost(info: ModelInfo, usage: Usage) -> float:
-    """按百万 token 单价计算一次调用的成本（美元）。"""
+    """按百万 token 单价计算一次调用的成本，统一折算成美元。分档价格按本次请求的输入规模选档。"""
+    price: ModelInfo | PriceTier = info
+    for tier in info.tiers:
+        if usage.context_tokens > tier.above:
+            price = tier
     m = 1_000_000
-    return round(
-        usage.input_tokens * info.input_price / m
-        + usage.output_tokens * info.output_price / m
-        + usage.cache_read_tokens * info.cache_read_price / m
-        + usage.cache_write_tokens * info.cache_write_price / m,
-        8,
+    native = (
+        usage.input_tokens * price.input_price / m
+        + usage.output_tokens * price.output_price / m
+        + usage.cache_read_tokens * price.cache_read_price / m
+        + usage.cache_write_tokens * price.cache_write_price / m
     )
+    return round(native * usd_per_unit(info.currency), 8)
 ```
 
 这个公式成立的前提是：**四类 token 互不重叠**，`input_tokens` 只包含未命中缓存、也未写入缓存的部分。两个 provider 适配层都保证了这一点：
@@ -170,7 +176,7 @@ def compute_cost(info: ModelInfo, usage: Usage) -> float:
 如果漏掉这个减法，缓存命中的 token 会被按输入价和缓存读价各算一次，缓存越有效，账算得越离谱。
 
 价格来自 `MODELS` 表中每个 `ModelInfo` 的四个单价字段。这是本地维护的价格表，价格调整、新增计费维度时会与账单产生偏差，所以需要**定期与 provider 的账单对账**；具体单价以各家官方价格页为准。
-两种情况不依赖这张表：
+三种情况要另外看：
 
 - **服务直接返回费用。** OpenRouter 在 usage 里带 `cost`（实际扣费），`reports_cost=True` 的供应商以它为准；
 - **分时段计价。** DeepSeek 非高峰时段是高峰价的一半，表里取高峰价，所以算出来的是 **上限**——用来卡预算是安全的，对账时会偏高。
@@ -179,6 +185,9 @@ def compute_cost(info: ModelInfo, usage: Usage) -> float:
 
 表里没有的模型成本记为 0，这会让 `max_cost_usd` 悄悄失效。配置了费用预算而模型没有价格时，Run 开始就发出 `notice`（`code=unpriced_model`），
 提示改用 `max_total_tokens` 限额。
+
+联网工具的费用不在 `Usage` 里：每次搜索、读取按后端的 `price_per_call` 记进预算的 `tool_cost_usd`，与模型费用一起计入 `max_cost_usd`，Run 结束时写进 `runs.result`；
+后端没配单价时同样按 0 计，开局发出 `code=unpriced_web` 的 notice。
 
 用 deepseek-flash 跑完 `tests/live` 的 33 个真实场景（2026-10-14，含百炼、Kimi、MiniMax、OpenRouter 与 Claude 的场景），
 计入台账的 33 次 Run 合计约 30 万 token、0.047 美元，其中输入侧 64% 命中了前缀缓存——多步 Agent 任务每一轮都带着完整历史，

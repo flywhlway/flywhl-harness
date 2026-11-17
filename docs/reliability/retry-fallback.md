@@ -31,7 +31,7 @@
 | 工具瞬时错误 | 工具抛 `TransientToolError` | — | 只对只读 / 幂等工具有限重试，且受截止时间约束 | `ToolExecutor._invoke()` |
 | 工具永久错误 | 工具抛其它异常、超时 | — | 不重试，作为 `is_error` 结果回给模型；外部且非幂等的工具超时记为 `unknown`，要求先核实 | `ToolExecutor._invoke()` / `_race()` |
 | 语义失败 | 参数 schema 校验失败、格式不符 | — | 必须 **改变输入** 再试，并有次数上限 | 回给模型自我修正；预算与循环守卫兜底 |
-| 输出截断 | `stop_reason=max_tokens` | — | 带工具调用：整批不执行（`truncated`），让模型分步重来；纯文本：提醒模型从中断处续写，最多 3 次 | `AgentLoop._body()` |
+| 输出截断 | `stop_reason=max_tokens` | — | 提高本次运行的 `max_tokens`；带工具调用：整批不执行（`truncated`），让模型分步重来；纯文本：提醒模型从中断处续写，最多 3 次 | `AgentLoop._body()` |
 
 表的最后四行说明一件事：工具与语义层面的失败，“重试者”往往是模型本身——harness 的职责是把失败变成模型读得懂的结果（见 [06 工具系统](/core/tools)），而不是在背后悄悄重放。
 
@@ -61,7 +61,9 @@ def classify_http_error(status: int, body: str, headers: dict[str, str] | None =
         except ValueError:
             retry_after = None
     low = body.lower()
-    if status == 429:
+    if status == 402 or (400 <= status < 500 and any(h in low for h in _BILLING_HINTS)):
+        kind = ErrorKind.BILLING
+    elif status == 429:
         kind = ErrorKind.RATE_LIMIT
     elif status in (529, 503) or "overloaded" in low:
         kind = ErrorKind.OVERLOADED
@@ -69,7 +71,7 @@ def classify_http_error(status: int, body: str, headers: dict[str, str] | None =
         kind = ErrorKind.SERVER
     elif status in (401, 403):
         kind = ErrorKind.AUTH
-    elif status == 404:
+    elif status == 404 or (status in (400, 422) and "model" in low and any(h in low for h in _MODEL_NOT_FOUND_HINTS)):
         kind = ErrorKind.NOT_FOUND
     elif status in (400, 413, 422) and any(h in low for h in _OVERFLOW_HINTS):
         kind = ErrorKind.CONTEXT_OVERFLOW
@@ -338,9 +340,9 @@ class ResilientProvider(Provider):
             if not breaker.allow():
                 last = ProviderError(ErrorKind.OVERLOADED, f"{provider.name}/{model} 熔断中", provider=provider.name)
                 continue
+            sub = req if i == 0 else replace(req, model=model, max_tokens=_fallback_max_tokens(req, provider, model))
             if i > 0:
                 yield StreamEvent("notice", info={"code": "fallback", "text": f"降级到 {provider.name}/{model}"})
-            sub = req if i == 0 else replace(req, model=model)
             attempt = 0
             while True:
                 emitted = False
@@ -404,6 +406,8 @@ flowchart TB
 6. **切换时发 `notice`。** 降级必须是可观测的事件，而不是静默行为（UI 与轨迹中都能看到 `fallback`）。
 7. **`except BaseException` 只为归还名额。** 用户取消时，`CancelToken.guard` 取消挂起的 `__anext__`，生成器内部收到 `CancelledError`；
    消费方提前停止迭代、关闭生成器时，`yield ev` 处抛出 `GeneratorExit`。两者都不说明 provider 的健康状况，所以只 `release()`，然后原样抛出。
+8. **降级时收回提高过的输出上限。** Loop 在截断后提高过 `max_tokens` 时（`metadata["max_tokens_base"]` 记着配置值），
+   `_fallback_max_tokens()` 按备用模型登记的最大输出收回，但不低于配置值。
 
 降级链来自配置，每一项都写成 `<供应商>:<模型>`，可以跨供应商：
 
@@ -470,20 +474,25 @@ self._overflow_retries = 0
 ```python
 # src/flywhl_harness/agent/loop.py · AgentLoop._body（节选）
 if not calls and msg.stop_reason == StopReason.MAX_TOKENS:
-    # 纯文本回复被长度上限截断：不能当作“完成”，让模型从中断处续写（有上限，防止无限续写）
+    # 被长度上限截断：不能当作“完成”（有上限，防止无限续写）。
+    # 只有思考、没有正文时没有“中断处”可接：这条消息不会回传（见 llm/base.py has_payload），要换一句提示
     n = rc.state.get("continuations", 0)
     if n < 3:
         rc.state["continuations"] = n + 1
-        yield self._append(user_message(reminder(
-            "你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。"),
-            kind=MsgKind.REMINDER))
+        text = ("你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。" if msg.text else
+                "你上一轮的思考用完了单次输出的长度上限……请少做推演、直接行动：内容很长时分几步完成……")
+        yield self._append(user_message(reminder(text), kind=MsgKind.REMINDER))
         yield self._ev(E.TURN_END, turn=self.turn)
         continue
     yield self._ev(E.NOTICE, level="warn", code="truncated", text="回复多次被长度上限截断，可能不完整")
+    if not msg.text:   # 最后一次仍是只有思考：没有任何产出，不能按“自然完成”收尾
+        self.outcome = Outcome("incomplete", "多次在思考阶段就被输出长度上限截断，没有产出正文")
+        # ...
 ```
 
+- **提高输出上限**：两种截断都先经 `_raise_output_limit()`，把本次运行之后的 `max_tokens` 提高到 4 倍，不超过模型登记的最大输出和 65536，并发一条 `max_tokens_raised` 通知；
 - **带工具调用的截断**：参数可能不完整，整批调用都不执行，各补一条 `truncated` 结果，提示模型“分多次写入”后重新调用；
-- **纯文本截断**：截断的文本已经落盘，追加一条提醒让模型接着写。续写计数放在 `rc.state` 里，整个 Run 最多 3 次；用完之后不再续写，发一条 `truncated` 警告，再按正常结束流程走；
+- **纯文本截断**：截断的文本已经落盘，追加一条提醒让模型接着写；只有思考、没有正文时，这条消息发送前被 `prepare_history()` 跳过，提醒改成“少推演、分步做”。续写计数放在 `rc.state` 里，整个 Run 最多 3 次；用完之后不再续写，发一条 `truncated` 警告，最后一次仍只有思考时以 `incomplete` 结束，否则按正常结束流程走；
 - 这与流式重试的“整体重发”不同：截断是一次成功的调用，前半段内容有效，接着写比重来便宜。
 
 `tests/test_loop.py` 的 `test_truncated_tool_calls_are_not_executed` 与 `test_truncated_text_reply_is_continued` 分别覆盖这两条路径。
@@ -510,7 +519,10 @@ while True:
         tried = f"共尝试 {attempt} 次" if retryable else "非幂等工具不自动重试"
         return ToolResult.error(f"工具暂时不可用（{tried}）：{e}"), "error"
     except PathEscape as e:
-        return ToolResult.error(f"{e}。只能操作工作区内的文件。"), "denied"
+        hint = "" if isinstance(e, CredentialPath) else "只能操作工作区内的文件。"
+        return ToolResult.error(f"{e}。{hint}"), "denied"
+    except RunCancelled as e:  # 例如 task：父 Run 被取消时子代理向上传播的取消
+        return ToolResult.error(f"已取消：{e}"), "cancelled"
     except Exception as e:
         return ToolResult.error(f"工具 {tool.name} 执行异常：{type(e).__name__}: {e}"), "error"
 ```
