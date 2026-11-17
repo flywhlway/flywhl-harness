@@ -326,6 +326,97 @@ def test_anthropic_server_fallback_only_on_first_party():
     assert "fallbacks" not in kw and betas == []
 
 
+# ====================================================================== 采样参数
+# API 版本 2026-10-21 用 400 拒绝 temperature / top_p / top_k，SDK 2.x 的 create() 也删掉了这几个参数。
+# 下面的用例用真实 SDK 客户端发请求（传输层换成 MockTransport），create() 签名不认的参数会当场抛 TypeError
+SAMPLING = {"temperature", "top_p", "top_k"}
+
+
+def _claude_reply(model: str, *, text: str = "", tool: tuple[str, dict] | None = None) -> bytes:
+    """按 Messages 流式接口的事件格式拼一段 SSE 响应：一段文本，或一个工具调用。"""
+    evs: list[dict] = [{"type": "message_start", "message": {
+        "id": "msg_1", "type": "message", "role": "assistant", "model": model, "content": [],
+        "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 5, "output_tokens": 1}}}]
+    if tool is not None:
+        evs += [{"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "tool_use", "id": "toolu_1", "name": tool[0], "input": {}}},
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool[1])}}]
+    else:
+        evs += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}]
+    evs += [{"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use" if tool else "end_turn", "stop_sequence": None},
+             "usage": {"output_tokens": 3}},
+            {"type": "message_stop"}]
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n" for e in evs).encode()
+
+
+def _claude_on(replies: list[bytes], seen: list[dict], **kw):
+    """真实的 AnthropicProvider 与 SDK 客户端，只把网络换成按顺序返回 replies；请求体记录在 seen 里。"""
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    from flywhl_harness.llm.anthropic import AnthropicProvider
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, content=replies[len(seen) - 1], headers={"content-type": "text/event-stream"})
+
+    url = "https://api.anthropic.com"
+    p = AnthropicProvider(api_key="k", base_url=url, **kw)
+    p.client = anthropic.AsyncAnthropic(api_key="k", base_url=url, max_retries=0,
+                                        http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)))
+    return p
+
+
+@pytest.mark.parametrize("model,thinking", [
+    ("claude-haiku-5-5", False),    # 原来出错的路径：不开 thinking 时 temperature 被传给 messages.create()
+    ("claude-sonnet-5-5", True),    # 开 thinking、带服务端降级（走 beta.messages.create()）
+])
+async def test_anthropic_never_sends_sampling_params(model, thinking):
+    seen: list[dict] = []
+    p = _claude_on([_claude_reply(model, text="好"), _claude_reply(model, text="好")], seen, thinking=thinking)
+    msgs = [Message(role="user", content=[TextBlock("q")])]
+    evs = [ev async for ev in p.stream(ModelRequest(model=model, system="s", messages=msgs, temperature=0.2), CancelToken())]
+    assert evs[-1].message.text == "好" and not SAMPLING & set(seen[0])
+    notes = [e.info for e in evs if e.type == "notice"]
+    assert len(notes) == 1 and notes[0]["code"] == "temperature_ignored"
+    assert notes[0]["level"] == "warn" and notes[0]["once"] is True and "0.2" in notes[0]["text"]
+    # 没配 temperature：请求一样，也没有提示
+    evs = [ev async for ev in p.stream(ModelRequest(model=model, system="s", messages=msgs), CancelToken())]
+    assert not [e for e in evs if e.type == "notice"] and not SAMPLING & set(seen[1])
+    assert seen[0] == seen[1]                       # 配不配 temperature，发出去的请求一模一样
+    await p.aclose()
+
+
+async def test_temperature_notice_once_per_run(ws):
+    from flywhl_harness import Harness, Store
+    from flywhl_harness.events import E
+
+    seen: list[dict] = []
+    model = "claude-haiku-5-5"
+    p = _claude_on([_claude_reply(model, tool=("ls", {"path": "."})), _claude_reply(model, text="目录是空的。")],
+                   seen, thinking=False)
+    cfg = HarnessConfig.load(workspace=str(ws))
+    cfg.permissions.on_ask, cfg.snapshots, cfg.heartbeat_seconds, cfg.trust_workspace = "allow", False, 0.2, True
+    cfg.temperature = 0.2
+    res = await Harness(cfg, provider=p, model=model, store=Store(":memory:")).run("看看目录")
+    assert res.status == "completed" and res.text == "目录是空的。"
+    assert len(seen) == 2 and not any(SAMPLING & set(body) for body in seen)   # 两次请求都不带
+    notes = [e.data for e in res.events if e.type == E.NOTICE and e.data.get("code") == "temperature_ignored"]
+    assert len(notes) == 1 and notes[0]["level"] == "warn" and "once" not in notes[0]
+
+
+@pytest.mark.parametrize("profile,model", [("deepseek", "deepseek-flash"), ("openrouter", "deepseek/deepseek-v4.1-flash")])
+async def test_openai_compatible_providers_still_send_temperature(profile, model):
+    seen: list[dict] = []
+    p = provider_on(profile, (FIX / f"{profile}_final.sse").read_text(), seen=seen)
+    req = ModelRequest(model=model, system="s", messages=[Message(role="user", content=[TextBlock("q")])], temperature=0.2)
+    evs = [ev async for ev in p.stream(req, CancelToken())]
+    await p.aclose()
+    assert seen[0]["temperature"] == 0.2 and not [e for e in evs if e.type == "notice"]
+
+
 def test_load_dotenv_does_not_override(tmp_path, monkeypatch):
     f = tmp_path / ".env"
     f.write_text('# 注释\nFLYWHL_T_A=1\nexport FLYWHL_T_B="带 空格"\nFLYWHL_T_C=v # 行尾注释\nFLYWHL_T_KEEP=new\n')
