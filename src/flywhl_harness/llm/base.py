@@ -256,10 +256,22 @@ class Provider(ABC):
 
 
 # ====================================================================== 通用预处理
+def has_payload(m: Message) -> bool:
+    """assistant 消息里有没有能回传给模型的东西：正文、工具调用或供应商侧工具块。
+
+    思考模型的输出预算（``max_tokens``）把思考也算在内。思考一长，输出在思考阶段就被截断，
+    留下一条只有思考的消息。它在 OpenAI 兼容协议里是 ``content=null`` 且没有 ``tool_calls``，
+    DeepSeek 直接 400（``content or tool_calls must be set``）。这条消息又留在历史里，重试、继续都会再撞一次，
+    会话就再也跑不下去。思考本身被截断了，不完整，丢掉它，让模型重新想。
+    """
+    return bool(m.text or m.tool_calls or any(isinstance(c, ServerBlock) for c in m.content))
+
+
 def prepare_history(messages: list[Message]) -> list[Message]:
     """发送前的通用修补：保证消息结构合法（tool_call 与 tool_result 严格配对）。
 
     - 跳过 error / refusal 的 assistant 消息（它们没有可复用的内容）；
+    - 跳过只有思考、没有正文和工具调用的 assistant 消息（见 ``has_payload``）；
     - aborted 的 assistant 只保留文本（构建时已丢弃半截 thinking 与工具调用）；
     - 孤立的 tool 结果（找不到对应调用）直接丢弃；
     - 不在末尾却缺少结果的工具调用，补一条合成的错误结果（pi 的做法），避免 API 直接 400。
@@ -279,7 +291,7 @@ def prepare_history(messages: list[Message]) -> list[Message]:
         if m.role == "assistant":
             if m.stop_reason in (StopReason.ERROR, StopReason.REFUSAL):
                 continue
-            if not m.content:
+            if not has_payload(m):
                 continue
             flush_pending()
             out.append(m)
