@@ -96,7 +96,12 @@ class CancelToken:
 
         被放弃的任务会收到 asyncio 取消，因此 ``aw`` 内部应在 finally 中清理资源。
         """
-        self.raise_if_cancelled()
+        if self.cancelled:
+            # aw 还没开始：先关掉再抛。不关的话，Python 3.13 起没被 await 的 __anext__() 会报 RuntimeWarning
+            close = getattr(aw, "close", None)
+            if callable(close):
+                close()
+            raise self.error()
         task = asyncio.ensure_future(aw)
         waiter = asyncio.ensure_future(self._event.wait())
         try:
