@@ -122,8 +122,9 @@ _RULE_RE = re.compile(r"^\s*(allow|ask|deny)\s*:\s*([\w*?\-\[\]]+)\s*(?:\((.*)\)
 
 | 规则 | 意图 |
 |---|---|
-| `deny:read/grep/write/edit(<凭证位置>)`：`.ssh`、`id_rsa`/`id_ed25519`、`.aws`、`.config/gcloud`、`.azure`、`.kube`、`.docker/config.json`、`.netrc`、`.git-credentials`、`.config/gh`、`.pypirc`、`.pgpass`、`.vault-token`、`.gnupg`、`/etc/shadow`、`/proc/*/environ` | 模型不能通过文件工具读写凭证。清单在 `policy/sensitive.py`，与 bash 命令分析的 `CREDENTIAL_HINTS` 共用并由测试逐项核对，bash 命中同样拒绝（见下文“bash 与凭证位置”）；grep 递归遍历时也逐个文件跳过这些位置 |
+| `deny:read/grep/write/edit(<凭证位置>)`：`.ssh`、`id_rsa`/`id_ed25519`、`.aws`、`.config/gcloud`、`.azure`、`.kube`、`.docker/config.json`、`.netrc`、`.git-credentials`、`.config/gh`、`.pypirc`、`.pgpass`、`.vault-token`、`.gnupg`、`/etc/shadow`、`/proc/*/environ`，以及其它发包与对象存储令牌、钥匙串目录、Web 控制台令牌 `.flywhl/server_token` 等 | 模型不能通过文件工具读写凭证。清单在 `policy/sensitive.py`，与 bash 命令分析的 `CREDENTIAL_HINTS` 共用并由测试逐项核对，bash 命中同样拒绝（见下文“bash 与凭证位置”）；grep 递归遍历时也逐个文件跳过这些位置 |
 | `ask:read/grep/write/edit(*.env、.env.*、.npmrc、*_history)` | 常含密钥、也常有正当用途的文件，读写都需确认 |
+| `ask:write/edit(.git、.git/*)` | `.git/` 里的 config 与 hooks 会被之后的 git 命令执行（`core.fsmonitor`、pre-commit……），`accept_edits` 也不自动放行 |
 | `deny:write/edit(.flywhl/*)`、`ask:write/edit(flywhl.toml)`、`ask:bash(*.flywhl*)` | Agent 不能改写 harness 自己的状态与配置：`.flywhl/` 里是会话库、审批记录、快照与 `.flywhl/config.toml`，`flywhl.toml` 在下次启动时被加载（可以定义命令 hook）。放任它们被改写，等于让 Agent 跨重启给自己提权——`accept_edits` 模式会自动接受工作区内的编辑，bypass 更不必说，所以放在基线里 |
 | `deny:bash(rm -rf /)`、`deny:bash(rm -rf /*)`、`deny:bash(rm -rf ~*)`、`deny:bash(mkfs*)`、`deny:bash(:(){*)` | 最具破坏性的命令直接拒绝 |
 
@@ -189,7 +190,7 @@ all_rules = [*self.rules, *grants]
 | 管理凭证 | `ssh-keygen -f ~/.ssh/id_ed25519`、`chmod 600 ~/.ssh/config`、`cat ~/.ssh/id_ed25519.pub` | 由用户自己执行 |
 
 拒绝理由里提示了 grep 工具和“交给用户执行”两条出路，模型通常能自己换做法。
-线索档（`.env`、`credentials` 字样、shell 历史、钥匙串查询，即 `SECRET_HINTS` 多出来的部分）维持高危要确认、bypass 下不升级：
+线索档（`.env`、`credentials` 字样、`.npmrc`、shell 历史，即 `SECRET_HINTS` 多出来的部分）维持高危要确认、bypass 下不升级：
 `cp .env.example .env`、`pytest tests/test_credentials.py` 都会命中，误报率高，内容也常是任务本身要用的项目配置。
 `tests/test_security.py::test_bash_credential_deny_stays_narrow` 守住这条边界。
 
@@ -272,8 +273,9 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
         lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
         lex.whitespace_split = True
         tokens = list(lex)
-    except ValueError as e:  # 引号不配对等
+    except ValueError as e:  # 引号不配对、结尾一个反斜杠等
         a.bump("external", f"命令无法解析：{e}")
+        a.inline = a.opaque = a.network = True
         return a
     # ... 按分隔符拆段，逐段 _classify
 ```
@@ -292,13 +294,14 @@ def analyze(command: str, workspace: str | None = None, *, _depth: int = 0) -> C
   ```python
   if analysis and analysis.opaque and decision == Decision.ALLOW and self.mode != Mode.BYPASS:
       # allow 规则（含“本会话总是允许”的授权）按命令前缀匹配：git status "$(rm -rf ~)" 会命中 git status*，
-      # 但替换里的命令不受规则约束——这类命令一律交给人确认
-      decision, reason = Decision.ASK, "命令包含命令替换或进程替换，其中执行的命令不受 allow 规则约束，需要人工确认"
+      # 但替换里的命令不受规则约束；仓库配置给 git diff 挂的 textconv 同理——这类命令一律交给人确认
+      decision, reason = Decision.ASK, "命令实际执行的程序不在命令文本里（命令替换、进程替换、仓库配置或解析不了的命令），不受 allow 规则约束，需要人工确认"
   ```
 
   见 `tests/test_security.py::test_allow_rule_cannot_cover_command_substitution`、`test_substitution_hiding_catastrophe_is_denied_even_in_bypass`。
 - **`punctuation_chars`** 让 `ls&&rm` 这种没有空格的写法也能切出 `&&`。
-- **解析失败按 external 处理。** 引号不配对的命令，shell 的理解和我们的理解可能不同，宁可多问一次。
+- **解析失败按 external 处理，并标记 `opaque`。** 引号不配对、结尾一个反斜杠的命令，shell 的理解和我们的理解可能不同（解析器放弃了，bash 照样执行分号后面的命令），
+  所以 allow 规则和 `auto_approve` 都覆盖不了它，要人确认；输出按读到外部内容算。
 - **工作区感知。** 把工作区根前缀替换成 `./` 之后，`echo hi > /path/to/ws/out.txt` 按工作区内写入（write）处理，
   `echo hi > /etc/out.txt` 仍是工作区外写入（external）——`test_bash_absolute_path_inside_workspace` 覆盖了这对用例。
   替换之后还剩下的绝对路径就都在工作区外，下文的边界检查依赖这一点。
@@ -390,7 +393,7 @@ for j, w in enumerate(args, start=1):
 | read | `ls`、`cat`、`grep`、`printenv HOME`、`command -v git`、`git status/log/diff`（含 `git -C sub status`）、不带 `-delete/-exec/-fprint` 的 `find`、不含 `w`/`e` 命令的 `sed`、不调用 `system()`/管道/重定向的 `awk`、`bash -c` 里的只读命令 |
 | write | `rm`（非根/家目录）、`mkdir`、`pytest`、`make`、`sed -i`、`find -delete/-fprint/-fls`、`sort -o`、`git diff --output=…`、重定向写工作区内文件、`&` 后台执行、**未知命令** |
 | external | `curl`、`ssh`、`docker`、`kubectl`、`git push/pull/fetch/clone`、`git config/submodule`、`git -c core.pager=…` / `alias.x=!…`、`npm install`/`pip install`、`python -c`、`cat x \| bash`、`source`、`env -S`、含 `system()` 的 `awk`、含 `w`/`e` 的 `sed`、单独的 `env`/`printenv`、命令替换、**参数或重定向指向工作区外路径** |
-| dangerous | `sudo`/`doas`（包着任何命令）、`dd`、`mkfs`、`chown`、`rm -rf ~`、`git push --force`、`git reset --hard`、`curl \| sh`、密钥线索、写设备文件 |
+| dangerous | `sudo`/`doas`（包着任何命令）、`dd`、`mkfs`、`chown`、`rm -rf ~`、`git push --force`（合写、缩写也算：`-qf`、`--mirror`、`--delete`、`-d`、`--prune`、`:分支`）、`git reset --hard`、`curl \| sh`、密钥线索、写设备文件 |
 
 “未知命令按 write 处理”是关键的保守选择：分析器不认识的东西，至少要在 default 模式下问一次。
 
@@ -399,10 +402,10 @@ for j, w in enumerate(args, start=1):
 
 密钥线索分两档按字面匹配，都判为 dangerous（见上文“bash 与凭证位置”）。凭证档（`CREDENTIAL_HINTS`）：`.ssh`、`.aws`、`.azure`、
 `.kube`、`.gnupg`、`.config/gcloud`、`.config/gh` 这几个目录（按完整路径段），`id_rsa`、`id_ed25519`、`.docker/config.json`、`.netrc`、
-`.git-credentials`、`.pypirc`、`.pgpass`、`.vault-token`、`/etc/shadow`、`/proc/*/environ`，以及 `$KUBECONFIG`、`$GNUPGHOME`、
-`$DOCKER_CONFIG`、`$CLOUDSDK_CONFIG`、`$GH_CONFIG_DIR`、`$AWS_SHARED_CREDENTIALS_FILE`、`$XDG_CONFIG_HOME/gh|gcloud`。
-线索档（`SECRET_HINTS` 多出来的部分）：`.env`、`credentials`、`.npmrc`、`*_history`，以及 macOS 钥匙串的
-`security find-generic-password` / `find-internet-password`。
+`.git-credentials`、`.pypirc`、`.pgpass`、`.vault-token`、`/etc/shadow`、`/proc/*/environ`（与上文托管基线同一份清单），以及 `$KUBECONFIG`、`$GNUPGHOME`、
+`$DOCKER_CONFIG`、`$CLOUDSDK_CONFIG`、`$GH_CONFIG_DIR`、`$AWS_SHARED_CREDENTIALS_FILE`、`$XDG_CONFIG_HOME/gh|gcloud`，
+和导出 macOS 钥匙串口令的 `security find-generic-password` / `find-internet-password` / `dump-keychain`。
+线索档（`SECRET_HINTS` 多出来的部分）：`.env`、`credentials`、`.npmrc`、`*_history`。
 
 ### 三个附加标记：catastrophic、credential 与 network
 
@@ -455,17 +458,20 @@ for j, w in enumerate(args, start=1):
 提示注入的典型路径是：Agent 读了一段不可信内容（网页、Issue 评论、第三方 MCP 返回），内容里藏着指令，Agent 随后执行了有副作用的动作。
 污点机制针对的是这条路径上的“随后”：
 
-- **污点来源**：`Tool.untrusted_for(args)` 返回 True 的调用，或某次结果带 `ToolResult.tainted = True`。具体有三类：
+- **污点来源**：`Tool.untrusted_for(args)` 返回 True 的调用，或某次结果带 `ToolResult.tainted = True`，或在没信任过的工作区里读了工作区内容。具体有五类（完整表格见 [19 安全](/governance/security#污点-来源声明与默认值)）：
   - bash：`BashTool.untrusted_for()` 取命令分析的 `network` 标记——`curl`、`wget`、`git pull`、`npm install` 取回的内容可能夹带注入；
+  - 联网工具：`web_search`、`web_fetch` 的结果一律视为不可信；
   - MCP 工具：输出一律视为不可信，只有配置写明 `trust_annotations = true` 且服务器声明 `openWorldHint: false` 时例外（见 [19 安全](/governance/security)）；
-  - 子代理：子 Run 读过不可信内容，父 Run 也被标记——注入可以借子代理的回传结论进入父上下文。
+  - 子代理：子 Run 读过不可信内容，父 Run 也被标记——注入可以借子代理的回传结论进入父上下文；
+  - 没信任过的工作区：声明了 `reads_workspace` 的工具（read、grep、ls、edit、bash）的输出，文件是仓库作者写的，不是用户写的。
 - **传播与持久化**：执行器在每次调用结束后检查，一旦命中就把 `rc.tainted` 置为 True，写入会话元数据 `meta["tainted"]`，
   并发布 `code="tainted"` 的 notice。`_build_rc` 构造 Run 时从会话元数据还原，所以暂停恢复、崩溃接管、同一会话的下一次 Run 都继承污点；
 - **效果**：`evaluate()` 的最后一步把非只读操作的 allow 升为 ask，原因写明“会话读取过不可信内容”。
 
 ```python
 result = rc.context.shape_tool_result(result, rc.store.blobs, rc.scope)
-if (result.tainted or tool.untrusted_for(args)) and not rc.tainted:
+foreign = tool.reads_workspace and not rc.workspace_trusted   # 没信任过的工作区：文件是仓库作者写的，不是用户写的
+if (result.tainted or tool.untrusted_for(args) or foreign) and not rc.tainted:
     rc.tainted = True
     self._persist_session_meta(tainted=True)  # 污点属于会话：暂停恢复、崩溃接管之后依然有效
     publish(E.NOTICE, {"level": "info", "code": "tainted",
@@ -486,7 +492,7 @@ if tainted and effect != Effect.READ and decision == Decision.ALLOW and self.mod
 
 | 缺口 | 后果 | 应对 |
 |---|---|---|
-| 工作区里的文件被视为可信，`read` 不是污点来源 | 克隆来的第三方仓库、导出的 Issue 文本里的注入不会触发升级 | 处理外来仓库时直接用 plan 模式或沙箱 |
+| 信任过的工作区里，文件不是污点来源 | 信任过的仓库里，导出的 Issue 文本这类外来内容里的注入不会触发升级 | 外来仓库不要信任它（默认就不信任），或直接用 plan 模式或沙箱 |
 | 污点只会置位、不会清除 | 会话一旦被污染，之后所有副作用都要确认，审批量上升 | 开一个新会话（历史里不再有被注入的内容） |
 | bypass 与 `on_ask="allow"` 下不起作用 | 无人值守时污点防线消失 | 无人值守场景配合 `on_ask="deny"` 或沙箱 |
 
@@ -591,7 +597,7 @@ if dec.edited_args:
         if again.decision == "deny":
             return done(ToolResult.error(f"修改后的参数被 PreToolUse hook 拒绝：{again.reason}"), "denied")
         # ... hook 的 updated_input 同样生效（并重新做 schema 校验）
-if dec.remember:
+if dec.remember and not perm.human_only:   # 人工门的确认只管这一次
     g = grant_for(tool, args)
     rc.grants.append(g)
     self._persist_grants()
@@ -655,8 +661,8 @@ def preview(self, args: dict[str, Any], ctx: ToolContext) -> str | None:
 
 | 工具 | 生成的授权 | 例子 |
 |---|---|---|
-| bash | 前两个词 + `*` | `pytest -q tests` → `allow:bash(pytest -q*)` |
-| 文件工具 | 具体路径，按字面（路径里的 `*` 不当通配符） | `allow:write(src/a.py)` |
+| bash | 前两个词 + `*`；前两个词说明不了实际执行什么的（`bash -lc '…'`、`python3 -c '…'`、`timeout 10 …`、`FOO=1 …`、命令替换）只按字面授权这一条 | `pytest -q tests` → `allow:bash(pytest -q*)` |
+| 文件工具、联网工具 | 具体路径或网址，按字面（`*` 不当通配符） | `allow:write(src/a.py)` |
 | 其它 | 整个工具 | `allow:send_notification` |
 
 粒度越窄越安全，但窄到每次都要重新批就失去意义。“前两个词”是一个折中，它的边界值得了解：
@@ -700,7 +706,7 @@ bash 复合命令同样要每一段都被覆盖。
 | 不自动批准的调用 | 原因 |
 |---|---|
 | 命令分析为高危（`git push --force`、`curl … \| sh`） | 与疲劳提示同一口径：高危命令在任何授权下都要人看 |
-| 实际执行的程序不在命令文本里（命令替换、仓库配置） | 规则按文本匹配，担保不了文本之外的东西 |
+| 实际执行的程序不在命令文本里（命令替换、仓库配置、`git push --receive-pack` 这类选项与 `ext::` 地址、解析不了的命令） | 规则按文本匹配，担保不了文本之外的东西 |
 | 托管基线要求确认的（密钥线索、`.git/` 内部、flywhl 配置） | 这些位置被改写的后果会延续到之后的运行 |
 | 文件工具读写工作区之外的路径 | 无人值守的运行不出工作区，规则写得再宽也一样 |
 | PreToolUse hook 要求确认的 | 守卫明确要人看 |
@@ -816,7 +822,7 @@ for cmd in ["git status && git diff", "ls 'a;rm -rf ~'", "rm -fr /", "echo hi > 
 - 规则按 deny → ask → allow 先命中者生效；bash 的 allow 必须覆盖每一段，防止复合命令搭便车。
 - 命令分析器用词法切分和逐段分级代替正则：剥包装命令、递归分析 `sh -c`/`eval`、工作区外路径即使只读也要确认，
   无法静态分析的一律保守；剩下的绕过依赖运行时状态（变量、脚本内容），它不是安全边界。
-- 污点来自网络命令、未声明封闭的 MCP 工具和被污染的子代理，写入会话元数据，暂停恢复后依然有效。
+- 污点来自网络命令、联网工具、未声明封闭的 MCP 工具、被污染的子代理和没信任过的工作区，写入会话元数据，暂停恢复后依然有效。
 - 人审的要点：持久化的审批对象、waiting_human 状态、超时默认拒绝、CAS 只决定一次、改参后重新校验与判定并重跑 PreToolUse、
   拒绝理由回灌、审批真实参数和 diff 预览而非模型描述。
 - 会话授权与规则用来对抗审批疲劳，审批率、批准率、等待时长、重复审批次数让疲劳可以被度量。

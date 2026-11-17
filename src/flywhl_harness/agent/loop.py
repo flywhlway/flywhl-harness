@@ -41,6 +41,7 @@ from .._utils import clip, new_id, now
 from ..cancel import RunCancelled, RunPaused
 from ..events import E, Event
 from ..llm.base import ErrorKind, ModelRequest, ProviderError
+from ..llm.native import NATIVE_SPECS
 from ..llm.replay import context_fingerprint
 from ..policy.hooks import HookEvent, HookInput
 from ..policy.permissions import Mode
@@ -51,6 +52,9 @@ from ..tools.shell import _clean_env
 from ..types import Message, MsgKind, StopReason, TextBlock, tool_result_message, unpaired_tool_calls, user_message
 from .executor import ToolExecutor
 from .run_context import RunContext
+
+
+OUTPUT_BOOST_CAP = 65_536   # 截断后自动提高输出上限的天花板：再长的单次输出，该拆成几步写
 
 
 @dataclass
@@ -87,6 +91,17 @@ class AgentLoop:
             # 未登记价格的模型费用记为 0：费用预算形同虚设，必须明确告诉用户，而不是悄悄失效
             yield self._ev(E.NOTICE, level="warn", code="unpriced_model",
                            text=f"模型 {rc.model} 未登记价格，费用预算 max_cost_usd 不会生效；请改用 max_total_tokens 限额")
+        web = getattr(rc.harness, "web", None)
+        if rc.role == "main" and rc.budget.web is not None and rc.config.budget.max_cost_usd and web is not None \
+                and (free := web.unpriced()):
+            # 与未登记价格的模型同一口径：费用记 0 不是“免费”，是费用上限管不到它
+            yield self._ev(E.NOTICE, level="warn", code="unpriced_web",
+                           text=f"联网后端 {'、'.join(free)} 没有配置 price_per_call，搜索费用按 0 计，不受 max_cost_usd 约束")
+        native = getattr(rc.harness, "native_search", None)
+        if rc.role == "main" and native and not rc.resume:
+            yield self._ev(E.NOTICE, level="warn", code="native_web_search",
+                           text=f"模型侧联网已通过 extra_body 打开（{'、'.join(native)}）：搜索结果不经过 harness，不计数、不审计，"
+                                "会话按读过不可信内容处理；降级到备用模型时 extra_body 不随行，联网会消失")
         try:
             async for ev in self._body(prompt):
                 yield ev
@@ -169,6 +184,8 @@ class AgentLoop:
             msg = self._last
             assert msg is not None
             rc.budget.charge_model(msg.usage)
+            for ev in self._settle_native(msg):
+                yield ev
             yield self._ev(E.USAGE, **rc.budget.snapshot())
 
             if msg.stop_reason == StopReason.REFUSAL:
@@ -176,6 +193,9 @@ class AgentLoop:
                 self.outcome = Outcome("failed", "模型基于安全策略拒绝了该请求（refusal）")
                 return
             calls = msg.tool_calls
+            if msg.stop_reason == StopReason.MAX_TOKENS and (raised := self._raise_output_limit()):
+                yield self._ev(E.NOTICE, level="info", code="max_tokens_raised",
+                               text=f"输出在 {raised[0]} token 处被截断，本次运行之后的模型调用输出上限提高到 {raised[1]} token")
             if calls and msg.stop_reason == StopReason.MAX_TOKENS:
                 # 输出被截断时，工具参数可能不完整：整批判失败、不执行，让模型分步重来
                 for c in calls:
@@ -183,16 +203,22 @@ class AgentLoop:
                 yield self._ev(E.TURN_END, turn=self.turn)
                 continue
             if not calls and msg.stop_reason == StopReason.MAX_TOKENS:
-                # 纯文本回复被长度上限截断：不能当作“完成”，让模型从中断处续写（有上限，防止无限续写）
+                # 被长度上限截断：不能当作“完成”（有上限，防止无限续写）。
+                # 只有思考、没有正文时没有“中断处”可接：这条消息不会回传（见 llm/base.py has_payload），要换一句提示
                 n = rc.state.get("continuations", 0)
                 if n < 3:
                     rc.state["continuations"] = n + 1
-                    yield self._append(user_message(reminder(
-                        "你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。"),
-                        kind=MsgKind.REMINDER))
+                    text = ("你的上一条回复达到输出长度上限被截断。请直接从中断处继续，不要重复已经输出的内容。" if msg.text else
+                            "你上一轮的思考用完了单次输出的长度上限，没有输出正文，也没有调用工具，这段思考不会保留。"
+                            "请少做推演、直接行动：内容很长时分几步完成，比如大文件先写骨架，再分几次 edit 补全。")
+                    yield self._append(user_message(reminder(text), kind=MsgKind.REMINDER))
                     yield self._ev(E.TURN_END, turn=self.turn)
                     continue
                 yield self._ev(E.NOTICE, level="warn", code="truncated", text="回复多次被长度上限截断，可能不完整")
+                if not msg.text:   # 最后一次仍是只有思考：没有任何产出，不能按“自然完成”收尾
+                    self.outcome = Outcome("incomplete", "多次在思考阶段就被输出长度上限截断，没有产出正文")
+                    yield self._ev(E.TURN_END, turn=self.turn)
+                    return
             if not calls:
                 if rc.inbox.pending()["steer"] or rc.inbox.pending()["follow_up"]:
                     for ev in self._drain_inbox():
@@ -293,7 +319,8 @@ class AgentLoop:
                 yield ev
         yield self._ev(E.COMPACTION_START, tokens=stats.tokens, window=stats.window, threshold=stats.compact_at, forced=force)
         res = await rc.compactor.compact(rc.log, view, rc.cancel, tokens_before=stats.tokens,
-                                         extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window)
+                                         extra_instructions=extra, run_id=rc.run_id, force=force, window=stats.window,
+                                         keep_sources=rc.budget.web is not None)
         if res is None:
             rc.state["compact_skipped_at"] = stats.tokens
             yield self._ev(E.COMPACTION_END, skipped=True, reason="没有可压缩的历史（最近的消息本身就很大，压缩无法再降低水位）")
@@ -334,10 +361,15 @@ class AgentLoop:
             yield self._ev(E.NOTICE, level="info", code="clear_tool_results", text=f"已清理第 {wm} 条之前的大工具结果")
         if rc.project_context:   # 不进历史：压缩碰不到它；每次都排在最前面：前缀缓存不受影响
             messages = [user_message(rc.project_context, kind=MsgKind.PROJECT_CONTEXT), *messages]
+        native, native_opts = self._native_request(purpose)
+        meta: dict[str, Any] = {"role": rc.role, "run_id": rc.run_id, "session_id": rc.session_id}
+        max_tokens = int(rc.state.get("max_tokens") or rc.config.max_tokens)
+        if max_tokens != rc.config.max_tokens:
+            meta["max_tokens_base"] = rc.config.max_tokens   # 降级到备用模型时按它的输出上限收回提高的部分
         req = ModelRequest(
             model=rc.model, system=rc.system_prompt, messages=messages, tools=specs,
-            max_tokens=rc.config.max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
-            purpose=purpose, metadata={"role": rc.role, "run_id": rc.run_id, "session_id": rc.session_id},
+            max_tokens=max_tokens, temperature=rc.config.temperature, tool_choice=tool_choice,
+            purpose=purpose, metadata=meta, native_search=native, native_opts=native_opts,
         )
         mid = new_id("m_")
         # 上下文指纹：回放时比对“模型看到的东西”是否与录制时一致，用来定位分叉点
@@ -363,6 +395,9 @@ class AgentLoop:
                     yield self._ev(E.MODEL_RETRY, message_id=mid, **sev.info)
                 elif t == "notice":
                     yield self._ev(E.NOTICE, level="info", **sev.info)
+                    if native and sev.info.get("code") == "fallback" and not sev.info.get("native_kept"):
+                        yield self._ev(E.NOTICE, level="warn", code="native_web_lost",
+                                       text="已降级到备用模型：模型侧联网只对声明过的模型生效，这次回答没有联网")
                 elif t == "done":
                     final = sev.message
         except RunCancelled:
@@ -476,6 +511,54 @@ class AgentLoop:
         for c in unpaired_tool_calls(self.rc.log.context().messages):
             self.rc.store.step_finished(self.rc.run_id, c.id, "cancelled", {"content": text})
             yield self._persist_tool_error(c, text, "cancelled")
+
+    def _raise_output_limit(self) -> tuple[int, int] | None:
+        """输出被截断后，本次运行之后的模型调用把 ``max_tokens`` 提高到 4 倍，不超过模型登记的最大输出和 ``OUTPUT_BOOST_CAP``。
+
+        思考模型的思考也算在 ``max_tokens`` 里：默认 8192 时，模型想一想怎么写一份长报告就把预算用完了，
+        原样重来只会在同一个地方再被截断。只按登记过最大输出的模型提高：没登记的按默认 8192 算，
+        不往上加，免得超出服务端上限变成 400。返回 (原上限, 新上限)，没提高返回 None。"""
+        rc = self.rc
+        cur = int(rc.state.get("max_tokens") or rc.config.max_tokens)
+        new = min(cur * 4, rc.model_info.max_output, OUTPUT_BOOST_CAP)
+        if new <= cur:
+            return None
+        rc.state["max_tokens"] = new
+        return cur, new
+
+    def _native_request(self, purpose: str) -> tuple[str | None, dict[str, Any]]:
+        """模型侧联网：会话在建立时选了它、当前能力没收紧到 off、本次 Run 的搜索次数没用完，才在请求里带上。
+        每次都从存储读能力位：父会话或设置页刚收紧的，下一次请求就生效。"""
+        rc = self.rc
+        if purpose != "turn" or rc.budget.web is None:
+            return None, {}
+        from ..runtime.capabilities import current_web, session_native   # 延迟导入：runtime 依赖 agent
+
+        s = rc.store.get_session(rc.session_id)
+        spec = session_native((s.meta.get("capabilities") if s else None))
+        if spec is None or current_web(rc.store, rc.session_id) == "off":
+            return None, {}
+        left = rc.budget.web["searches"] - rc.budget.root().web_searches   # 上限按整次运行算，子代理也看顶层计数
+        if left <= 0:
+            return None, {}
+        return spec.name, {"max_uses": left, "deny_domains": list(rc.config.web.deny_domains)}
+
+    def _settle_native(self, msg: Message):
+        """模型侧联网的记账：按响应里整理好的 ``meta["native_web"]`` 计次数、按声明单价计费；第一次有搜索结果时置污点。
+        回放时消息来自录制，按同样的数据记账，预算走向与录制时一致。"""
+        rc = self.rc
+        nw = msg.meta.get("native_web")
+        if not isinstance(nw, dict):
+            return
+        spec = NATIVE_SPECS.get(nw.get("spec") or "")
+        n = int(nw.get("searches") or 0)
+        for _ in range(n):
+            rc.budget.charge_web("search", cost_usd=spec.price_per_call if spec else 0.0)
+        if (n or nw.get("sources")) and not rc.tainted:
+            rc.tainted = True
+            self._save_session_meta(tainted=True)
+            yield self._ev(E.NOTICE, level="info", code="tainted",
+                           text="模型侧联网的搜索结果已进入上下文：之后的副作用操作将需要人工确认")
 
     def _save_session_meta(self, **kv: Any) -> None:
         s = self.rc.store.get_session(self.rc.session_id)

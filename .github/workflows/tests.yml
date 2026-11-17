@@ -32,6 +32,8 @@ jobs:
             python: "3.12"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 不把令牌留在 .git/config：没有步骤需要用 git 推送
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: ${{ matrix.python }}
@@ -60,6 +62,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 不把令牌留在 .git/config：没有步骤需要用 git 推送
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: "3.12"
@@ -84,6 +88,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 不把令牌留在 .git/config：没有步骤需要用 git 推送
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: "3.12"

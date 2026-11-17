@@ -7,7 +7,7 @@ uv venv && uv pip install -e ".[dev,anthropic]"   # 需要 Python 3.11+
 .venv/bin/flywhl serve -w playground
 ```
 
-终端会打印带令牌的地址 `http://127.0.0.1:8765/?token=…`，点开即可；令牌保存在 `~/.flywhl/server_token`，重启后链接不变。`-w` 指定工作区：所有文件操作都被限制在其中，会话库与快照存放在 `playground/.flywhl/`。
+终端会打印带令牌的地址 `http://127.0.0.1:8765/?token=…`，点开即可；令牌保存在 `~/.flywhl/server_token`，重启后链接不变。`-w` 指定工作区：所有文件操作都被限制在其中，会话库与快照存放在 `playground/.flywhl/`。第一次在某个工作区运行会问一句是否信任它，回答 `y` 或加 `--trust`；不信任时读到的文件算不可信内容，之后的写操作和外部操作要人确认。
 
 一个密钥都没配时自动使用演示模型 `flywhl-demo`。开始页的“演示场景”按剧本触发各种机制：说“创建 hello.py”看审批卡片与快照，“并行检查”看只读并发，“等待 20 秒”后点停止看取消，“压缩演示”看水位与压缩，“循环测试”看循环守卫。
 
@@ -115,10 +115,10 @@ if "git push" in call["tool_input"].get("command", ""):
 ## 7. 无人值守与 CI
 
 ```bash
-flywhl run "修复失败的测试" --json --mode accept_edits
+flywhl run "修复失败的测试" --json --trust --mode accept_edits
 ```
 
-`--json` 向 stdout 输出 JSONL 事件流；此时无人审批，需要审批的操作默认拒绝——在 CI 里卡住等审批比直接失败更糟。要放行确定安全的操作，用 `--approve 'bash(npm test*)' --approve 'write(src/**)'` 列出规则，只有命中的自动批准；高危命令和读过不可信内容后的外部操作照样拒绝。`--yes` 放行一切，只在一次性容器里用。进程退出码只在 Run 以 `completed` 结束时为 0，配合 `verify_command` 就是“测试不过即失败”。
+`--json` 向 stdout 输出 JSONL 事件流；此时无人审批，需要审批的操作默认拒绝——在 CI 里卡住等审批比直接失败更糟。要放行确定安全的操作，用 `--approve 'bash(npm test*)' --approve 'write(src/**)'` 列出规则，只有命中的自动批准；高危命令和读过不可信内容后的外部操作照样拒绝。非交互运行不会自动信任工作区，读过文件之后 `accept_edits`、allow 规则放行不了写操作，所以要加 `--trust`。`--yes` 放行其余所有需要审批的操作，但放行不了沙箱外命令这类必须由人确认的操作，只在一次性容器里用。进程退出码只在 Run 以 `completed` 结束时为 0，配合 `verify_command` 就是“测试不过即失败”。
 
 发布任务要 push 时，加 `--trust --approve-outside 'git push origin main'`。它只放行写明的命令，别的沙箱外操作照样拒绝。
 

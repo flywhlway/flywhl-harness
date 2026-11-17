@@ -38,7 +38,7 @@ features:
     link: /reliability/cancellation
   - icon: ⚖
     title: 策略与安全
-    details: Hooks、四种权限模式、命令风险分析、污点感知、持久化人审、沙箱路线与供应链安全。
+    details: Hooks、四种权限模式、命令风险分析、工作区信任与污点感知、持久化人审、默认开启的系统沙箱与供应链检查。
     link: /governance/hooks
   - icon: ⧉
     title: 多 Agent 与度量

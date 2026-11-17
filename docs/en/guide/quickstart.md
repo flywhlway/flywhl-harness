@@ -69,7 +69,7 @@ The sidebar has three management pages. **Runs** lists the runs of all sessions,
 
 The inspector on the right is the most useful part for learning:
 
-- **Overview**: the current run's ID, attempt, version, worker and heartbeat; budget bars (turns, tool calls, tokens, cost); every CAS state transition with its reason and initiator (runs that ended before the page opened are loaded from the trace); an expandable full state machine; the session's earlier runs (resume or retry, deterministic replay, trace JSON download).
+- **Overview**: the current run's ID, attempt, version, worker and heartbeat; budget bars for this run (turns, tool calls, tokens, cost, plus searches and fetches when the web tools are on), with a session total when the session has several runs; every CAS state transition with its reason and initiator (runs that ended before the page opened are loaded from the trace); an expandable full state machine; the session's earlier runs (resume or retry, deterministic replay, trace JSON download).
 - **Context**: current usage against the two threshold lines (clear old results, compact to a summary); the token split between system, tools and messages; each message the model sees now with its share of tokens; the active compaction summary; the frozen system prompt.
 - **Events**: the raw event stream with `seq`, filterable by type and searchable. "Simulate reconnect" drops the SSE connection on purpose and resumes two seconds later with `Last-Event-ID`. Check that `seq` stays continuous with no repeats.
 - **History**: the append-only session branch tree. "Branch from here" moves `head` to any earlier point, and your next input grows a new branch. Below it is the list of workspace snapshots, any of which you can roll back to (after a confirmation).
@@ -132,6 +132,7 @@ Details are in [05 Messages and model access](/en/core/messages-and-models).
 flywhl chat -w playground               # terminal chat; Ctrl-C cancels the current run, press twice to quit
 flywhl run "summarize README" --json    # one-shot run; stdout is a JSONL event stream
 flywhl run "fix the TODOs and run tests" --yes   # auto-approve actions that need approval (trusted environments only)
+flywhl run "run the tests" --json --approve 'bash(npm test*)'   # auto-approve only what is listed, deny the rest
 flywhl runs                             # list runs: status, attempt, version, tokens
 flywhl resume <run_id>                  # resume a paused or interrupted run
 flywhl retry <run_id>                   # retry a failed run from its history, attempt + 1
@@ -145,7 +146,7 @@ flywhl doctor                           # model connectivity check
 
 Two more subcommands exist: `flywhl sessions` lists sessions, and `flywhl export <session_id>` writes a session as a Markdown transcript.
 
-In `--json` mode the harness runs unattended: actions that need approval are **denied** by default, and `--yes` allows them instead. Blocking in CI on an approval that never arrives is worse than failing fast.
+In `--json` mode the harness runs unattended: actions that need approval are **denied** by default; `--yes` allows them instead, and `--approve` allows only the kinds you list. Blocking in CI on an approval that never arrives is worse than failing fast. Commands that ask to run outside the sandbox (`outside_sandbox`) are not covered by `--yes` or `--approve`; unattended, only commands matching an `--approve-outside '<pattern>'` get through. See [18 Workspace and sandbox](/en/governance/workspace-sandbox).
 
 ## Configuration file
 
@@ -186,7 +187,9 @@ args = ["examples/mcp_echo_server.py"]
 
 The workspace needs trusting once too: the terminal asks on the first run in a repository, `--trust` records it, and `--json` or piped runs neither ask nor trust. In an untrusted workspace, what the agent reads counts as untrusted content and later writes need a person, so a CI run on your own code should pass `--trust`.
 
-Load order: defaults, then the user config `~/.flywhl/config.toml`, then `flywhl.toml`, then environment variables (`FLYWHL_PROVIDER`, `FLYWHL_MODEL`, `FLYWHL_BASE_URL`, `FLYWHL_PERMISSION_MODE`, and others), then command-line arguments. The full field list is in `config.py`.
+Load order: defaults, then the user config `~/.flywhl/config.toml`, then `flywhl.toml`, then environment variables (`FLYWHL_PROVIDER`, `FLYWHL_MODEL`, `FLYWHL_BASE_URL`, `FLYWHL_PERMISSION_MODE`, and others), then command-line arguments. The full field list is in `config.py`, and `flywhl.toml.example` at the repository root is a commented example.
+
+The web tools `web_search` and `web_fetch` are off by default. After `[web] enabled = true` in the user config, each session picks off, search, or search and fetch before it starts. A project config can only tighten `[web]`. See [06 Tools](/en/core/tools).
 
 ## Use it as a library
 
@@ -209,7 +212,7 @@ asyncio.run(main())
 In a clone:
 
 ```bash
-.venv/bin/python -m pytest -q                       # offline tests (excludes tests/live)
+.venv/bin/python -m pytest -q                       # about 1,700 offline tests, run in an OS sandbox in two stages (excludes tests/live)
 .venv/bin/python examples/02_crash_resume.py        # real kill -9, then recovery with the side effect happening exactly once
 .venv/bin/python examples/11_kill9_cli_recover.py   # same, with two CLI processes, printing the state transition trace
 ```
@@ -219,7 +222,7 @@ The 11 numbered scripts in `examples/` all use scripted or built-in demo models 
 ## Where the data lives
 
 ```
-playground/.flywhl/
+<workspace>/.flywhl/
 +-- harness.db            # SQLite (WAL): sessions / entries / runs / steps / events / approvals / blobs
 +-- external_notify.db    # the demo "external system": send_notification writes here, deduplicated by idempotency key
 +-- shadow.git/           # shadow git repo: workspace snapshots before writes, separate from your own .git

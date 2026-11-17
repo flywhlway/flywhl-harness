@@ -14,6 +14,8 @@
 | 沙箱里写不了 `.git/commondir`、`.git/config.worktree`、`.git/worktrees`，Linux 上新建的会被 harness 随时删掉；macOS 上改不了工作区和上级目录的名字 | 前者决定 git 去哪读配置，写得了就绕过了 `.git/config` 的只读；后者让写死路径的只读规则失效 | 这些操作放到沙箱外做 |
 | linked worktree 里沙箱内的命令改不了 `.git` 文件；`.git` 没有 `hooks` 时写不进去 | 这两处都会让内容之后在沙箱外执行 | 走 `outside_sandbox`，或者自己在终端里改 |
 
+**人批准过的沙箱外命令保留 `SSH_AUTH_SOCK`。** 这个变量名含 AUTH，以前和密钥一起剥离，靠它找 ssh-agent 的 `git push` 用 `outside_sandbox` 也 push 不了。`--approve-outside` 提前放行的命令同样保留，无人值守的发布也能用 ssh-agent 推送。只改这一条路径：沙箱里的 bash、关掉沙箱时的 bash、hook、MCP 服务器都不变，`GH_TOKEN`、`*_API_KEY` 在沙箱外也继续剥离。
+
 **工作区默认不信任，项目指令文件不再是系统提示词的一部分。** `AGENTS.md`、`CLAUDE.md`、技能清单放进一条带来源和信任标注的独立消息。
 工作区没信任过时，这些文件标注为不可信，读到的工作区内容算污点，之后的写操作和外部操作要人确认。
 
@@ -52,7 +54,38 @@
 
 要回到之前的行为，写 `durability = "normal"`。它放宽了保证，写在项目配置里要先信任才生效。取值写错时加载就报错。
 
+**出站白名单里写成 IP 的条目，连不到的地址加载配置时就报错。**
+
+| 你会看到 | 原因 | 怎么处理 |
+|---|---|---|
+| 报“出站白名单条目连不到：… 是回环、链路本地、保留或云元数据地址” | 代理从来不放行这些地址。以前规则写成 IP 时字面相同就放行（见“修复”），现在和域名规则走同一个判定，加载时说清楚 | `network_allow` 里连本机端口写 `localhost:端口`。`127.0.0.2` 这类回环别名、`169.254.x.y` 的链路本地设备没有放行写法，确实要连只能 `sandbox_network = "allow"`；`web.fetch_allow` 只放公网地址 |
+| 报“像 IP 地址，但不是标准的点分十进制” | `127.1`、`0x7f.0.0.1`、`2130706433` 连接时会被解析成别的地址，规则和实际连到的地方对不上 | 写成 `10.0.0.5` 这样的标准写法 |
+
+全局 `permissions.network_allow`、单条 hook 和 MCP 服务器的 `network_allow`、`web.fetch_allow` 都这样校验。
+
+**English summary.** IP-literal entries in `network_allow` and `web.fetch_allow` that the egress check never connects to (`0.0.0.0`, loopback addresses other than `127.0.0.1`, link-local, reserved, multicast and cloud metadata addresses) now fail when the config loads, and so do non-canonical IPv4 forms such as `127.1` or `0x7f.0.0.1`. Use `localhost:PORT` for local ports; loopback aliases and link-local devices can only be reached with `sandbox_network = "allow"`.
+
 ### 新增
+
+**联网工具 `web_search` 与 `web_fetch`，默认关闭。** 在用户配置里写 `[web] enabled = true` 后，每个会话在开工前选“关闭 / 仅搜索 / 搜索并读取”，
+开工后只能收紧，新会话默认关闭。没开联网的会话，工具名单和请求与以前逐字节相同。
+
+- 搜索默认用 DeepSeek Search（与模型共用 `DEEPSEEK_API_KEY`），可以按顺序加博查、自建 SearXNG 做故障转移；读取默认用 DeepSeek Fetch，
+  也可以 `fetch_backend = "direct"` 从本机直连。
+- 读取范围 `fetch_scope` 默认 `ask`：用户给过的、搜索结果里出现过的网址直接读，其他网址要确认。按完整网址比对，查询串一个字符都不动；
+  只有顺序翻页例外：出现过的网址只换页码参数（`page`、`pageIndex`、`offset` 这类）的取值，或者原来没有页码、在末尾加一个，
+  而且正好是已读页的下一页，也算出现过。读取失败的页、同一批并行调用里先放行的页也算已读。
+  跳页、往回翻、重读、换参数名都要确认，其余参数的顺序和写法不能变。
+  `--yes` 和完全放行模式只在会话还没读过不可信内容时替你确认，读过之后没出现过的网址直接拒绝并提示先搜索，不会停下来等人；用户自己写的 `ask` 规则照旧问人。
+  查询词和网址里带像密钥的内容（不分大小写）直接拒绝。
+- 所有联网请求走同一个出站入口：只允许 https，只放行公网地址，连接钉在核过的 IP 上，重定向逐跳重新核验，不收发 Cookie。
+- 结果按不可信内容处理，第一次出现即置污点。次数受 `max_searches_per_run`（默认 60）、`max_fetches_per_run`（默认 30）限制，费用计入 `max_cost_usd` 并单列为 `tool_cost_usd`。
+- 项目配置里的 `[web]` 只能收紧；后端、端点、密钥变量名、`fetch_allow` 只认用户配置，不出现在 `/api` 接口、事件和日志里。
+- 时间线显示来源卡片；回答里的 `[n]` 变成链接，多次搜索编号重复时按回答在同一段里写出的网址认定，对不上的不链；运行结束卡片单列联网费用；设置页并列显示命令沙箱的网络设置和联网工具。
+- `[web] native = true`：主模型是 Anthropic 官方 API 的 `claude-` 系列时，改用供应商自带的搜索，次数、费用、来源照样记账。
+  DeepSeek 的 Anthropic 兼容端点与百炼 `enable_search` 还没确认能与函数工具同时使用，暂不启用。
+- 回放用录制的联网结果；反事实分叉默认不联网。OTel span 带上联网后端、条数、读取的主机与状态码，不带查询词与正文。
+- `.env` 白名单加入 `BOCHA_API_KEY`。`bench/web_eval.py` 用 10 道时效性问题量“带可打开来源的回答占比”、平均搜索次数与平均花费。
 
 **`flywhl run --approve-outside '模式'`：无人值守时放行写明的沙箱外命令。** 只有命令行能写，只在无人值守时生效，只管 bash。必须写具体的命令，`*`、路径、解释器都拒绝；复合命令每段都要匹配，有污点、高危、重定向到文件、实际程序不在命令文本里的照样拒绝。每次放行在 `approvals` 表和事件流里各留一条记录。
 
@@ -74,6 +107,8 @@
 
 ### 修复
 
+**出站白名单里写成 IP 的规则不再绕过地址判定。** 以前规则和解析出的地址字面相同就放行：`network_allow` 写 `169.254.169.254`、`100.100.100.200` 能连到云元数据服务，写 `0.0.0.0:端口`、`127.0.0.2:端口` 能连到本机，这些都是地址判定本来要拒绝的。现在写成 IP 的规则和域名规则走同一个判定，这类条目加载时报错，见“行为变化”。
+
 **`git push --receive-pack`、`--upload-pack`、`--exec`、`ext::` 这类地址不再被 allow 规则覆盖。** 它们指定了要运行的程序，`allow:bash(git push*)` 按文本匹配时看不见，现在按“实际程序不在命令文本里”处理，要人确认。
 长选项的缩写（`--rece=x`）、`--repo=ext::x`、`git clone` 的 `-c`、`--config`、`--template`，`git pull` 的 `-s`、`--strategy` 同样处理。
 
@@ -83,9 +118,16 @@
 
 - `AGENTS.md`、`CLAUDE.md`、`SKILL.md` 是符号链接，目标又在进不去的目录里时，会话起不来。现在和其他读不了的项目文件一样跳过。
 - 检查器「预算」里的工具调用次数在运行结束后打开页面时一直是 0。现在 Run 结束时把次数写进 `result`，页面先读实时快照，再读 `result` 和每轮的 checkpoint，旧的 Run 也能显示；每批工具执行完会立即下发一次 `usage` 快照，运行中不用等下一次模型回复。
+- 检查器概览在失败后发“继续”时显示 1/40 轮、0 token、0 次搜索，看上去前面的工作都没算。“继续”是一次新的运行，预算重新计数，概览只显示了这一次，
+  上限还取当前配置而不是那次运行的配置。现在预算一节写明是哪次运行、上限取那次运行开始时的值，会话有多次运行时另列“本会话累计”；
+  实时 `usage` 快照只用在它所属的运行上，切换到别的运行不会错用。
 - 页面上的确定性回放只比较工具序列和最终答案，上下文指纹对不上时也报“回放一致”。模型输出取自录制，这两项几乎总是相同，这种分叉以前看不出来。现在按后端的 `deterministic` 判定，结果弹出对话框：逐项列出上下文、工具序列、结局、最终答案的比较，两边工具序列并排对照并标出第一处不同，附上分叉点的指纹和最终答案对照，报告可以复制成 JSON。
 - 页面上每次回放都会在系统临时目录留下一份工作区副本，没有地方删。现在回放接口用完就删，回放出错时副本也当场删掉；复制工作区挪到线程里，大工作区不再卡住服务。`flywhl replay` 和 `replay_trajectory()` 默认仍保留副本，可以传 `keep_workspace=False`。
 - 回放说明里“第 N 次模型调用”从 0 开始数，现在从 1 开始；`divergence.step` 的取值不变。
+- DeepSeek 思考型模型的思考把单次输出上限（默认 8192）用完、没有正文也没有工具调用时，这条消息原样落盘，下一次请求发出去是内容为空的 assistant 消息，
+  DeepSeek 返回 400 `Invalid assistant message: content or tool_calls must be set`。这个错误不重试，历史里又一直带着它，重试和“继续”都同样失败。
+  现在组装请求时跳过只有思考的消息，已经出过这个错的会话点“重试”就能接着跑；Loop 改用“少推演、分步做”的提示让模型重来，
+  每次被截断后把本次运行的输出上限提高到 4 倍，不超过模型登记的最大输出和 65536，降级到备用模型时按备用模型的上限收回；连续 3 次仍只有思考，以 `incomplete` 结束。
 
 ## [0.2.1] - 2026-11-06
 

@@ -53,7 +53,7 @@ Agent = Model + Harness
 | **状态** | 什么是事实源？ | Session / Run / Step / Event、只追加、CAS | `runtime/store.py`、`runtime/session.py` | [09](/reliability/state-persistence) |
 | **生命周期** | 暂停、恢复、取消、重试、崩溃怎么办？ | 状态机、协作式取消、journal、心跳租约 | `runtime/state.py`、`cancel.py`、`runtime/manager.py` | [10](/reliability/run-lifecycle)–[12](/reliability/cancellation) |
 | **策略** | 什么能做、什么要问人、什么不能做？ | hooks、权限模式与规则、人审、预算 | `policy/`、`agent/budget.py` | [16](/governance/hooks)–[17](/governance/permissions-hitl) |
-| **执行环境** | 工具在哪里跑？ | Workspace、快照、沙箱、端云 | `runtime/workspace.py`、`runtime/dispatch.py` | [18](/governance/workspace-sandbox)、[26](/advanced/edge-cloud) |
+| **执行环境** | 工具在哪里跑？ | Workspace、快照、沙箱、端云 | `runtime/workspace.py`、`tools/sandbox.py`、`runtime/dispatch.py` | [18](/governance/workspace-sandbox)、[26](/advanced/edge-cloud) |
 | **度量** | 做得好不好？为什么？ | 轨迹、回放、评测、成本 | `observe/` | [22](/multi-agent/trajectory-eval)–[23](/multi-agent/observability-cost) |
 
 一个有用的视角是把它们分成两层：

@@ -34,7 +34,7 @@ flywhl serve -w agent-demo       # 在克隆的仓库里：.venv/bin/flywhl serv
 
 打开终端打印的带令牌链接（`http://127.0.0.1:8765/?token=…`），之后同一浏览器直接访问 `http://127.0.0.1:8765` 即可。
 令牌默认开启，保存在 `~/.flywhl/server_token`，重启服务不变。`-w` 指定 **工作区**：Agent 的所有文件操作都被约束在这个目录里，
-数据（会话库、快照、演示用的“外部系统”）存放在 `playground/.flywhl/`。
+数据（会话库、快照、演示用的“外部系统”）存放在工作区下的 `.flywhl/`（上例是 `agent-demo/.flywhl/`）。
 
 没有设置任何 API Key 时，harness 会自动使用内置的规则演示模型 **flywhl-demo**。它不“智能”，但会按固定剧本调用工具，
 足以把各种机制完整地演示出来。开始页的“演示场景”卡片（以及输入框左下角的“模板”菜单）对应这些剧本：
@@ -72,7 +72,8 @@ flywhl serve -w agent-demo       # 在克隆的仓库里：.venv/bin/flywhl serv
 
 会话页右侧检查器的四个页签是学习时最有用的部分：
 
-- **概览**：当前 Run 的 ID、尝试次数、版本号、Worker 与心跳；预算条（轮次 / 工具调用 / token / 费用）；
+- **概览**：当前 Run 的 ID、尝试次数、版本号、Worker 与心跳；本次运行的预算条（轮次 / 工具调用 / token / 费用，开了联网时还有搜索与读取次数），
+  会话有多次运行时另列“本会话累计”；
   每一次 CAS 状态迁移及其原因与发起人（页面打开前就结束的 Run 会从轨迹里补加载）；可展开的状态机全图；
   本会话的历史运行（继续 / 重试、确定性回放、下载轨迹 JSON）；
 - **上下文**：此刻的上下文水位与两条阈值线（旧结果清理、摘要压缩）、system / tools / messages 的 token 构成、
@@ -167,6 +168,8 @@ flywhl serve -w playground --model openai:your-model
 flywhl chat -w playground               # 终端交互；Ctrl-C 取消当前运行，连按两次退出
 flywhl run "总结 README" --json         # 一次性执行，stdout 输出 JSONL 事件流
 flywhl run "修复 TODO 并跑测试" --yes   # 需要审批的操作自动放行（只在可信环境中使用）
+flywhl run "跑测试" --json --approve 'bash(npm test*)'   # 只自动批准写明的操作，其余需要审批的一律拒绝
+flywhl sessions                         # 列出会话
 flywhl runs                             # 列出运行：状态、attempt、version、token
 flywhl resume <run_id>                  # 恢复暂停 / 中断的运行
 flywhl retry <run_id>                   # 重试失败的运行：从历史继续，attempt + 1
@@ -174,12 +177,14 @@ flywhl recover                          # 接管心跳过期（进程崩溃）�
 flywhl replay <run_id>                  # 确定性回放：不调用模型、不执行副作用
 flywhl replay <run_id> --fork-at 2      # 前 2 次模型调用用录制结果，之后换成当前模型
 flywhl trace <run_id> -o trace.json     # 导出轨迹（含 OTel GenAI 风格 span）
+flywhl export <会话ID> -o session.md    # 会话导出为 Markdown 对话记录
 flywhl tools                            # 工具列表与副作用等级
 flywhl doctor                           # 模型接入自检（每个配置了密钥的供应商）
 ```
 
-`--json` 模式下 harness 处于“无人值守”状态：需要审批的操作默认 **拒绝**（加 `--yes` 改为放行）。
+`--json` 模式下 harness 处于“无人值守”状态：需要审批的操作默认 **拒绝**（加 `--yes` 改为放行，或用 `--approve` 只放行写明的几类）。
 这一点很重要——在 CI 里卡住等一个永远不会来的审批，比直接失败更糟。
+要在沙箱外执行的命令（`outside_sandbox`）不受 `--yes`、`--approve` 影响，无人值守时只有 `--approve-outside '模式'` 写明的命令能过，见 [18 章](/governance/workspace-sandbox)。
 
 ## 配置文件
 
@@ -223,7 +228,10 @@ args = ["examples/mcp_echo_server.py"]
 没信任过的工作区里，读到的文件算不可信内容，之后的写操作要人确认，所以在 CI 里跑自己的代码要加 `--trust`。
 
 加载顺序：默认值 → 用户配置 `~/.flywhl/config.toml` → `flywhl.toml` → 环境变量（`FLYWHL_PROVIDER`、`FLYWHL_MODEL`、`FLYWHL_BASE_URL`、
-`FLYWHL_PERMISSION_MODE`……）→ 命令行参数。完整字段见 `src/flywhl_harness/config.py`。
+`FLYWHL_PERMISSION_MODE`……）→ 命令行参数。完整字段见 `src/flywhl_harness/config.py`，带注释的示例见仓库根目录的 `flywhl.toml.example`。
+
+联网工具 `web_search`、`web_fetch` 默认关闭。在用户配置里写 `[web] enabled = true` 后，每个会话开工前选“关闭 / 仅搜索 / 搜索并读取”；
+项目配置里的 `[web]` 只能收紧，详见 [06 工具](/core/tools)。
 
 ## 作为库使用
 
@@ -247,7 +255,7 @@ asyncio.run(main())
 ## 跑测试与示例
 
 ```bash
-.venv/bin/python -m pytest -q                       # 455 个离线测试，约 20 秒（不含 tests/live）
+.venv/bin/python -m pytest -q                       # 约 1700 个离线测试，在系统沙箱里分两段运行（不含 tests/live）
 .venv/bin/python examples/02_crash_resume.py        # 真实 kill -9 后恢复，副作用恰好一次
 .venv/bin/python examples/11_kill9_cli_recover.py   # 同一件事换成两个 CLI 进程，并打印状态迁移轨迹
 ```
@@ -257,7 +265,7 @@ asyncio.run(main())
 ## 数据都存在哪
 
 ```
-playground/.flywhl/
+<工作区>/.flywhl/
 ├── harness.db            # SQLite（WAL）：sessions / entries / runs / steps / events / approvals / blobs
 ├── external_notify.db    # 演示用的“外部系统”：send_notification 写到这里（按幂等键去重）
 └── shadow.git/           # 影子 git 仓库：写操作前的工作区快照，不影响你自己的 .git

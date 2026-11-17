@@ -1,0 +1,35 @@
+{
+  "code": 200,
+  "log_id": "fake-log-id",
+  "msg": null,
+  "data": {
+    "_type": "SearchResponse",
+    "queryContext": {"originalQuery": "httpx 最新版本"},
+    "webPages": {
+      "webSearchUrl": "",
+      "totalEstimatedMatches": 2,
+      "value": [
+        {
+          "id": "https://api.bochaai.com/v1/#WebPages.0",
+          "name": "httpx 发布 0.28.1",
+          "url": "https://www.oschina.net/news/httpx-0-28-1",
+          "displayUrl": "https://www.oschina.net/news/httpx-0-28-1",
+          "snippet": "httpx 0.28.1 已发布，修复 SSL 相关问题。",
+          "summary": "开源中国报道：httpx 0.28.1 于 2024 年 12 月发布，修复 verify=False 时的 SSL 问题。",
+          "siteName": "开源中国",
+          "siteIcon": "https://www.oschina.net/favicon.ico",
+          "datePublished": "2024-12-07T08:00:00+08:00",
+          "dateLastCrawled": "2024-12-07T08:00:00Z"
+        },
+        {
+          "id": "https://api.bochaai.com/v1/#WebPages.1",
+          "name": "httpx 文档",
+          "url": "https://www.python-httpx.org/",
+          "snippet": "A next-generation HTTP client for Python.",
+          "siteName": "HTTPX",
+          "datePublished": null
+        }
+      ]
+    }
+  }
+}

@@ -379,24 +379,25 @@ flowchart LR
 
 ### 超时要杀掉整个进程组
 
-`wait_for` 取消的只是 `CommandHook.__call__` 协程，`asyncio.create_subprocess_shell` 启动的进程不会随之终止。
+`wait_for` 取消的只是 `CommandHook.__call__` 协程，它启动的子进程不会随之终止。
 早期版本里一个超时的 `sleep` hook 会继续在后台运行，卡住的 hook 每次工具调用都泄漏一个进程。现在的写法：
 
 ```python
-proc = await asyncio.create_subprocess_shell(
-    self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE, cwd=self.cwd or inp.cwd or None,
-    env=self.child_env(inp.event), start_new_session=True,
-)
-try:
-    out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
-except BaseException:
-    # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(proc.wait(), 2)
-    raise
+box = self.confinement or Confinement.resolve()
+async with box.enter(["/bin/sh", "-c", self.command], base, self.child_env(inp.event)) as run:   # 进沙箱
+    proc = await asyncio.create_subprocess_exec(
+        *run.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, cwd=base, env=run.env, start_new_session=True,
+    )
+    try:
+        out, err = await proc.communicate(json.dumps(inp.to_json(), ensure_ascii=False).encode("utf-8"))
+    except BaseException:
+        # HookBus 的超时会取消这里：必须杀掉整个进程组，否则超时的 hook 脚本（及其子进程）会在后台继续运行
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 2)
+        raise
 ```
 
 三个细节缺一不可：`start_new_session=True` 让 shell 成为新进程组的组长，`killpg` 才能连同它派生的子进程（`sleep 30 &`、
@@ -536,7 +537,8 @@ Claude Code 的 Stop hook 输入中有类似作用的 `stop_hook_active` 字段�
 
 ## hook 本身是供应链风险点
 
-hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，文件系统上的凭证它仍然读得到。
+hook 是 harness 里权限最高的扩展：它在模型之外运行、不经过权限策略。环境变量里的密钥已经剥离，默认的系统沙箱也挡住了凭证清单里的位置；
+但清单之外的文件、用户配置里关掉了沙箱的 hook，照样读得到。
 这意味着：
 
 - **克隆一个仓库就可能执行它的代码。** 如果无条件加载项目配置，`flywhl.toml` 里的 `[[hooks]]` 会在第一次匹配的工具调用时执行。

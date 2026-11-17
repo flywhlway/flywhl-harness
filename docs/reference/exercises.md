@@ -65,7 +65,7 @@
 **验收**：取消请求后一个安全点内停止；状态迁移合法；审计中能看到取消原因与发起人。
 
 **参考**：`cancel.py` · `CancelToken`、`agent/executor.py` · `_race()`、`runtime/manager.py` · `cancel()` / `_finish()`。
-测试 `tests/test_cancel.py`（7 个用例）；示例 `examples/03_cancel_semantics.py`。讲解：[12 取消语义](/reliability/cancellation)。
+测试 `tests/test_cancel.py`（11 个用例）；示例 `examples/03_cancel_semantics.py`。讲解：[12 取消语义](/reliability/cancellation)。
 
 ## 4. 带退避与抖动的重试器 + 错误分类
 
@@ -113,7 +113,7 @@
 **验收**：任意保留阈值下，压缩后的视图中每个工具结果都能找到它的调用；摘要中包含原始任务原文。
 
 **参考**：`agent/compaction.py` · `find_cut_index()`、`Compactor.compact()`、`runtime/session.py` · `SessionLog.context()`、
-`agent/context.py` · `shape_tool_result()`。测试 `tests/test_context.py`（7 个用例）；示例 `examples/04_context_compaction.py`。
+`agent/context.py` · `shape_tool_result()`。测试 `tests/test_context.py`（12 个用例）；示例 `examples/04_context_compaction.py`。
 讲解：[07 上下文工程与压缩](/core/context-engineering)。
 
 ## 7. 幂等的指令下发服务
@@ -143,7 +143,7 @@
 
 **验收**：任意位置断开重连，客户端收到的事件 seq 连续、无重复；断开期间任务照常完成。
 
-**参考**：`runtime/manager.py` · `EventHub`、`Harness.subscribe()`、`server/app.py` · `events()`、`web/app.js` · `connect()` / `onEvent()`。
+**参考**：`runtime/manager.py` · `EventHub`、`Harness.subscribe()`、`server/app.py` · `events()`、`web/views/session.js` · `connect()` / `onEvent()`。
 测试 `tests/test_runtime.py::test_sse_resume_with_last_event_id`；Web UI“事件”页签的“模拟断线重连”。
 讲解：[15 流式输出、插话与断线续传](/reliability/streaming)。
 
