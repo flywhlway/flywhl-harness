@@ -919,8 +919,8 @@ def test_a_sed_block_with_a_comma_is_read_both_ways():
 @pytest.mark.parametrize("cmd", [
     "sh --rcfile x.sh -c 'rm -rf ~'",     # sh 是 bash 时 --rcfile 带值，执行的是 -c 的脚本
     "sh --init-file x.sh -c 'rm -rf ~'",
-    "sh --rcfile x.sh <<< 'rm -rf ~'",
-    "bash -oc posix 'rm -rf ~'",          # -o 在簇中间也从后面的参数取值
+    "echo 'rm -rf ~' | sh --rcfile x.sh",  # sh 是 bash 时 x.sh 是 --rcfile 的值，脚本从标准输入读
+    "bash -oc posix 'rm -rf ~'",          # bash 里 -o 在簇中间也从后面的参数取值
     "bash -Oc extglob 'rm -rf ~'",
     "bash -eoc posix 'rm -rf ~'",
     "bash -ooc a b 'rm -rf ~'",
@@ -929,7 +929,39 @@ def test_both_readings_of_shell_options_are_checked_for_a_catastrophe(cmd):
     assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
 
 
-@pytest.mark.parametrize("cmd", ["bash -co posix ls", "bash -o posix -c ls", "sh -ec ls"])
+@pytest.mark.parametrize("cmd", ["bash -co posix ls", "bash -o posix -c ls", "sh -ec ls", "zsh -o pipefail -c ls",
+                                 "ksh -o vi -c ls", "bash -login -c ls", "bash -norc -c ls"])
 def test_shell_option_values_in_clusters_still_read(cmd):
     a = analyze(cmd)
     assert a.level == "read", (cmd, a.reasons)
+
+
+# ---------------------------------------------------------------- 第三次复审补的反例：同样只调用 analyze()
+
+@pytest.mark.parametrize("cmd", [
+    "zsh -xoshwordsplit -c 'rm -rf ~'",   # zsh、ksh 里簇中 o 后面的部分就是值：-x -o shwordsplit
+    "zsh -oerrexit -c 'rm -rf ~'",
+    "zsh +onoglob -c 'rm -rf ~'",
+    "ksh -onoglob -c 'rm -rf ~'",
+    "sh -oerrexit -c 'rm -rf ~'",         # OpenBSD 上的 sh 是 ksh
+    "bash -rcfile x -c 'rm -rf ~'",       # bash 把开头的单横线长选项当长选项：-rcfile 就是 --rcfile
+    "bash -init-file x -c 'rm -rf ~'",
+    "bash --rcfile /dev/stdin -ic ls <<< 'rm -rf ~'",   # 交互式 bash 先 source 标准输入
+])
+def test_shell_option_spellings_cannot_hide_a_catastrophe(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+def test_single_dash_rcfile_with_interactive_bash_is_not_read():
+    a = analyze("bash -rcfile x.sh -ic ls")
+    assert a.level == "external", a.reasons
+
+
+@pytest.mark.parametrize("cmd", [
+    "awk -v 'tpl={\"k\",\"v\"}' 'BEGIN{getline y < \"/etc/passwd\"; print y}' f",   # -v 的值被展开，程序位置错开
+    "timeout {5,} awk 'BEGIN{print \"a\", \"b\"; getline x < \"/etc/passwd\"; print x}' f",
+    "{awk,} 'BEGIN{print \"a\", \"b\"; getline x < \"/etc/passwd\"; print x}' f",
+])
+def test_awk_getline_outside_the_workspace_is_found_even_when_the_program_is_split(cmd):
+    a = analyze(cmd)
+    assert a.level == "external", (cmd, a.reasons)

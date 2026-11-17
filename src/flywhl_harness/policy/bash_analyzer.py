@@ -1644,15 +1644,22 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
 
     plain = _no_redirects(args)
     # sh 可能是 dash、ash（长选项都不带值），也可能就是 bash（--rcfile 带值）：两种读法都分析，取更严的
-    readings = [cmd, "bash"] if cmd == "sh" else [cmd]
+    readings = [cmd, "bash", "ksh"] if cmd == "sh" else [cmd]   # OpenBSD 上的 sh 是 ksh
     if cmd in SHELLS:
         for r in readings:
             rcfiles: list[str] = []
             if "i" in _shell_opts(plain, r, rcfiles)[0] and rcfiles:   # 交互式 shell 先执行 --rcfile 指定的文件，再执行 -c
                 a.bump("external", f"{cmd} -i 会先执行 {rcfiles[-1]}，内容无法静态分析")
+                if any(f in ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0") for f in rcfiles):
+                    for text in stdin or ():
+                        if text.strip():
+                            _recurse(text, a, f"{cmd} 的 rcfile（标准输入）")
                 break
-        if cmd == "sh" and (alt := _shell_script(plain, "bash")) is not None and alt != _shell_script(plain, cmd):
-            _shell_c(cmd, alt, a)   # sh --rcfile x.sh -c '…'：sh 是 bash 时执行的是 -c 的脚本
+        seen = [_shell_script(plain, cmd)]
+        for r in readings[1:]:   # sh --rcfile x.sh -c '…'：sh 是 bash 时执行的是 -c 的脚本
+            if (alt := _shell_script(plain, r)) is not None and alt not in seen:
+                seen.append(alt)
+                _shell_c(cmd, alt, a)
     if cmd in SHELLS and any(_reads_stdin(plain, r) for r in readings):    # sh <<< '...'、sh <<EOF、echo ... | sh：标准输入就是脚本
         for text in stdin or ():
             if text.strip():
@@ -2111,7 +2118,7 @@ def _awk(cmd: str, args: list[str], a: CommandAnalysis) -> None:
         a.bump("external", f"{cmd} 程序里执行命令、写文件或加载扩展")
     elif _AWK_ARGV.search(everything):
         a.bump("external", f"{cmd} 程序改写 ARGV，要读的文件在命令行上看不到")
-    elif any(m[1] is None or _is_outside(m[1], a) for m in _AWK_READ.finditer(script.text)):
+    elif any(m[1] is None or _is_outside(m[1], a) for m in _AWK_READ.finditer(everything)):
         a.bump("external", f"{cmd} 程序用 getline 读工作区外或位置不定的文件")
     elif any(c in "dop" for c, _, _ in script.opts):
         a.bump("write", f"{cmd} 把调试信息写入文件")
@@ -2183,21 +2190,33 @@ _SHELL_LONG_VALUED = {"bash": {"--rcfile", "--init-file"}, "zsh": {"--emulate"},
                                "--profile-startup"}}
 
 
+# bash 的长选项（shell.c 的 long_args）。在第一个短选项之前，写成单横线也算：bash -rcfile x 就是 bash --rcfile x
+_BASH_LONG = {"debug", "debugger", "dump-po-strings", "dump-strings", "help", "init-file", "login", "noediting",
+              "noprofile", "norc", "posix", "pretty-print", "protected", "rcfile", "restricted", "verbose", "version",
+              "wordexp"}
+# -o 的值：bash、dash、ash 不管 -o 在簇里哪个位置，都从后面的参数里取；zsh、ksh、mksh 里簇中 o 后面的部分就是值
+# （zsh -xoshwordsplit 就是 -x -o shwordsplit），o 在末尾时才取下一个参数
+_INLINE_O = {"zsh", "ksh", "mksh"}
+
+
 def _shell_opts(args: list[str], cmd: str = "", rcfiles: list[str] | None = None) -> tuple[set[str], list[str]]:
     """拆开 shell 的选项，返回 (短选项字母, 选项之后的参数)。短选项可以合写（``-lc``、``-ec``、``-xc``）；
-    ``-o`` 带一个值，``-O`` 只在 bash、sh 里带值（zsh 的 -O 是开关），长选项是否带值查 _SHELL_LONG_VALUED。
+    ``-o`` 带一个值（取法见 _INLINE_O），``-O`` 只在 bash、sh 里带值（zsh 的 -O 是开关），长选项是否带值查 _SHELL_LONG_VALUED。
     fish 的 ``--command``、``--init-command`` 就是 ``-c``，可以缩写，脚本放到返回的参数最前面。
     单独一个 ``-`` 和 ``--`` 一样结束选项：``sh -`` 从标准输入读脚本。传了 rcfiles 时，``--rcfile``、``--init-file`` 的值记进去。"""
     letters: set[str] = set()
     scripts: list[str] = []
     valued = _SHELL_LONG_VALUED.get(cmd, set())
     big_o = cmd in ("", "bash", "sh")
+    long_phase = cmd == "bash"
     i = 0
     while i < len(args):
         x = args[i]
         if x in ("--", "-"):
             i += 1
             break
+        if long_phase and x[:1] == "-" and x[1:] in _BASH_LONG:
+            x = "-" + x
         if x.startswith("--"):
             name, eq, val = x.partition("=")
             i += 1
@@ -2214,10 +2233,15 @@ def _shell_opts(args: list[str], cmd: str = "", rcfiles: list[str] | None = None
                 if rcfiles is not None and name in ("--rcfile", "--init-file"):
                     rcfiles.append(val)
         elif len(x) > 1 and x[0] in "-+":
+            long_phase = False
+            flags = x[1:]
+            if cmd in _INLINE_O and (j := flags.find("o")) >= 0:
+                i += 1 if j < len(flags) - 1 else 2
+                flags = flags[:j]
+            else:   # bash -oc posix 'rm -rf ~'：o 在簇中间也取后面的参数
+                i += 1 + sum(c == "o" or (c == "O" and big_o) for c in flags)
             if x[0] == "-":
-                letters |= set(x[1:])
-            # -o（bash、sh 里还有 -O）不管在簇里哪个位置，都从后面的参数里取值：bash -oc posix 'rm -rf ~'
-            i += 1 + sum(c == "o" or (c == "O" and big_o) for c in x[1:])
+                letters |= set(flags)
         else:
             break
     return letters, scripts + args[i:]
