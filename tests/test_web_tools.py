@@ -283,56 +283,104 @@ async def test_direct_fetch_redirects_cannot_reach_denied_domains_or_carry_keys(
 NOTICE = "https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202604161821262774"
 
 
+OTHER = "https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202512311811991575"
+LIST = "https://xinsanban.eastmoney.com/list"
+
+
+def keys(*urls: str) -> set[str]:
+    from flywhl_harness.net.search import url_key
+
+    return {url_key(u) for u in urls}
+
+
 @pytest.mark.parametrize("url,ok", [
-    (NOTICE + "&pageIndex=3", True),                              # 原网址没有页码：加一个
-    (NOTICE + "&pageindex=3", True),                              # 常见写法都认
-    (NOTICE + "&pageIndex=0", True),
-    (NOTICE + "&pageIndex=9999", True),
-    ("https://xinsanban.eastmoney.com/Article/NoticeContent?pageIndex=24&id=AN202604161821262774", False),  # 新加的页码不在末尾：位置也能编码
-    (NOTICE + "&PAGEINDEX=3", False),                             # 参数名大小写随意：光参数名就能编码十几比特
-    (NOTICE + "&pageIndex=03", False),                            # 前导零：同一页多一种写法
-    (NOTICE + "&pageIndex=10000", False),                         # 5 位数：页码带出的信息有上限
-    (NOTICE + "&pageIndex=3a", False),                            # 不是数字
-    (NOTICE + "&pageIndex=3&pageIndex=4", False),                 # 两个页码
-    (NOTICE + "&pageIndex=3&d=secret", False),                    # 多了别的参数
-    ("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202604161821262775&pageIndex=3", False),   # 别的公告
-    ("https://xinsanban.eastmoney.com/Article/Other?id=AN202604161821262774&pageIndex=3", False),            # 别的路径
-    ("https://evil.example/Article/NoticeContent?id=AN202604161821262774&pageIndex=3", False),               # 别的主机
-    (NOTICE + "&%70ageIndex=3", False),                           # 编码过的参数名不认
-    ("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN20260416182126277%34&pageIndex=3", False),   # 其余参数换了编码写法
+    (NOTICE + "&pageIndex=2", True),                              # 原网址没有页码：加一个，从第二页读起
+    (NOTICE + "&pageindex=1", True),                              # 常见写法都认；从 0 数的站点第二页是 1
+    (NOTICE + "&pageIndex=3", False),                             # 还没翻过就跳页：页码随意的话每次能带出约 13 比特
+    (NOTICE + "&pageIndex=0", False),
+    (NOTICE + "&pageIndex=9999", False),
+    (NOTICE + "&offset=20", False),                               # 偏移类：不知道每页几条，第一次要确认
+    ("https://xinsanban.eastmoney.com/Article/NoticeContent?pageIndex=2&id=AN202604161821262774", False),  # 新加的页码不在末尾：位置也能编码
+    (NOTICE + "&PAGEINDEX=2", False),                             # 参数名大小写随意：光参数名就能编码十几比特
+    (NOTICE + "&pageIndex=02", False),                            # 前导零：同一页多一种写法
+    (NOTICE + "&pageIndex=2a", False),                            # 不是数字
+    (NOTICE + "&pageIndex=2&pageIndex=3", False),                 # 两个页码
+    (NOTICE + "&pageIndex=2&d=secret", False),                    # 多了别的参数
+    (OTHER + "&pageIndex=2", False),                              # 别的公告
+    ("https://xinsanban.eastmoney.com/Article/Other?id=AN202604161821262774&pageIndex=2", False),            # 别的路径
+    ("https://evil.example/Article/NoticeContent?id=AN202604161821262774&pageIndex=2", False),               # 别的主机
+    (NOTICE + "&%70ageIndex=2", False),                           # 编码过的参数名不认
+    ("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN20260416182126277%34&pageIndex=2", False),   # 其余参数换了编码写法
 ])
 def test_page_of_seen(url, ok):
-    from flywhl_harness.net.search import url_key
     from flywhl_harness.tools.web import page_of_seen
 
-    seen = {url_key(NOTICE), url_key("https://xinsanban.eastmoney.com/list?page=2&cat=a")}
-    assert page_of_seen(url, seen) is ok
+    assert page_of_seen(url, keys(NOTICE, LIST + "?page=2&cat=a")) is ok
 
 
 def test_page_of_seen_when_the_seen_url_already_has_a_page():
-    from flywhl_harness.net.search import url_key
     from flywhl_harness.tools.web import page_of_seen
 
-    seen = {url_key("https://xinsanban.eastmoney.com/list?page=2&cat=a")}
-    assert page_of_seen("https://xinsanban.eastmoney.com/list?page=7&cat=a", seen)
-    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=a&page=7", seen)   # 换了顺序
-    assert not page_of_seen("https://xinsanban.eastmoney.com/list?Page=7&cat=a", seen)   # 参数名换了大小写
-    assert not page_of_seen("https://xinsanban.eastmoney.com/list?page=2&cat=a&pn=3", seen)   # 原来有页码，又加一个
-    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=b&page=7", seen)
-    assert not page_of_seen("https://xinsanban.eastmoney.com/list?cat=a", seen)      # 去掉页码不是翻页
+    seen = keys(LIST + "?page=2&cat=a")
+    assert page_of_seen(LIST + "?page=3&cat=a", seen)
+    assert not page_of_seen(LIST + "?page=7&cat=a", seen)          # 跳页
+    assert not page_of_seen(LIST + "?page=1&cat=a", seen)          # 往回翻
+    assert not page_of_seen(LIST + "?cat=a&page=3", seen)          # 换了顺序
+    assert not page_of_seen(LIST + "?Page=3&cat=a", seen)          # 参数名换了大小写
+    assert not page_of_seen(LIST + "?page=2&cat=a&pn=3", seen)     # 原来有页码，又加一个
+    assert not page_of_seen(LIST + "?cat=b&page=3", seen)
+    assert not page_of_seen(LIST + "?cat=a", seen)                 # 去掉页码不是翻页
 
 
-async def test_pages_of_a_seen_url_are_read_without_asking(ws):
-    """搜索结果里出现过公告首页，翻到第 3 页、第 24 页不再逐页确认；别的公告照旧要确认。无人值守（拒绝一切 ask）下跑，问了就会失败。"""
+def test_page_of_seen_follows_the_pages_already_read():
+    """下一页由读成功过的页定死：重读、跳页、换参数名都不算；别的网址读过的页不算数。"""
+    from flywhl_harness.tools.web import _paging, page_of_seen
+
+    seen = keys(NOTICE)
+    done = keys(NOTICE + "&pageIndex=2", NOTICE + "&pageIndex=3")
+    assert page_of_seen(NOTICE + "&pageIndex=4", seen, done)
+    assert not page_of_seen(NOTICE + "&pageIndex=3", seen, done)   # 重读：读哪一页也能编码
+    assert not page_of_seen(NOTICE + "&pageIndex=5", seen, done)
+    assert not page_of_seen(NOTICE + "&pn=4", seen, done)          # 换个参数名从头再选一次
+    assert _paging(NOTICE + "&pn=4", seen, done) is False          # 是翻页，只是不能免确认：提示要说清楚
+    assert _paging("https://evil.example/?pageIndex=4", seen, done) is None
+    assert page_of_seen(NOTICE + "&pageIndex=2", seen, keys(OTHER + "&pageIndex=7"))
+
+
+def test_page_of_seen_steps_offsets_by_the_page_size():
+    from flywhl_harness.tools.web import page_of_seen
+
+    seen = keys(LIST + "?cat=a")
+    assert not page_of_seen(LIST + "?cat=a&offset=20", seen)
+    done = keys(LIST + "?cat=a&offset=20")                         # 第一次偏移经过确认之后，步长就定了
+    assert page_of_seen(LIST + "?cat=a&offset=40", seen, done)
+    assert not page_of_seen(LIST + "?cat=a&offset=60", seen, done)
+    assert not page_of_seen(LIST + "?cat=a&offset=41", seen, done)
+    assert page_of_seen(LIST + "?start=20&cat=a", keys(LIST + "?start=10&cat=a"))
+    assert not page_of_seen(LIST + "?start=11&cat=a", keys(LIST + "?start=10&cat=a"))
+
+
+async def test_pages_of_a_seen_url_are_read_in_order_without_asking(ws):
+    """搜索结果里出现过公告首页，按顺序读第 2、3 页不再逐页确认；跳页、别的公告照旧要确认。
+    无人值守（拒绝一切 ask）下跑，问了就会失败。"""
     net = web_net([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}])
-    script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=3"), fetch_call(NOTICE + "&pageIndex=24"),
-              fetch_call("https://xinsanban.eastmoney.com/Article/NoticeContent?id=AN202512311811991575&pageIndex=21"), "好"]
+    script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=2"), fetch_call(NOTICE + "&pageIndex=3"),
+              fetch_call(NOTICE + "&pageIndex=24"), fetch_call(OTHER + "&pageIndex=2"), "好"]
     h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch")
     res = await h.run("调研先普科技")
-    p3, p24, other = tool_results(res.events, "web_fetch")
-    assert not p3["is_error"] and not p24["is_error"]
-    assert other["status"] == "rejected"
-    assert fetches(net) == [NOTICE + "&pageIndex=3", NOTICE + "&pageIndex=24"]
+    p2, p3, jump, other = tool_results(res.events, "web_fetch")
+    assert not p2["is_error"] and not p3["is_error"]
+    assert jump["status"] == "rejected" and other["status"] == "rejected"
+    assert fetches(net) == [NOTICE + "&pageIndex=2", NOTICE + "&pageIndex=3"]
+
+
+async def test_out_of_order_pages_say_why(ws):
+    net = web_net([{"title": "公开转让说明书", "url": NOTICE, "summary": "先普科技"}])
+    script = [search_call("先普科技 公开转让说明书"), fetch_call(NOTICE + "&pageIndex=5"), "好"]
+    h = make_web_harness(ws, script, net, on_ask="deny", web__default="fetch", web__fetch_scope="cited")
+    end = tool_results((await h.run("调研先普科技")).events, "web_fetch")[0]
+    assert end["status"] == "denied" and "一页接一页" in end["content"]
+    assert fetches(net) == []
 
 
 async def test_bypass_never_parks_a_web_fetch_on_a_human(ws):
