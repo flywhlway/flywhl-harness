@@ -1643,11 +1643,17 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
             break
 
     plain = _no_redirects(args)
+    # sh 可能是 dash、ash（长选项都不带值），也可能就是 bash（--rcfile 带值）：两种读法都分析，取更严的
+    readings = [cmd, "bash"] if cmd == "sh" else [cmd]
     if cmd in SHELLS:
-        rcfiles: list[str] = []
-        if "i" in _shell_opts(plain, cmd, rcfiles)[0] and rcfiles:   # 交互式 shell 先执行 --rcfile 指定的文件，再执行 -c
-            a.bump("external", f"{cmd} -i 会先执行 {rcfiles[-1]}，内容无法静态分析")
-    if cmd in SHELLS and _reads_stdin(plain, cmd):    # sh <<< '...'、sh <<EOF、echo ... | sh：标准输入就是脚本
+        for r in readings:
+            rcfiles: list[str] = []
+            if "i" in _shell_opts(plain, r, rcfiles)[0] and rcfiles:   # 交互式 shell 先执行 --rcfile 指定的文件，再执行 -c
+                a.bump("external", f"{cmd} -i 会先执行 {rcfiles[-1]}，内容无法静态分析")
+                break
+        if cmd == "sh" and (alt := _shell_script(plain, "bash")) is not None and alt != _shell_script(plain, cmd):
+            _shell_c(cmd, alt, a)   # sh --rcfile x.sh -c '…'：sh 是 bash 时执行的是 -c 的脚本
+    if cmd in SHELLS and any(_reads_stdin(plain, r) for r in readings):    # sh <<< '...'、sh <<EOF、echo ... | sh：标准输入就是脚本
         for text in stdin or ():
             if text.strip():
                 _recurse(text, a, f"{cmd} 的标准输入")
@@ -1746,7 +1752,7 @@ def _classify_words(expanded: list[str], a: CommandAnalysis, stdin: list[str] | 
     elif cmd in INTERPRETERS and any(x in ("-c", "-e", "--eval") or re.fullmatch(r"-[A-Za-z]*[ce]", x) for x in args):
         a.bump("external", f"{cmd} 内联代码无法静态分析")   # 含合写的短选项：python3 -Ic、perl -ne、node -pe
         a.inline = True
-    elif cmd in SHELLS and _reads_stdin(plain, cmd):
+    elif cmd in SHELLS and any(_reads_stdin(plain, r) for r in readings):
         a.bump("external", f"{cmd} 从标准输入执行脚本，内容无法静态分析")
     elif cmd in ("python", "python3") and args[:1] in (["--version"], ["-V"]):
         a.bump("read", "查询版本")
@@ -2210,7 +2216,8 @@ def _shell_opts(args: list[str], cmd: str = "", rcfiles: list[str] | None = None
         elif len(x) > 1 and x[0] in "-+":
             if x[0] == "-":
                 letters |= set(x[1:])
-            i += 2 if x[-1] == "o" or (x[-1] == "O" and big_o) else 1
+            # -o（bash、sh 里还有 -O）不管在簇里哪个位置，都从后面的参数里取值：bash -oc posix 'rm -rf ~'
+            i += 1 + sum(c == "o" or (c == "O" and big_o) for c in x[1:])
         else:
             break
     return letters, scripts + args[i:]

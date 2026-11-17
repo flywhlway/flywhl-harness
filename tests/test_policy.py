@@ -914,3 +914,22 @@ def test_a_sed_block_with_a_comma_is_read_both_ways():
     """花括号里有逗号：写在引号里是一个块；没加引号时 shell 展开成 1,3s/a 和 1,3b/c/，sed 程序认不出。
     分词之后分不出是哪种，两种读法取更严的，要人确认。"""
     assert analyze("sed '1,3{s/a,b/c/}' f").level == "external"
+
+
+@pytest.mark.parametrize("cmd", [
+    "sh --rcfile x.sh -c 'rm -rf ~'",     # sh 是 bash 时 --rcfile 带值，执行的是 -c 的脚本
+    "sh --init-file x.sh -c 'rm -rf ~'",
+    "sh --rcfile x.sh <<< 'rm -rf ~'",
+    "bash -oc posix 'rm -rf ~'",          # -o 在簇中间也从后面的参数取值
+    "bash -Oc extglob 'rm -rf ~'",
+    "bash -eoc posix 'rm -rf ~'",
+    "bash -ooc a b 'rm -rf ~'",
+])
+def test_both_readings_of_shell_options_are_checked_for_a_catastrophe(cmd):
+    assert analyze(cmd).catastrophic, (cmd, analyze(cmd).reasons)
+
+
+@pytest.mark.parametrize("cmd", ["bash -co posix ls", "bash -o posix -c ls", "sh -ec ls"])
+def test_shell_option_values_in_clusters_still_read(cmd):
+    a = analyze(cmd)
+    assert a.level == "read", (cmd, a.reasons)
