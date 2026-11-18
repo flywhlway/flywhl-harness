@@ -187,6 +187,7 @@
 
 - 锁文件和 CI 里的 `anthropic` 从 1.13.0 升到 2.8.0，Anthropic provider 在 2.x 上测过。`anthropic` 可选依赖的下限仍是 `>=1.0`，新装会拿到 2.x。2.x 对自定义网关（`ANTHROPIC_BASE_URL`）也用 `Authorization: Bearer` 发 API Key，不再发 `X-Api-Key`，只认后者的网关要相应调整。
 - 锁文件里的 fastapi 升到 0.162.7，pytest 升到 9.2.0。
+- 锁文件里的 `opentelemetry-api` 升到 1.45.2，修复 CVE-2026-126360（特制的 `traceparent` 引起正则回溯）。它经 fastapi 和 anthropic 进入运行依赖，`pyproject.toml` 不锁版本，新装会拿到修复后的版本。
 - 工作流里的 `actions/checkout` 升到 v7，并且不再把令牌留在 git 配置里。`download-artifact`、`deploy-pages`、`upload-pages-artifact` 也升了大版本。
 
 ## [0.2.1] - 2026-11-06

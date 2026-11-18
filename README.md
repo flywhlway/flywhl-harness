@@ -168,16 +168,14 @@ CI（`.github/workflows/tests.yml`）在 Ubuntu × Python 3.11 / 3.12 / 3.13 与
 读不到真实家目录，原因见[事故复盘](docs/quality-audit/incident-2026-10-31.md)。
 要看覆盖率：`FLYWHL_COVERAGE=1 .venv/bin/python -m pytest -q`，再运行 `.venv/bin/python -m coverage report`。
 
-2026-11-05 的复现结果（候选版本 0.2.0）：
+2026-11-18 的复现结果（0.3.0 的[发布门禁](docs/quality-audit/evidence/release-gate-0.3.0.md)）：
 
 | 环境 | 离线用例 | 系统沙箱用例 |
 |---|---|---|
-| macOS，Python 3.12.13 | 851 项通过 | 26 项通过，7 项跳过 |
-| 一次性 Linux 容器，Python 3.12 | 847 项通过，4 项跳过 | 20 项通过，13 项跳过 |
+| macOS，Python 3.11～3.13 | 各 2231 项通过，1 项跳过 | 各 37 项通过，7 项跳过 |
+| 一次性 Linux 容器，Python 3.11～3.13 | 各 2228 项通过，4 项跳过 | 各 32 项通过，12 项跳过 |
 
 干净安装验收（`scripts/sandbox_acceptance.py`：装 wheel、不写配置）在这两个环境都是 23 项通过。
-0.2.1 的[发布门禁](docs/quality-audit/evidence/release-gate-0.2.1.md)（2026-11-06，一次性 Linux 容器）：离线 878 项通过、3 项跳过，系统沙箱用例 21 项通过、12 项跳过。
-之后加入的联网工具、工作区信任等改动让离线用例增加到约 1700 个，还没有发版。
 
 ## 真实模型测试
 
