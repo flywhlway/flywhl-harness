@@ -1,4 +1,5 @@
-"""联网效果评测（bench/web_eval.py）的离线部分：题目、网址提取、只认看到过的网址、汇总口径、工具名单。"""
+"""联网效果评测（bench/web_eval.py）的离线部分：题目、网址提取、只认看到过的网址、汇总口径、工具名单。
+sdist 不带 bench/，解包后跑测试时跳过。"""
 
 from __future__ import annotations
 
@@ -6,8 +7,10 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from bench import web_eval as we
-from flywhl_harness.events import E
+pytest.importorskip("bench.web_eval", reason="bench/ 不在 sdist 里")
+
+from bench import web_eval as we  # noqa: E402
+from flywhl_harness.events import E  # noqa: E402
 
 
 def test_ten_unique_questions():
