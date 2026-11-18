@@ -2,7 +2,11 @@
 
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前，次版本号的升级可能带破坏性变化，这类变化都写在“行为变化”一节。
 
-## Unreleased
+## [0.3.0] - 2026-11-19
+
+次版本，主线是让不可信仓库跑得更放心：工作区默认不信任，沙箱的只读保护和出站判定补上了缺口，`flywhl serve` 收紧了网络暴露，会话库默认按断电耐久落盘。另外新增默认关闭的联网工具，以及无人值守时放行写明命令的 `--approve-outside`。
+
+从 0.2.x 升级，先看下面的“行为变化”。最容易碰到的有三条：第一次在某个目录运行会多问一句是否信任；监听非回环地址要加 `--expose`；`network_allow` 里写成 IP 的条目可能在加载配置时报错。0.3.0 发布后，0.2.x 不再提供修复。
 
 ### 行为变化
 
@@ -178,6 +182,13 @@
 - `GIT_CONFIG_VALUE_<n>` 的值像带口令的 URL 被剥掉之后，键和计数还在，所有 git 命令都报错退出。现在整对去掉，其余的重新编号。
 - 出站代理、MCP 启动失败时，文字为空的异常（比如超时）不显示错误类型。
 - Python 3.13 及以上，取消请求先于下一段模型输出到达时，会报 `RuntimeWarning: coroutine method 'asend' ... was never awaited`，取消本身不受影响。现在令牌已取消时，`CancelToken.guard()` 先关掉还没开始等待的对象再抛出。
+
+### 依赖
+
+- 锁文件和 CI 里的 `anthropic` 从 1.13.0 升到 2.8.0，Anthropic provider 在 2.x 上测过。`anthropic` 可选依赖的下限仍是 `>=1.0`，新装会拿到 2.x。2.x 对自定义网关（`ANTHROPIC_BASE_URL`）也用 `Authorization: Bearer` 发 API Key，不再发 `X-Api-Key`，只认后者的网关要相应调整。
+- 锁文件里的 fastapi 升到 0.162.7，pytest 升到 9.2.0。
+- 锁文件里的 `opentelemetry-api` 升到 1.45.2，修复 CVE-2026-126360（特制的 `traceparent` 引起正则回溯）。它经 fastapi 和 anthropic 进入运行依赖，`pyproject.toml` 不锁版本，新装会拿到修复后的版本。
+- 工作流里的 `actions/checkout` 升到 v7，并且不再把令牌留在 git 配置里。`download-artifact`、`deploy-pages`、`upload-pages-artifact` 也升了大版本。
 
 ## [0.2.1] - 2026-11-06
 

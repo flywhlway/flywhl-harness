@@ -18,7 +18,7 @@
 """
 
 # 版本号只写这一处：pyproject 经 [tool.hatch.version] 读取。放在导入之前，子模块初始化时就能用
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from .agent.loop import AgentLoop, Outcome
 from .cancel import CancelToken, RunCancelled, RunPaused

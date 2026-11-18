@@ -149,5 +149,5 @@
   gh release view vX.Y.Z --json tagName,isPrerelease,assets --jq '{tagName, isPrerelease, assets: [.assets[].name]}'
   ```
 
-- [ ] **站点。** 标签不触发部署，`__version__` 或 `docs/` 合入 `main` 才触发。`gh run list --workflow deploy-docs.yml --limit 1` 成功，页面标注新版本：`curl -fsS https://flywhlway.github.io/flywhl-harness/ | grep -c '对应 X.Y.Z'` 大于 0。
+- [ ] **站点。** 标签不触发部署，`__version__` 或 `docs/` 合入 `main` 才触发。`gh run list --workflow deploy-docs.yml --limit 1` 成功，页面标注新版本：`curl -fsS https://flywhlway.github.io/flywhl-harness/ | grep -c '已发布 X.Y.Z'` 大于 0，英文站 `/en/` 写的是 `released X.Y.Z`。
 - [ ] **记下发布结果。** 门禁记录加“发布结果”一节：标签所在提交、运行链接、上面各项结果，走 PR 合入。

@@ -21,7 +21,8 @@
 
 | 版本 | 状态 |
 |---|---|
-| 0.2.x | 支持 |
+| 0.3.x | 支持 |
+| 0.2.x | 不再支持 |
 | 0.1.x | 不再支持 |
 
 ## 响应预期
@@ -44,16 +45,16 @@
 | 边界 | 现有行为 | 算漏洞的情况 |
 |---|---|---|
 | 系统沙箱 | 默认开启，macOS 用 sandbox-exec，Linux 用 bubblewrap。bash、命令 hook、stdio MCP 服务器和 `verify_command` 都在里面 | 里面的进程读到凭证位置；写到工作区和临时目录之外，或写了 `.flywhl/`、`flywhl.toml`、`.git/hooks`、`.git/config` 这类只读位置；连到白名单之外的主机；经 docker.sock、ssh-agent、钥匙串、`open` 这类通道让沙箱外的进程代劳；沙箱用不了时退回沙箱外执行 |
-| 人工门 | 沙箱外执行（`outside_sandbox`），以及开着沙箱时 `write`、`edit` 写沙箱里只读的位置，都要人当场确认。规则、会话授权、`auto_approve` 和 `--yes` 都放行不了，无人值守时拒绝；0.2.1 之后的版本里，`flywhl run --approve-outside` 写明模式的沙箱外命令例外 | 没经过人确认就执行了；`--approve-outside` 放行了不匹配所写模式的命令；项目配置里的高危设置没经过信任确认就生效；恶意网页绕过控制台的令牌、Host 白名单和 Origin 校验，替人批准操作或切换权限 |
+| 人工门 | 沙箱外执行（`outside_sandbox`），以及开着沙箱时 `write`、`edit` 写沙箱里只读的位置，都要人当场确认。规则、会话授权、`auto_approve` 和 `--yes` 都放行不了，无人值守时拒绝；从 0.3.0 起，`flywhl run --approve-outside` 写明模式的沙箱外命令例外 | 没经过人确认就执行了；`--approve-outside` 放行了不匹配所写模式的命令；项目配置里的高危设置没经过信任确认就生效；恶意网页绕过控制台的令牌、Host 白名单和 Origin 校验，替人批准操作或切换权限 |
 | 凭证拒绝 | [凭证位置](src/flywhl_harness/policy/sensitive.py)在 `read`、`grep`、`write`、`edit` 和 bash 上任何模式都拒绝，包括 `bypass` | 文件工具读写到凭证位置；默认沙箱下 bash 读到凭证内容 |
-| 联网工具（0.2.1 之后加入） | 默认关闭。`web_search`、`web_fetch` 只经一个出站入口：只允许 https、只放行公网地址、连接钉在核过的 IP 上、每跳重定向重新核验。`fetch_scope = "ask"` 时没出现过的网址要人确认，会话读过不可信内容后 `--yes` 和完全放行模式也不放行。项目配置里的 `[web]` 只能收紧 | 请求发到回环、内网、链路本地或云元数据地址；本会话没出现过、不在 `fetch_allow` 里、也没经人确认（当场或本会话授权）的网址被读了（按顺序翻到出现过的网址的下一页除外）；项目配置放宽了 `[web]` |
+| 联网工具（0.3.0 加入） | 默认关闭。`web_search`、`web_fetch` 只经一个出站入口：只允许 https、只放行公网地址、连接钉在核过的 IP 上、每跳重定向重新核验。`fetch_scope = "ask"` 时没出现过的网址要人确认，会话读过不可信内容后 `--yes` 和完全放行模式也不放行。项目配置里的 `[web]` 只能收紧 | 请求发到回环、内网、链路本地或云元数据地址；本会话没出现过、不在 `fetch_allow` 里、也没经人确认（当场或本会话授权）的网址被读了（按顺序翻到出现过的网址的下一页除外）；项目配置放宽了 `[web]` |
 
 ### 不算漏洞
 
 - 模型被注入后提出危险操作，但被上面的防线拦住，或者是人批准的。
 - `bypass`、`--yes` 放行了本来要确认的操作，这是它们的作用；硬拒绝和人工门不受影响。
 - `sandbox = "off"` 或 `--sandbox off` 之后，bash 里运行时才拼出来的路径认不出。这是静态分析的上限，要靠沙箱兜底。
-- 已公开的缺口：0.2.x 上工作区文件不是污点来源、项目指令文件进入系统提示词，0.2.1 之后的版本改成工作区默认不信任，剩下的是信任过的工作区里外来内容（导出的 Issue 文本这类）不算污点；密钥环境变量只按变量名剥离；写进工作区的内容之后在沙箱外执行，比如 `Makefile`、`.envrc`、子模块配置。
+- 已公开的缺口：0.2.x 上工作区文件不是污点来源、项目指令文件进入系统提示词，0.3.0 起改成工作区默认不信任，剩下的是信任过的工作区里外来内容（导出的 Issue 文本这类）不算污点；密钥环境变量只按变量名剥离；写进工作区的内容之后在沙箱外执行，比如 `Makefile`、`.envrc`、子模块配置。
 - 内核漏洞。系统沙箱和宿主共用内核，跑不可信代码时请用容器或 microVM。
 - `docs/` 站点依赖的问题。这些包只用来构建站点，不进 wheel 和 sdist。
 
@@ -65,6 +66,6 @@ flywhl-harness is a local, single-user developer tool. Multi-user and multi-tena
 
 Report vulnerabilities privately through [GitHub Security Advisories](https://github.com/flywhlway/flywhl-harness/security/advisories). If the **Report a vulnerability** button is not shown, open an Issue that only says you have a security problem to discuss, with no details, and a maintainer will open a private draft advisory with you.
 
-Only the latest 0.x minor version is supported; 0.1.x is not. The project has one maintainer, so these are targets rather than guarantees: an acknowledgement within 7 days and an assessment within 30 days.
+Only the latest 0.x minor version is supported, currently 0.3.x; 0.2.x and 0.1.x are not. The project has one maintainer, so these are targets rather than guarantees: an acknowledgement within 7 days and an assessment within 30 days.
 
-Prompt injection alone is not a vulnerability. Bypassing the OS sandbox, the human approval gate, the credential denial or, in versions after 0.2.1, the web tools' egress checks is.
+Prompt injection alone is not a vulnerability. Bypassing the OS sandbox, the human approval gate, the credential denial or, from 0.3.0 on, the web tools' egress checks is.
