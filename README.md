@@ -189,7 +189,7 @@ Stop 验收、计划、规划模式、子代理契约、上下文压缩、预算
 FLYWHL_LIVE_MODEL=kimi:kimi-k2.6 .venv/bin/python -m pytest -m live tests/live   # 换一个被测模型
 ```
 
-2026-11-06，0.2.1 的发布门禁只带 DeepSeek 密钥：25 项通过，8 项因缺其他供应商的密钥跳过（约 29 万 token、0.045 美元）。
+2026-11-18，0.3.0 的[发布门禁](docs/quality-audit/evidence/release-gate-0.3.0.md)只带 DeepSeek 密钥：29 项通过，9 项因缺其他供应商的密钥跳过（约 27 万 token、0.036 美元）。
 2026-11-05，候选版本 0.2.0 上 33 个用例全部通过（约 28 万 token、0.03 美元），记录见[发布门禁](docs/quality-audit/evidence/release-gate-0.2.0.md)。
 2026-10-16 复现：33 个用例全部通过（约 34 万 token、0.05 美元）。此前本机记录的 30 个失败逐项排查过：
 缺密钥 0 个（没有密钥只会跳过，不会失败）；当时的运行环境问题 29 个（同样的密钥重跑即通过）；真实缺陷 1 个。
