@@ -30,8 +30,8 @@
 | 回答语言跟随用户 | 一次性 Linux 容器，`deepseek:deepseek-flash` | 英文提问用英文答，中文提问用中文答 |
 | 基准彩排 | 一次性 Docker 容器，脚本化模型，提交 `0293407` | 符合预期：60 条试验，普通任务两种配置都过，5 个沙箱敏感任务只有关沙箱才过；回放 60 条分叉 0；脱敏命中 0 |
 | 基准回归 `2026-11-r4` | 一次性 Docker 容器，`deepseek:deepseek-flash`，提交 `0293407`（代码和候选相同），30 个任务 × 2 种配置 × 3 次 | 普通任务两种配置都是 75/75；5 个沙箱敏感任务开沙箱 0/3、关沙箱 3/3；15 个失败都是沙箱边界，harness 缺陷 0；回放新轨迹 180 条、已发布轨迹 555 条，分叉都是 0；1.00 美元。见[回归记录](bench-regress-2026-11-18.md) |
-| 全历史密钥扫描 | 待补 | 待补 |
-| CI | 待补 | 待补 |
+| 全历史密钥扫描 | `scripts/secret_scan.sh`，gitleaks v8.30.1，GitHub 上全部引用 | 246 个提交，命中 1 条，是测试假值，见[扫描记录](secret-scan-2026-11-18.md) |
+| CI | `tests.yml` | `main` 上 `b337a50` 的运行全部通过（macOS 沙箱验收第一次因 runner 排队被取消，重跑通过）；发版 PR [#54](https://github.com/flywhlway/flywhl-harness/pull/54) 的必需检查在合入前全部通过 |
 
 live 跳过的 9 项都缺密钥：Kimi 2 项、通义千问 2 项、MiniMax 1 项、OpenRouter 2 项、降级链 1 项（降级模型是通义千问）、博查 1 项。
 
@@ -70,5 +70,5 @@ live 跳过的 9 项都缺密钥：Kimi 2 项、通义千问 2 项、MiniMax 1 �
 
 - **放行判定没有改。** [release-readiness.md](../release-readiness.md) 仍是首轮的判定。PR #4 的 `src/` 改动还没有逐行审，Dependabot 安全更新和私密漏洞报告也没开，改判留到这些做完之后。
 - **9 个 live 场景没有这个版本的证据。** 只传了 DeepSeek 一家的密钥，上面列出的其他供应商、降级链和博查场景都跳过了。
-- **模型结尾没有正文时，用户拿不到说明。** 基准回归里 1 次试验（`env-local-api` 开沙箱 #1）在被沙箱拦下后，最后一个回合只有思考就结束了，Run 记为完成。180 次里只有这 1 次。harness 只在回复因长度上限截断、只剩思考时追问一次（`agent/loop.py`），模型正常结束回合、没有正文时不追问。
+- **模型结尾没有正文时，用户拿不到说明。** 基准回归里 1 次试验（`env-local-api` 开沙箱 #1）在被沙箱拦下后，最后一个回合只有思考就结束了，Run 记为完成。180 次里只有这 1 次。harness 只在回复因长度上限截断、只剩思考时追问，最多 3 次（`agent/loop.py`），模型正常结束回合、没有正文时不追问。
 - **站点依赖的 6 个 npm 漏洞。** 都在文档站的构建工具链里（vite、esbuild、vitepress、vitepress-plugin-mermaid、mermaid、katex），不进 Python 包。vite 和 esbuild 的几条针对开发服务器，发布的站点是构建出的静态页面；katex 那条要先有原型污染才能利用。`npm audit fix --force` 要把 mermaid 升到不兼容的大版本，这次不动。
