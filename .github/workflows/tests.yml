@@ -76,7 +76,7 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/fresh/bin/python" dist/*.whl
       - name: 验收
         run: '"$RUNNER_TEMP/fresh/bin/python" scripts/sandbox_acceptance.py --internet --json sandbox-acceptance.json'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: sandbox-acceptance-${{ matrix.os }}
@@ -120,7 +120,7 @@ jobs:
           uvx -q pip-audit@2.10.1 -r requirements-runtime.txt --disable-pip --progress-spinner off -f markdown > pip-audit.md 2>&1 || rc=$?
           { echo "## 依赖漏洞（pip-audit）"; cat pip-audit.md; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-and-audit
