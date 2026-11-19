@@ -7,7 +7,7 @@
     ┌─► 安全点（取消/暂停检查） ─► 注入插话（steer） ─► 预算检查（软阈值提醒 / 硬阈值收尾）
     │      ─► 上下文整形（水位估算 → 必要时压缩） ─► 注入 system-reminder（计划复述、循环警告…）
     │      ─► 模型调用（流式；重试/降级在接入层完成） ─► assistant 消息落盘（检查点锚点）
-    │      ─► 有工具调用？ ──否──► 排队消息（follow-up）？ ─► Stop 验收（hooks + 验证器）─► 结束
+    │      ─► 有工具调用？ ──否──► 排队消息（follow-up）？ ─► 没有正文？（追问） ─► Stop 验收（hooks + 验证器）─► 结束
     │              │是
     │              ▼
     │         工具执行（权限 → hooks → 审批 → intent → 执行 → 结果按原序落盘）─► 循环守卫
@@ -40,7 +40,7 @@ from typing import Any, AsyncIterator
 from .._utils import clip, new_id, now
 from ..cancel import RunCancelled, RunPaused
 from ..events import E, Event
-from ..llm.base import ErrorKind, ModelRequest, ProviderError
+from ..llm.base import ErrorKind, ModelRequest, ProviderError, has_payload
 from ..llm.native import NATIVE_SPECS
 from ..llm.replay import context_fingerprint
 from ..policy.hooks import HookEvent, HookInput
@@ -55,6 +55,7 @@ from .run_context import RunContext
 
 
 OUTPUT_BOOST_CAP = 65_536   # 截断后自动提高输出上限的天花板：再长的单次输出，该拆成几步写
+EMPTY_REPLY_NUDGES = 1      # 回合结束却没有正文时追问几次（每个 Run 合计）：追问过仍然没有，就不是“没注意”了
 
 
 @dataclass
@@ -226,6 +227,24 @@ class AgentLoop:
                         yield ev
                     yield self._ev(E.TURN_END, turn=self.turn)
                     continue
+                if not has_payload(msg):
+                    # 回合正常结束，却只有思考（或什么都没有）：用户拿不到结果，也不知道卡在哪，不能按“自然完成”收尾。
+                    # 先追问；放在验收之前：Stop hook 拿到的 last_message 是空的，验收命令也不该为一条空回复跑一遍。
+                    # 这条消息同样不会回传（见 llm/base.py has_payload），提示里要说明那段思考不会保留
+                    n = rc.state.get("empty_replies", 0)
+                    if n < EMPTY_REPLY_NUDGES:
+                        rc.state["empty_replies"] = n + 1
+                        text = ("你上一轮只有思考就结束了回合，没有输出正文，也没有调用工具，这段思考不会保留，用户什么也没看到。"
+                                if msg.thinking else "你上一轮的回复是空的：没有正文，也没有调用工具，用户什么也没看到。")
+                        text += "请用正文说明结果：做完了就给出结论；没做完或做不下去，说清卡在哪一步、原因是什么。还要动手的话直接调用工具。"
+                        yield self._append(user_message(reminder(text), kind=MsgKind.REMINDER))
+                        yield self._ev(E.TURN_END, turn=self.turn)
+                        continue
+                    yield self._ev(E.NOTICE, level="warn", code="empty_reply",
+                                   text="模型结束回合时没有输出正文，追问后仍然没有，按未完成收尾")
+                    self.outcome = Outcome("incomplete", "模型结束回合时没有输出正文，追问后仍然没有")
+                    yield self._ev(E.TURN_END, turn=self.turn)
+                    return
                 gaps = await self._stop_gaps(msg)
                 for ev in self._hook_notices():
                     yield ev

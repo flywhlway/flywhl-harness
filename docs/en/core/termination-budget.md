@@ -22,6 +22,8 @@ Three failures are common. The model claims done when it is not. The model repea
 
 **Stop checks.** A model saying "done" is a stop request. `_stop_gaps()` checks unfinished todos written in this run (`verify_todos`), the `verify_command` exit code (run in the same sandbox as bash), and Stop hooks. If gaps exist, the loop appends them as feedback and continues, up to `max_stop_blocks` (3) times. After that the run ends as `incomplete`, never `completed`. The feedback tells the model to say so honestly if it cannot finish, which gives it an exit other than inventing a success. In `plan` mode the todo and command checks are skipped, because the plan is the product and its items are meant to stay pending.
 
+**Empty final replies.** Before the stop checks, the loop looks at whether the final reply has anything to show. If it holds only thinking (or nothing) and no tool calls, the loop appends one reminder asking for a plain-text result or the point where the model got stuck, and says the thinking will not be kept. If the next reply is still empty, the run ends as `incomplete` with an `empty_reply` warning. The nudge happens at most once per run and is counted separately from truncation continuations.
+
 ## Key code
 
 | Location | What it does |

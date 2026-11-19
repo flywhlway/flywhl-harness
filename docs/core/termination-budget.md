@@ -10,7 +10,7 @@
 
 | 来源 | 触发条件 | 结束状态 | 设置位置 |
 |---|---|---|---|
-| 自然完成 | 模型不再调用工具，且没有排队输入 | 验收通过 → `completed`；验收多次不通过 → `incomplete` | `_body()` 无工具分支 |
+| 自然完成 | 模型不再调用工具，且没有排队输入 | 验收通过 → `completed`；验收多次不通过、或追问后仍没有正文 → `incomplete` | `_body()` 无工具分支 |
 | 限额 | 轮次 / 工具调用 / token / 费用达到上限 | `budget_exhausted` | `_body()` 顶部 `budget.check()` |
 | | 墙钟时间达到上限 | `timed_out` | 同上 |
 | | 循环守卫判定无进展 | `loop_detected` | `_body()` 工具分支之后 |
@@ -25,6 +25,7 @@ stateDiagram-v2
     direction LR
     running --> completed: 无工具调用 且 验收通过
     running --> incomplete: 验收阻止次数达到 max_stop_blocks
+    running --> incomplete: 结束回合没有正文，追问一次后仍然没有
     running --> budget_exhausted: 轮次/工具/token/费用 硬阈值
     running --> timed_out: 墙钟 硬阈值
     running --> loop_detected: LoopGuard stop
@@ -364,6 +365,9 @@ if gaps:
 - **验证命令只在模型想停下时执行**，而不是每次编辑后。配置了 `pytest -q` 的 Harness，连一个纯问答 Run 也会在结束时跑一遍测试——这正是限额与验收要按任务类型配置的原因之一。
 
 `tests/test_loop.py::test_todo_verification` 演示了计划验收：模型第一次说“好了”时计划里还有 `pending` 项，被阻止；更新计划后才以 `completed` 结束。
+
+验收之前还有一道检查：最后一条回复只有思考（或者是空的），也没有工具调用，用户就拿不到任何说明。Loop 先追问一次，要求用正文说明结果或卡在哪一步，并告诉模型那段思考不会保留。
+追问后仍然没有正文，Run 以 `incomplete` 结束并发 `empty_reply` 警告，不再跑验收。每个 Run 只追问一次，和截断后的续写分开计数，用例见 `tests/test_empty_reply.py`。
 
 ## 过早停止与虚报完成
 
